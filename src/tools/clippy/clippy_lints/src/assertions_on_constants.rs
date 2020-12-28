@@ -1,6 +1,5 @@
 use crate::consts::{constant, Constant};
-use crate::utils::paths;
-use crate::utils::{is_direct_expn_of, is_expn_of, match_function_call, snippet_opt, span_lint_and_help};
+use crate::utils::{is_direct_expn_of, is_expn_of, match_panic_call, snippet_opt, span_lint_and_help};
 use if_chain::if_chain;
 use rustc_ast::ast::LitKind;
 use rustc_hir::{Expr, ExprKind, PatKind, UnOp};
@@ -29,8 +28,8 @@ declare_clippy_lint! {
 
 declare_lint_pass!(AssertionsOnConstants => [ASSERTIONS_ON_CONSTANTS]);
 
-impl<'a, 'tcx> LateLintPass<'a, 'tcx> for AssertionsOnConstants {
-    fn check_expr(&mut self, cx: &LateContext<'a, 'tcx>, e: &'tcx Expr<'_>) {
+impl<'tcx> LateLintPass<'tcx> for AssertionsOnConstants {
+    fn check_expr(&mut self, cx: &LateContext<'tcx>, e: &'tcx Expr<'_>) {
         let lint_true = |is_debug: bool| {
             span_lint_and_help(
                 cx,
@@ -72,7 +71,7 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for AssertionsOnConstants {
             }
             if_chain! {
                 if let ExprKind::Unary(_, ref lit) = e.kind;
-                if let Some((Constant::Bool(is_true), _)) = constant(cx, cx.tables, lit);
+                if let Some((Constant::Bool(is_true), _)) = constant(cx, cx.typeck_results(), lit);
                 if is_true;
                 then {
                     lint_true(true);
@@ -114,14 +113,14 @@ enum AssertKind {
 /// ```
 ///
 /// where `message` is any expression and `c` is a constant bool.
-fn match_assert_with_message<'a, 'tcx>(cx: &LateContext<'a, 'tcx>, expr: &'tcx Expr<'_>) -> Option<AssertKind> {
+fn match_assert_with_message<'tcx>(cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>) -> Option<AssertKind> {
     if_chain! {
         if let ExprKind::Match(ref expr, ref arms, _) = expr.kind;
         // matches { let _t = expr; _t }
         if let ExprKind::DropTemps(ref expr) = expr.kind;
         if let ExprKind::Unary(UnOp::UnNot, ref expr) = expr.kind;
         // bind the first argument of the `assert!` macro
-        if let Some((Constant::Bool(is_true), _)) = constant(cx, cx.tables, expr);
+        if let Some((Constant::Bool(is_true), _)) = constant(cx, cx.typeck_results(), expr);
         // arm 1 pattern
         if let PatKind::Lit(ref lit_expr) = arms[0].pat.kind;
         if let ExprKind::Lit(ref lit) = lit_expr.kind;
@@ -130,10 +129,13 @@ fn match_assert_with_message<'a, 'tcx>(cx: &LateContext<'a, 'tcx>, expr: &'tcx E
         if let ExprKind::Block(ref block, _) = arms[0].body.kind;
         if block.stmts.is_empty();
         if let Some(block_expr) = &block.expr;
-        if let ExprKind::Block(ref inner_block, _) = block_expr.kind;
-        if let Some(begin_panic_call) = &inner_block.expr;
+        // inner block is optional. unwrap it if it exists, or use the expression as is otherwise.
+        if let Some(begin_panic_call) = match block_expr.kind {
+            ExprKind::Block(ref inner_block, _) => &inner_block.expr,
+            _ => &block.expr,
+        };
         // function call
-        if let Some(args) = match_function_call(cx, begin_panic_call, &paths::BEGIN_PANIC);
+        if let Some(args) = match_panic_call(cx, begin_panic_call);
         if args.len() == 1;
         // bind the second argument of the `assert!` macro if it exists
         if let panic_message = snippet_opt(cx, args[0].span);

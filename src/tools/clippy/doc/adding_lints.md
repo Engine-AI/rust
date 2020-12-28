@@ -27,10 +27,7 @@ because that's clearly a non-descriptive name.
 
 ## Setup
 
-When working on Clippy, you will need the current git master version of rustc,
-which can change rapidly. Make sure you're working near rust-clippy's master,
-and use the `setup-toolchain.sh` script to configure the appropriate toolchain
-for the Clippy directory.
+See the [Basics](basics.md#get-the-code) documentation.
 
 ## Getting Started
 
@@ -38,12 +35,14 @@ There is a bit of boilerplate code that needs to be set up when creating a new
 lint. Fortunately, you can use the clippy dev tools to handle this for you. We
 are naming our new lint `foo_functions` (lints are generally written in snake
 case), and we don't need type information so it will have an early pass type
-(more on this later on). To get started on this lint you can run
-`cargo dev new_lint --name=foo_functions --pass=early --category=pedantic`
-(category will default to nursery if not provided). This command will create
-two files: `tests/ui/foo_functions.rs` and `clippy_lints/src/foo_functions.rs`,
-as well as run `cargo dev update_lints` to register the new lint. For cargo lints,
-two project hierarchies (fail/pass) will be created by default under `tests/ui-cargo`.
+(more on this later on). If you're not sure if the name you chose fits the lint,
+take a look at our [lint naming guidelines][lint_naming]. To get started on this
+lint you can run `cargo dev new_lint --name=foo_functions --pass=early
+--category=pedantic` (category will default to nursery if not provided). This
+command will create two files: `tests/ui/foo_functions.rs` and
+`clippy_lints/src/foo_functions.rs`, as well as run `cargo dev update_lints` to
+register the new lint. For cargo lints, two project hierarchies (fail/pass) will
+be created by default under `tests/ui-cargo`.
 
 Next, we'll open up these files and add our lint!
 
@@ -99,13 +98,14 @@ While we are working on implementing our lint, we can keep running the UI
 test. That allows us to check if the output is turning into what we want.
 
 Once we are satisfied with the output, we need to run
-`tests/ui/update-all-references.sh` to update the `.stderr` file for our lint.
+`cargo dev bless` to update the `.stderr` file for our lint.
 Please note that, we should run `TESTNAME=foo_functions cargo uitest`
-every time before running `tests/ui/update-all-references.sh`.
+every time before running `cargo dev bless`.
 Running `TESTNAME=foo_functions cargo uitest` should pass then. When we commit
 our lint, we need to commit the generated `.stderr` files, too. In general, you
-should only commit files changed by `tests/ui/update-all-references.sh` for the
-specific lint you are creating/editing.
+should only commit files changed by `cargo dev bless` for the
+specific lint you are creating/editing. Note that if the generated files are
+empty, they should be removed.
 
 ### Cargo lints
 
@@ -113,7 +113,7 @@ For cargo lints, the process of testing differs in that we are interested in
 the `Cargo.toml` manifest file. We also need a minimal crate associated
 with that manifest.
 
-If our new lint is named e.g. `foo_categories`, after running `cargo dev new_lint` 
+If our new lint is named e.g. `foo_categories`, after running `cargo dev new_lint`
 we will find by default two new crates, each with its manifest file:
 
 * `tests/ui-cargo/foo_categories/fail/Cargo.toml`: this file should cause the new lint to raise an error.
@@ -122,8 +122,7 @@ we will find by default two new crates, each with its manifest file:
 If you need more cases, you can copy one of those crates (under `foo_categories`) and rename it.
 
 The process of generating the `.stderr` file is the same, and prepending the `TESTNAME`
-variable to `cargo uitest` works too, but the script to update the references
-is in another path: `tests/ui-cargo/update-all-references.sh`.
+variable to `cargo uitest` works too.
 
 ## Rustfix tests
 
@@ -133,7 +132,7 @@ additionally run [rustfix] for that test. Rustfix will apply the suggestions
 from the lint to the code of the test file and compare that to the contents of
 a `.fixed` file.
 
-Use `tests/ui/update-all-references.sh` to automatically generate the
+Use `cargo dev bless` to automatically generate the
 `.fixed` file after running the tests.
 
 [rustfix]: https://github.com/rust-lang/rustfix
@@ -190,7 +189,8 @@ declare_clippy_lint! {
 
 * The section of lines prefixed with `///` constitutes the lint documentation
   section. This is the default documentation style and will be displayed
-  [like this][example_lint_page].
+  [like this][example_lint_page]. To render and open this documentation locally
+  in a browser, run `cargo dev serve`.
 * `FOO_FUNCTIONS` is the name of our lint. Be sure to follow the
   [lint naming guidelines][lint_naming] here when naming your lint.
   In short, the name should state the thing that is being checked for and
@@ -223,6 +223,17 @@ automate everything. We will have to register our lint pass manually in the
 ```rust
 store.register_early_pass(|| box foo_functions::FooFunctions);
 ```
+
+As one may expect, there is a corresponding `register_late_pass` method
+available as well. Without a call to one of `register_early_pass` or
+`register_late_pass`, the lint pass in question will not be run.
+
+One reason that `cargo dev` does not automate this step is that multiple lints
+can use the same lint pass, so registering the lint pass may already be done
+when adding a new lint. Another reason that this step is not automated is that
+the order that the passes are registered determines the order the passes
+actually run, which in turn affects the order that any emitted lints are output
+in.
 
 [declare_clippy_lint]: https://github.com/rust-lang/rust-clippy/blob/557f6848bd5b7183f55c1e1522a326e9e1df6030/clippy_lints/src/lib.rs#L60
 [example_lint_page]: https://rust-lang.github.io/rust-clippy/master/index.html#redundant_closure
@@ -296,8 +307,14 @@ impl EarlyLintPass for FooFunctions {
 
 Running our UI test should now produce output that contains the lint message.
 
+According to [the rustc-dev-guide], the text should be matter of fact and avoid
+capitalization and periods, unless multiple sentences are needed.
+When code or an identifier must appear in a message or label, it should be
+surrounded with single grave accents \`.
+
 [check_fn]: https://doc.rust-lang.org/nightly/nightly-rustc/rustc_lint/trait.EarlyLintPass.html#method.check_fn
 [diagnostics]: https://github.com/rust-lang/rust-clippy/blob/master/clippy_lints/src/utils/diagnostics.rs
+[the rustc-dev-guide]: https://rustc-dev-guide.rust-lang.org/diagnostics.html
 
 ## Adding the lint logic
 
@@ -350,7 +367,7 @@ fn is_foo_fn(fn_kind: FnKind<'_>) -> bool {
 
 Now we should also run the full test suite with `cargo test`. At this point
 running `cargo test` should produce the expected output. Remember to run
-`tests/ui/update-all-references.sh` to update the `.stderr` file.
+`cargo dev bless` to update the `.stderr` file.
 
 `cargo test` (as opposed to `cargo uitest`) will also ensure that our lint
 implementation is not violating any Clippy lints itself.
@@ -361,6 +378,57 @@ pass.
 [fn_kind]: https://doc.rust-lang.org/nightly/nightly-rustc/rustc_ast/visit/enum.FnKind.html
 [`FnKind::Fn`]: https://doc.rust-lang.org/nightly/nightly-rustc/rustc_ast/visit/enum.FnKind.html#variant.Fn
 [ident]: https://doc.rust-lang.org/nightly/nightly-rustc/rustc_span/symbol/struct.Ident.html
+
+## Specifying the lint's minimum supported Rust version (msrv)
+
+Projects supporting older versions of Rust would need to disable a lint if it targets features
+present in later versions. Support for this can be added by specifying an msrv in your lint like so,
+
+```rust
+const MANUAL_STRIP_MSRV: RustcVersion = RustcVersion::new(1, 45, 0);
+```
+
+The project's msrv will also have to be an attribute in the lint so you'll have to add a struct
+and constructor for your lint. The project's msrv needs to be passed when the lint is registered
+in `lib.rs`
+
+```rust
+pub struct ManualStrip {
+    msrv: Option<RustcVersion>,
+}
+
+impl ManualStrip {
+    #[must_use]
+    pub fn new(msrv: Option<RustcVersion>) -> Self {
+        Self { msrv }
+    }
+}
+```
+
+The project's msrv can then be matched against the lint's msrv in the LintPass using the `meets_msrv` utility
+function.
+
+``` rust
+if !meets_msrv(self.msrv.as_ref(), &MANUAL_STRIP_MSRV) {
+    return;
+}
+```
+
+The project's msrv can also be specified as an inner attribute, which overrides the value from
+`clippy.toml`. This can be accounted for using the `extract_msrv_attr!(LintContext)` macro and passing
+LateContext/EarlyContext.
+
+```rust
+impl<'tcx> LateLintPass<'tcx> for ManualStrip {
+    fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>) {
+        ...
+    }
+    extract_msrv_attr!(LateContext);
+}
+```
+
+Once the msrv is added to the lint, a relevant test case should be added to `tests/ui/min_rust_version_attr.rs`
+which verifies that the lint isn't emitted if the project's msrv is lower.
 
 ## Author lint
 
@@ -447,12 +515,12 @@ Before submitting your PR make sure you followed all of the basic requirements:
 
 <!-- Sync this with `.github/PULL_REQUEST_TEMPLATE` -->
 
-- [ ] Followed [lint naming conventions][lint_naming]
-- [ ] Added passing UI tests (including committed `.stderr` file)
-- [ ] `cargo test` passes locally
-- [ ] Executed `cargo dev update_lints`
-- [ ] Added lint documentation
-- [ ] Run `cargo dev fmt`
+- \[ ] Followed [lint naming conventions][lint_naming]
+- \[ ] Added passing UI tests (including committed `.stderr` file)
+- \[ ] `cargo test` passes locally
+- \[ ] Executed `cargo dev update_lints`
+- \[ ] Added lint documentation
+- \[ ] Run `cargo dev fmt`
 
 ## Cheatsheet
 
@@ -483,7 +551,7 @@ For `LateLintPass` lints:
 While most of Clippy's lint utils are documented, most of rustc's internals lack
 documentation currently. This is unfortunate, but in most cases you can probably
 get away with copying things from existing similar lints. If you are stuck,
-don't hesitate to ask on [Discord] or in the issue/PR.
+don't hesitate to ask on [Zulip] or in the issue/PR.
 
 [utils]: https://github.com/rust-lang/rust-clippy/blob/master/clippy_lints/src/utils/mod.rs
 [if_chain]: https://docs.rs/if_chain/*/if_chain/
@@ -495,4 +563,4 @@ don't hesitate to ask on [Discord] or in the issue/PR.
 [nightly_docs]: https://doc.rust-lang.org/nightly/nightly-rustc/rustc_middle/
 [ast]: https://doc.rust-lang.org/nightly/nightly-rustc/rustc_ast/ast/index.html
 [ty]: https://doc.rust-lang.org/nightly/nightly-rustc/rustc_middle/ty/sty/index.html
-[Discord]: https://discord.gg/rust-lang
+[Zulip]: https://rust-lang.zulipchat.com/#narrow/stream/clippy

@@ -3,6 +3,8 @@
 //! This library contains the tidy lints and exposes it
 //! to be used by tools.
 
+#![feature(str_split_once)]
+
 use std::fs::File;
 use std::io::Read;
 use walkdir::{DirEntry, WalkDir};
@@ -26,6 +28,10 @@ macro_rules! t {
 }
 
 macro_rules! tidy_error {
+    ($bad:expr, $fmt:expr) => ({
+        *$bad = true;
+        eprintln!("tidy error: {}", $fmt);
+    });
     ($bad:expr, $fmt:expr, $($arg:tt)*) => ({
         *$bad = true;
         eprint!("tidy error: ");
@@ -50,12 +56,15 @@ pub mod unstable_book;
 
 fn filter_dirs(path: &Path) -> bool {
     let skip = [
+        "compiler/rustc_codegen_cranelift",
         "src/llvm-project",
-        "src/stdarch",
+        "library/backtrace",
+        "library/stdarch",
         "src/tools/cargo",
         "src/tools/clippy",
         "src/tools/miri",
         "src/tools/rls",
+        "src/tools/rust-analyzer",
         "src/tools/rust-installer",
         "src/tools/rustfmt",
         "src/doc/book",

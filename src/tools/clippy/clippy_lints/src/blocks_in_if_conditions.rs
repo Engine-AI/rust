@@ -28,7 +28,6 @@ declare_clippy_lint! {
     ///
     /// ```rust
     /// # fn somefunc() -> bool { true };
-    ///
     /// // Bad
     /// if { let x = somefunc(); x } { /* ... */ }
     ///
@@ -45,7 +44,7 @@ declare_lint_pass!(BlocksInIfConditions => [BLOCKS_IN_IF_CONDITIONS]);
 
 struct ExVisitor<'a, 'tcx> {
     found_block: Option<&'tcx Expr<'tcx>>,
-    cx: &'a LateContext<'a, 'tcx>,
+    cx: &'a LateContext<'tcx>,
 }
 
 impl<'a, 'tcx> Visitor<'tcx> for ExVisitor<'a, 'tcx> {
@@ -71,8 +70,8 @@ const BRACED_EXPR_MESSAGE: &str = "omit braces around single expression conditio
 const COMPLEX_BLOCK_MESSAGE: &str = "in an `if` condition, avoid complex blocks or closures with blocks; \
                                     instead, move the block or closure higher and bind it with a `let`";
 
-impl<'a, 'tcx> LateLintPass<'a, 'tcx> for BlocksInIfConditions {
-    fn check_expr(&mut self, cx: &LateContext<'a, 'tcx>, expr: &'tcx Expr<'_>) {
+impl<'tcx> LateLintPass<'tcx> for BlocksInIfConditions {
+    fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>) {
         if in_external_macro(cx.sess(), expr.span) {
             return;
         }

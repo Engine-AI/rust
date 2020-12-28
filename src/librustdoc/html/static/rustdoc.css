@@ -49,9 +49,9 @@
 }
 
 * {
-  -webkit-box-sizing: border-box;
-	 -moz-box-sizing: border-box;
-		  box-sizing: border-box;
+	-webkit-box-sizing: border-box;
+	-moz-box-sizing: border-box;
+	box-sizing: border-box;
 }
 
 /* This part handles the "default" theme being used depending on the system one. */
@@ -91,7 +91,8 @@ h2 {
 h3 {
 	font-size: 1.3em;
 }
-h1, h2, h3:not(.impl):not(.method):not(.type):not(.tymethod):not(.important), h4:not(.method):not(.type):not(.tymethod):not(.associatedconstant) {
+h1, h2, h3:not(.impl):not(.method):not(.type):not(.tymethod):not(.notable),
+h4:not(.method):not(.type):not(.tymethod):not(.associatedconstant) {
 	font-weight: 500;
 	margin: 20px 0 15px 0;
 	padding-bottom: 6px;
@@ -100,7 +101,11 @@ h1.fqn {
 	border-bottom: 1px dashed;
 	margin-top: 0;
 }
-h2, h3:not(.impl):not(.method):not(.type):not(.tymethod), h4:not(.method):not(.type):not(.tymethod):not(.associatedconstant) {
+h1.fqn > .in-band > a:hover {
+	text-decoration: underline;
+}
+h2, h3:not(.impl):not(.method):not(.type):not(.tymethod),
+h4:not(.method):not(.type):not(.tymethod):not(.associatedconstant) {
 	border-bottom: 1px solid;
 }
 h3.impl, h3.method, h4.method, h3.type, h4.type, h4.associatedconstant {
@@ -115,10 +120,14 @@ h3.impl, h3.method, h3.type {
 }
 
 h1, h2, h3, h4,
-.sidebar, a.source, .search-input, .content table :not(code)>a,
+.sidebar, a.source, .search-input, .content table td:first-child > a,
 .collapse-toggle, div.item-list .out-of-band,
 #source-sidebar, #sidebar-toggle {
 	font-family: "Fira Sans", sans-serif;
+}
+
+.content ul.crate a.crate {
+	font: 16px/1.6 "Fira Sans";
 }
 
 ol, ul {
@@ -143,8 +152,11 @@ code, pre, a.test-arrow {
 	border-radius: 3px;
 	padding: 0 0.1em;
 }
-.docblock pre code, .docblock-short pre code {
+.docblock pre code, .docblock-short pre code, .docblock code.spotlight {
 	padding: 0;
+}
+.docblock code.spotlight :last-child {
+	padding-bottom: 0.6em;
 }
 pre {
 	padding: 14px;
@@ -361,6 +373,7 @@ nav.sub {
 #results > table {
 	width: 100%;
 	table-layout: fixed;
+	margin-bottom: 40px;
 }
 
 .content pre.line-numbers {
@@ -377,15 +390,11 @@ nav.sub {
 	cursor: pointer;
 }
 
+.docblock-short {
+	overflow-wrap: anywhere;
+}
 .docblock-short p {
 	display: inline;
-}
-
-.docblock-short.nowrap {
-	display: block;
-	overflow: hidden;
-	white-space: nowrap;
-	text-overflow: ellipsis;
 }
 
 .docblock-short p {
@@ -519,7 +528,7 @@ h4 > code, h3 > code, .invisible > code {
 	font-size: 0.8em;
 }
 
-.content .methods > div {
+.content .methods > div:not(.notable-traits) {
 	margin-left: 40px;
 	margin-bottom: 15px;
 }
@@ -544,21 +553,21 @@ h4 > code, h3 > code, .invisible > code {
 	border: none;
 }
 
-.content .stability code {
+.content .item-info code {
 	font-size: 90%;
 }
 
-.content .stability {
+.content .item-info {
 	position: relative;
 	margin-left: 33px;
 	margin-top: -13px;
 }
 
-.sub-variant > div > .stability {
+.sub-variant > div > .item-info {
 	margin-top: initial;
 }
 
-.content .stability::before {
+.content .item-info::before {
 	content: '⬑';
 	font-size: 25px;
 	position: absolute;
@@ -570,15 +579,15 @@ h4 > code, h3 > code, .invisible > code {
 	margin-left: 20px;
 }
 
-.content .impl-items .docblock, .content .impl-items .stability {
+.content .impl-items .docblock, .content .impl-items .item-info {
 	margin-bottom: .6em;
 }
 
-.content .impl-items > .stability {
+.content .impl-items > .item-info {
 	margin-left: 40px;
 }
 
-.methods > .stability, .content .impl-items > .stability {
+.methods > .item-info, .content .impl-items > .item-info {
 	margin-top: -8px;
 }
 
@@ -586,7 +595,7 @@ h4 > code, h3 > code, .invisible > code {
 	flex-basis: 100%;
 }
 
-#main > .stability {
+#main > .item-info {
 	margin-top: 0;
 }
 
@@ -646,11 +655,11 @@ a {
 }
 
 .docblock a:not(.srclink):not(.test-arrow):hover,
-.docblock-short a:not(.srclink):not(.test-arrow):hover, .stability a {
+.docblock-short a:not(.srclink):not(.test-arrow):hover, .item-info a {
 	text-decoration: underline;
 }
 
-.invisible > .srclink, h4 > code + .srclink {
+.invisible > .srclink, h4 > code + .srclink, h3 > code + .srclink {
 	position: absolute;
 	top: 0;
 	right: 0;
@@ -665,7 +674,7 @@ a {
 }
 .search-container > div {
 	display: inline-flex;
-	width: calc(100% - 34px);
+	width: calc(100% - 63px);
 }
 #crate-search {
 	margin-top: 5px;
@@ -787,14 +796,22 @@ body.blur > :not(#help) {
 	clear: left;
 	display: block;
 }
+#help > div > span {
+	text-align: center;
+	display: block;
+	margin: 10px 0;
+	font-size: 18px;
+	border-bottom: 1px solid #ccc;
+	padding-bottom: 4px;
+	margin-bottom: 6px;
+}
 #help dd { margin: 5px 35px; }
 #help .infos { padding-left: 0; }
 #help h1, #help h2 { margin-top: 0; }
 #help > div div {
 	width: 50%;
 	float: left;
-	padding: 20px;
-	padding-left: 17px;
+	padding: 0 20px 20px 17px;;
 }
 
 .stab {
@@ -840,25 +857,25 @@ body.blur > :not(#help) {
 	top: 0;
 }
 
-.impl-items .since, .impl .since {
+.impl-items .since, .impl .since, .methods .since {
 	flex-grow: 0;
 	padding-left: 12px;
 	padding-right: 2px;
 	position: initial;
 }
 
-.impl-items .srclink, .impl .srclink {
+.impl-items .srclink, .impl .srclink, .methods .srclink {
 	flex-grow: 0;
 	/* Override header settings otherwise it's too bold */
 	font-size: 17px;
 	font-weight: normal;
 }
 
-.impl-items code, .impl code {
+.impl-items code, .impl code, .methods code {
 	flex-grow: 1;
 }
 
-.impl-items h4, h4.impl, h3.impl {
+.impl-items h4, h4.impl, h3.impl, .methods h3 {
 	display: flex;
 	flex-basis: 100%;
 	font-size: 16px;
@@ -1062,24 +1079,29 @@ h3 > .collapse-toggle, h4 > .collapse-toggle {
 	cursor: pointer;
 }
 
-.tooltip .tooltiptext {
-	width: 120px;
+.tooltip::after {
 	display: none;
 	text-align: center;
 	padding: 5px 3px 3px 3px;
 	border-radius: 6px;
 	margin-left: 5px;
-	top: -5px;
-	left: 105%;
-	z-index: 10;
 	font-size: 16px;
 }
 
-.tooltip:hover .tooltiptext {
-	display: inline;
+.tooltip.ignore::after {
+	content: "This example is not tested";
+}
+.tooltip.compile_fail::after {
+	content: "This example deliberately fails to compile";
+}
+.tooltip.should_panic::after {
+	content: "This example panics";
+}
+.tooltip.edition::after {
+	content: "This code runs with edition " attr(data-edition);
 }
 
-.tooltip .tooltiptext::after {
+.tooltip::before {
 	content: " ";
 	position: absolute;
 	top: 50%;
@@ -1087,20 +1109,63 @@ h3 > .collapse-toggle, h4 > .collapse-toggle {
 	margin-top: -5px;
 	border-width: 5px;
 	border-style: solid;
+	display: none;
 }
 
-.tooltip.compile_fail, .tooltip.ignore {
+.tooltip:hover::before, .tooltip:hover::after {
+	display: inline;
+}
+
+.tooltip.compile_fail, .tooltip.should_panic, .tooltip.ignore {
 	font-weight: bold;
 	font-size: 20px;
 }
 
-.tooltip .tooltiptext {
+.notable-traits-tooltip {
+	display: inline-block;
+	cursor: pointer;
+}
+
+.notable-traits:hover .notable-traits-tooltiptext,
+.notable-traits .notable-traits-tooltiptext.force-tooltip {
+	display: inline-block;
+}
+
+.notable-traits .notable-traits-tooltiptext {
+	display: none;
+	padding: 5px 3px 3px 3px;
+	border-radius: 6px;
+	margin-left: 5px;
+	z-index: 10;
+	font-size: 16px;
+	cursor: default;
+	position: absolute;
 	border: 1px solid;
-	font-weight: normal;
+}
+
+.notable-traits-tooltip::after {
+	/* The margin on the tooltip does not capture hover events,
+	   this extends the area of hover enough so that mouse hover is not
+	   lost when moving the mouse to the tooltip */
+	content: "\00a0\00a0\00a0";
+}
+
+.notable-traits .notable, .notable-traits .docblock {
+	margin: 0;
+}
+
+.notable-traits .docblock code.content{
+	margin: 0;
+	padding: 0;
+	font-size: 20px;
+}
+
+/* Example code has the "Run" button that needs to be positioned relative to the pre */
+pre.rust.rust-example-rendered {
+	position: relative;
 }
 
 pre.rust {
-	position: relative;
 	tab-size: 4;
 	-moz-tab-size: 4;
 }
@@ -1121,23 +1186,36 @@ pre.rust {
 	height: 35px;
 }
 
-#titles > div {
+#titles > button {
 	float: left;
 	width: 33.3%;
 	text-align: center;
 	font-size: 18px;
 	cursor: pointer;
+	border: 0;
 	border-top: 2px solid;
 }
 
-#titles > div:not(:last-child) {
+#titles > button:not(:last-child) {
 	margin-right: 1px;
 	width: calc(33.3% - 1px);
 }
 
-#titles > div > div.count {
+#titles > button > div.count {
 	display: inline-block;
 	font-size: 16px;
+}
+
+.notable-traits {
+	cursor: pointer;
+	z-index: 2;
+	margin-left: 5px;
+}
+
+h4 > .notable-traits {
+	position: absolute;
+	left: -44px;
+	top: 2px;
 }
 
 #all-types {
@@ -1195,14 +1273,24 @@ pre.rust {
 	outline: none;
 }
 
-#settings-menu {
+#settings-menu, .help-button {
 	position: absolute;
-	right: 0;
 	top: 10px;
+}
+
+#settings-menu {
+	right: 0;
 	outline: none;
 }
 
-#theme-picker, #settings-menu {
+.help-button {
+	right: 30px;
+	font-family: "Fira Sans",sans-serif;
+	text-align: center;
+	font-size: 17px;
+}
+
+#theme-picker, #settings-menu, .help-button {
 	padding: 4px;
 	width: 27px;
 	height: 29px;
@@ -1225,7 +1313,7 @@ pre.rust {
 #theme-choices > button {
 	border: none;
 	width: 100%;
-	padding: 4px;
+	padding: 4px 8px;
 	text-align: center;
 	background: rgba(0,0,0,0);
 }
@@ -1235,6 +1323,16 @@ pre.rust {
 }
 
 /* Media Queries */
+
+@media (min-width: 701px) {
+	/* In case there is no documentation before a code block, we need to add some margin at the top
+	to prevent an overlay between the "collapse toggle" and the information tooltip.
+	However, it's needed needed with smaller screen width because the doc/code block is always put
+	"one line" below. */
+	.information:first-child > .tooltip {
+		margin-top: 16px;
+	}
+}
 
 @media (max-width: 700px) {
 	body {
@@ -1366,7 +1464,13 @@ pre.rust {
 		z-index: 1;
 	}
 
-	#titles > div > div.count {
+	h4 > .notable-traits {
+		position: absolute;
+		left: -22px;
+		top: 24px;
+	}
+
+	#titles > button > div.count {
 		float: left;
 		width: 100%;
 	}
@@ -1450,6 +1554,19 @@ pre.rust {
 	#main > .line-numbers {
 		margin-top: 0;
 	}
+
+	.notable-traits .notable-traits-tooltiptext {
+		left: 0;
+		top: 100%;
+	}
+
+	/* We don't display the help button on mobile devices. */
+	.help-button {
+		display: none;
+	}
+	.search-container > div {
+		width: calc(100% - 32px);
+	}
 }
 
 @media print {
@@ -1459,16 +1576,51 @@ pre.rust {
 }
 
 @media (max-width: 416px) {
-	#titles {
+	#titles, #titles > button {
 		height: 73px;
 	}
 
-	#titles > div {
-		height: 73px;
+	#main {
+		margin-top: 100px;
+	}
+
+	#main > table:not(.table-display) td {
+		word-break: break-word;
+		width: 50%;
+	}
+
+	.search-container > div {
+		display: block;
+		width: calc(100% - 37px);
+	}
+
+	#crate-search {
+		width: 100%;
+		border-radius: 4px;
+		border: 0;
+	}
+
+	#crate-search + .search-input {
+		width: calc(100% + 71px);
+		margin-left: -36px;
+	}
+
+	#theme-picker, #settings-menu {
+		padding: 5px;
+		width: 31px;
+		height: 31px;
+	}
+
+	#theme-picker {
+		margin-top: -2px;
+	}
+
+	#settings-menu {
+		top: 7px;
 	}
 }
 
-h3.important {
+h3.notable {
 	margin: 0;
 	margin-bottom: 13px;
 	font-size: 19px;

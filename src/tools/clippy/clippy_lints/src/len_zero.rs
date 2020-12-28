@@ -1,4 +1,4 @@
-use crate::utils::{get_item_name, higher, snippet_with_applicability, span_lint, span_lint_and_sugg, walk_ptrs_ty};
+use crate::utils::{get_item_name, snippet_with_applicability, span_lint, span_lint_and_sugg};
 use rustc_ast::ast::LitKind;
 use rustc_data_structures::fx::FxHashSet;
 use rustc_errors::Applicability;
@@ -68,10 +68,47 @@ declare_clippy_lint! {
     "traits or impls with a public `len` method but no corresponding `is_empty` method"
 }
 
-declare_lint_pass!(LenZero => [LEN_ZERO, LEN_WITHOUT_IS_EMPTY]);
+declare_clippy_lint! {
+    /// **What it does:** Checks for comparing to an empty slice such as `""` or `[]`,
+    /// and suggests using `.is_empty()` where applicable.
+    ///
+    /// **Why is this bad?** Some structures can answer `.is_empty()` much faster
+    /// than checking for equality. So it is good to get into the habit of using
+    /// `.is_empty()`, and having it is cheap.
+    /// Besides, it makes the intent clearer than a manual comparison in some contexts.
+    ///
+    /// **Known problems:** None.
+    ///
+    /// **Example:**
+    ///
+    /// ```ignore
+    /// if s == "" {
+    ///     ..
+    /// }
+    ///
+    /// if arr == [] {
+    ///     ..
+    /// }
+    /// ```
+    /// Use instead:
+    /// ```ignore
+    /// if s.is_empty() {
+    ///     ..
+    /// }
+    ///
+    /// if arr.is_empty() {
+    ///     ..
+    /// }
+    /// ```
+    pub COMPARISON_TO_EMPTY,
+    style,
+    "checking `x == \"\"` or `x == []` (or similar) when `.is_empty()` could be used instead"
+}
 
-impl<'a, 'tcx> LateLintPass<'a, 'tcx> for LenZero {
-    fn check_item(&mut self, cx: &LateContext<'a, 'tcx>, item: &'tcx Item<'_>) {
+declare_lint_pass!(LenZero => [LEN_ZERO, LEN_WITHOUT_IS_EMPTY, COMPARISON_TO_EMPTY]);
+
+impl<'tcx> LateLintPass<'tcx> for LenZero {
+    fn check_item(&mut self, cx: &LateContext<'tcx>, item: &'tcx Item<'_>) {
         if item.span.from_expansion() {
             return;
         }
@@ -87,7 +124,7 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for LenZero {
         }
     }
 
-    fn check_expr(&mut self, cx: &LateContext<'a, 'tcx>, expr: &'tcx Expr<'_>) {
+    fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>) {
         if expr.span.from_expansion() {
             return;
         }
@@ -118,8 +155,8 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for LenZero {
     }
 }
 
-fn check_trait_items(cx: &LateContext<'_, '_>, visited_trait: &Item<'_>, trait_items: &[TraitItemRef]) {
-    fn is_named_self(cx: &LateContext<'_, '_>, item: &TraitItemRef, name: &str) -> bool {
+fn check_trait_items(cx: &LateContext<'_>, visited_trait: &Item<'_>, trait_items: &[TraitItemRef]) {
+    fn is_named_self(cx: &LateContext<'_>, item: &TraitItemRef, name: &str) -> bool {
         item.ident.name.as_str() == name
             && if let AssocItemKind::Fn { has_self } = item.kind {
                 has_self && {
@@ -132,7 +169,7 @@ fn check_trait_items(cx: &LateContext<'_, '_>, visited_trait: &Item<'_>, trait_i
     }
 
     // fill the set with current and super traits
-    fn fill_trait_set(traitt: DefId, set: &mut FxHashSet<DefId>, cx: &LateContext<'_, '_>) {
+    fn fill_trait_set(traitt: DefId, set: &mut FxHashSet<DefId>, cx: &LateContext<'_>) {
         if set.insert(traitt) {
             for supertrait in rustc_trait_selection::traits::supertrait_def_ids(cx.tcx, traitt) {
                 fill_trait_set(supertrait, set, cx);
@@ -169,8 +206,8 @@ fn check_trait_items(cx: &LateContext<'_, '_>, visited_trait: &Item<'_>, trait_i
     }
 }
 
-fn check_impl_items(cx: &LateContext<'_, '_>, item: &Item<'_>, impl_items: &[ImplItemRef<'_>]) {
-    fn is_named_self(cx: &LateContext<'_, '_>, item: &ImplItemRef<'_>, name: &str) -> bool {
+fn check_impl_items(cx: &LateContext<'_>, item: &Item<'_>, impl_items: &[ImplItemRef<'_>]) {
+    fn is_named_self(cx: &LateContext<'_>, item: &ImplItemRef<'_>, name: &str) -> bool {
         item.ident.name.as_str() == name
             && if let AssocItemKind::Fn { has_self } = item.kind {
                 has_self && {
@@ -185,9 +222,8 @@ fn check_impl_items(cx: &LateContext<'_, '_>, item: &Item<'_>, impl_items: &[Imp
     let is_empty = if let Some(is_empty) = impl_items.iter().find(|i| is_named_self(cx, i, "is_empty")) {
         if cx.access_levels.is_exported(is_empty.id.hir_id) {
             return;
-        } else {
-            "a private"
         }
+        "a private"
     } else {
         "no corresponding"
     };
@@ -210,8 +246,9 @@ fn check_impl_items(cx: &LateContext<'_, '_>, item: &Item<'_>, impl_items: &[Imp
     }
 }
 
-fn check_cmp(cx: &LateContext<'_, '_>, span: Span, method: &Expr<'_>, lit: &Expr<'_>, op: &str, compare_to: u32) {
-    if let (&ExprKind::MethodCall(ref method_path, _, ref args, _), &ExprKind::Lit(ref lit)) = (&method.kind, &lit.kind) {
+fn check_cmp(cx: &LateContext<'_>, span: Span, method: &Expr<'_>, lit: &Expr<'_>, op: &str, compare_to: u32) {
+    if let (&ExprKind::MethodCall(ref method_path, _, ref args, _), &ExprKind::Lit(ref lit)) = (&method.kind, &lit.kind)
+    {
         // check if we are in an is_empty() method
         if let Some(name) = get_item_name(cx, method) {
             if name.as_str() == "is_empty" {
@@ -220,11 +257,13 @@ fn check_cmp(cx: &LateContext<'_, '_>, span: Span, method: &Expr<'_>, lit: &Expr
         }
 
         check_len(cx, span, method_path.ident.name, args, &lit.node, op, compare_to)
+    } else {
+        check_empty_expr(cx, span, method, lit, op)
     }
 }
 
 fn check_len(
-    cx: &LateContext<'_, '_>,
+    cx: &LateContext<'_>,
     span: Span,
     method_name: Symbol,
     args: &[Expr<'_>],
@@ -257,21 +296,46 @@ fn check_len(
     }
 }
 
-/// Checks if this type has an `is_empty` method.
-fn has_is_empty(cx: &LateContext<'_, '_>, expr: &Expr<'_>) -> bool {
-    /// Special case ranges until `range_is_empty` is stabilized. See issue 3807.
-    fn should_skip_range(cx: &LateContext<'_, '_>, expr: &Expr<'_>) -> bool {
-        higher::range(cx, expr).map_or(false, |_| {
-            !cx.tcx
-                .features()
-                .declared_lib_features
-                .iter()
-                .any(|(name, _)| name.as_str() == "range_is_empty")
-        })
+fn check_empty_expr(cx: &LateContext<'_>, span: Span, lit1: &Expr<'_>, lit2: &Expr<'_>, op: &str) {
+    if (is_empty_array(lit2) || is_empty_string(lit2)) && has_is_empty(cx, lit1) {
+        let mut applicability = Applicability::MachineApplicable;
+        span_lint_and_sugg(
+            cx,
+            COMPARISON_TO_EMPTY,
+            span,
+            "comparison to empty slice",
+            &format!("using `{}is_empty` is clearer and more explicit", op),
+            format!(
+                "{}{}.is_empty()",
+                op,
+                snippet_with_applicability(cx, lit1.span, "_", &mut applicability)
+            ),
+            applicability,
+        );
     }
+}
 
+fn is_empty_string(expr: &Expr<'_>) -> bool {
+    if let ExprKind::Lit(ref lit) = expr.kind {
+        if let LitKind::Str(lit, _) = lit.node {
+            let lit = lit.as_str();
+            return lit == "";
+        }
+    }
+    false
+}
+
+fn is_empty_array(expr: &Expr<'_>) -> bool {
+    if let ExprKind::Array(ref arr) = expr.kind {
+        return arr.is_empty();
+    }
+    false
+}
+
+/// Checks if this type has an `is_empty` method.
+fn has_is_empty(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
     /// Gets an `AssocItem` and return true if it matches `is_empty(self)`.
-    fn is_is_empty(cx: &LateContext<'_, '_>, item: &ty::AssocItem) -> bool {
+    fn is_is_empty(cx: &LateContext<'_>, item: &ty::AssocItem) -> bool {
         if let ty::AssocKind::Fn = item.kind {
             if item.ident.name.as_str() == "is_empty" {
                 let sig = cx.tcx.fn_sig(item.def_id);
@@ -286,7 +350,7 @@ fn has_is_empty(cx: &LateContext<'_, '_>, expr: &Expr<'_>) -> bool {
     }
 
     /// Checks the inherent impl's items for an `is_empty(self)` method.
-    fn has_is_empty_impl(cx: &LateContext<'_, '_>, id: DefId) -> bool {
+    fn has_is_empty_impl(cx: &LateContext<'_>, id: DefId) -> bool {
         cx.tcx.inherent_impls(id).iter().any(|imp| {
             cx.tcx
                 .associated_items(*imp)
@@ -295,22 +359,14 @@ fn has_is_empty(cx: &LateContext<'_, '_>, expr: &Expr<'_>) -> bool {
         })
     }
 
-    if should_skip_range(cx, expr) {
-        return false;
-    }
-
-    let ty = &walk_ptrs_ty(cx.tables.expr_ty(expr));
-    match ty.kind {
-        ty::Dynamic(ref tt, ..) => {
-            if let Some(principal) = tt.principal() {
-                cx.tcx
-                    .associated_items(principal.def_id())
-                    .in_definition_order()
-                    .any(|item| is_is_empty(cx, &item))
-            } else {
-                false
-            }
-        },
+    let ty = &cx.typeck_results().expr_ty(expr).peel_refs();
+    match ty.kind() {
+        ty::Dynamic(ref tt, ..) => tt.principal().map_or(false, |principal| {
+            cx.tcx
+                .associated_items(principal.def_id())
+                .in_definition_order()
+                .any(|item| is_is_empty(cx, &item))
+        }),
         ty::Projection(ref proj) => has_is_empty_impl(cx, proj.item_def_id),
         ty::Adt(id, _) => has_is_empty_impl(cx, id.did),
         ty::Array(..) | ty::Slice(..) | ty::Str => true,

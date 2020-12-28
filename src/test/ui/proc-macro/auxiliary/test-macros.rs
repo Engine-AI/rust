@@ -101,9 +101,21 @@ pub fn print_bang(input: TokenStream) -> TokenStream {
     print_helper(input, "BANG")
 }
 
+#[proc_macro]
+pub fn print_bang_consume(input: TokenStream) -> TokenStream {
+    print_helper(input, "BANG");
+    TokenStream::new()
+}
+
 #[proc_macro_attribute]
 pub fn print_attr(_: TokenStream, input: TokenStream) -> TokenStream {
     print_helper(input, "ATTR")
+}
+
+#[proc_macro_attribute]
+pub fn print_attr_args(args: TokenStream, input: TokenStream) -> TokenStream {
+    print_helper(args, "ATTR_ARGS");
+    input
 }
 
 #[proc_macro_derive(Print, attributes(print_helper))]

@@ -1,6 +1,6 @@
 use crate::utils::SpanlessEq;
 use crate::utils::{get_item_name, higher, is_type_diagnostic_item, match_type, paths, snippet, snippet_opt};
-use crate::utils::{snippet_with_applicability, span_lint_and_then, walk_ptrs_ty};
+use crate::utils::{snippet_with_applicability, span_lint_and_then};
 use if_chain::if_chain;
 use rustc_errors::Applicability;
 use rustc_hir::intravisit::{walk_expr, NestedVisitorMap, Visitor};
@@ -52,8 +52,8 @@ declare_clippy_lint! {
 
 declare_lint_pass!(HashMapPass => [MAP_ENTRY]);
 
-impl<'a, 'tcx> LateLintPass<'a, 'tcx> for HashMapPass {
-    fn check_expr(&mut self, cx: &LateContext<'a, 'tcx>, expr: &'tcx Expr<'_>) {
+impl<'tcx> LateLintPass<'tcx> for HashMapPass {
+    fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>) {
         if let Some((ref check, ref then_block, ref else_block)) = higher::if_block(&expr) {
             if let ExprKind::Unary(UnOp::UnNot, ref check) = check.kind {
                 if let Some((ty, map, key)) = check_cond(cx, check) {
@@ -98,10 +98,7 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for HashMapPass {
     }
 }
 
-fn check_cond<'a, 'tcx, 'b>(
-    cx: &'a LateContext<'a, 'tcx>,
-    check: &'b Expr<'b>,
-) -> Option<(&'static str, &'b Expr<'b>, &'b Expr<'b>)> {
+fn check_cond<'a>(cx: &LateContext<'_>, check: &'a Expr<'a>) -> Option<(&'static str, &'a Expr<'a>, &'a Expr<'a>)> {
     if_chain! {
         if let ExprKind::MethodCall(ref path, _, ref params, _) = check.kind;
         if params.len() >= 2;
@@ -109,7 +106,7 @@ fn check_cond<'a, 'tcx, 'b>(
         if let ExprKind::AddrOf(BorrowKind::Ref, _, ref key) = params[1].kind;
         then {
             let map = &params[0];
-            let obj_ty = walk_ptrs_ty(cx.tables.expr_ty(map));
+            let obj_ty = cx.typeck_results().expr_ty(map).peel_refs();
 
             return if match_type(cx, obj_ty, &paths::BTREEMAP) {
                 Some(("BTreeMap", map, key))
@@ -127,7 +124,7 @@ fn check_cond<'a, 'tcx, 'b>(
 }
 
 struct InsertVisitor<'a, 'tcx, 'b> {
-    cx: &'a LateContext<'a, 'tcx>,
+    cx: &'a LateContext<'tcx>,
     span: Span,
     ty: &'static str,
     map: &'b Expr<'b>,

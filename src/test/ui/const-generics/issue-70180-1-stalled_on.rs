@@ -1,6 +1,8 @@
 // build-pass
-#![feature(const_generics)]
-#![allow(incomplete_features)]
+// revisions: full min
+
+#![cfg_attr(full, feature(const_generics))]
+#![cfg_attr(full, allow(incomplete_features))]
 
 pub fn works() {
     let array/*: [_; _]*/ = default_array();

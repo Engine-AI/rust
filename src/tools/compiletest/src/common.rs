@@ -17,6 +17,7 @@ pub enum Mode {
     DebugInfo,
     Codegen,
     Rustdoc,
+    RustdocJson,
     CodegenUnits,
     Incremental,
     RunMake,
@@ -48,6 +49,7 @@ impl FromStr for Mode {
             "debuginfo" => Ok(DebugInfo),
             "codegen" => Ok(Codegen),
             "rustdoc" => Ok(Rustdoc),
+            "rustdoc-json" => Ok(RustdocJson),
             "codegen-units" => Ok(CodegenUnits),
             "incremental" => Ok(Incremental),
             "run-make" => Ok(RunMake),
@@ -70,6 +72,7 @@ impl fmt::Display for Mode {
             DebugInfo => "debuginfo",
             Codegen => "codegen",
             Rustdoc => "rustdoc",
+            RustdocJson => "rustdoc-json",
             CodegenUnits => "codegen-units",
             Incremental => "incremental",
             RunMake => "run-make",
@@ -123,6 +126,9 @@ pub enum FailMode {
 pub enum CompareMode {
     Nll,
     Polonius,
+    Chalk,
+    SplitDwarf,
+    SplitDwarfSingle,
 }
 
 impl CompareMode {
@@ -130,6 +136,9 @@ impl CompareMode {
         match *self {
             CompareMode::Nll => "nll",
             CompareMode::Polonius => "polonius",
+            CompareMode::Chalk => "chalk",
+            CompareMode::SplitDwarf => "split-dwarf",
+            CompareMode::SplitDwarfSingle => "split-dwarf-single",
         }
     }
 
@@ -137,6 +146,9 @@ impl CompareMode {
         match s.as_str() {
             "nll" => CompareMode::Nll,
             "polonius" => CompareMode::Polonius,
+            "chalk" => CompareMode::Chalk,
+            "split-dwarf" => CompareMode::SplitDwarf,
+            "split-dwarf-single" => CompareMode::SplitDwarfSingle,
             x => panic!("unknown --compare-mode option: {}", x),
         }
     }
@@ -166,7 +178,7 @@ impl fmt::Display for Debugger {
 }
 
 /// Configuration for compiletest
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Config {
     /// `true` to to overwrite stderr/stdout files instead of complaining about changes in output.
     pub bless: bool,
@@ -182,6 +194,9 @@ pub struct Config {
 
     /// The rustdoc executable.
     pub rustdoc_path: Option<PathBuf>,
+
+    /// The rust-demangler executable.
+    pub rust_demangler_path: Option<PathBuf>,
 
     /// The Python executable to use for LLDB.
     pub lldb_python: String,
@@ -217,6 +232,10 @@ pub struct Config {
 
     /// The test mode, compile-fail, run-fail, ui
     pub mode: Mode,
+
+    /// The test suite (essentially which directory is running, but without the
+    /// directory prefix such as src/test)
+    pub suite: String,
 
     /// The debugger to use in debuginfo mode. Unset otherwise.
     pub debugger: Option<Debugger>,
@@ -255,6 +274,9 @@ pub struct Config {
     /// Path to / name of the Microsoft Console Debugger (CDB) executable
     pub cdb: Option<OsString>,
 
+    /// Version of CDB
+    pub cdb_version: Option<[u16; 4]>,
+
     /// Path to / name of the GDB executable
     pub gdb: Option<String>,
 
@@ -265,13 +287,13 @@ pub struct Config {
     pub gdb_native_rust: bool,
 
     /// Version of LLDB
-    pub lldb_version: Option<String>,
+    pub lldb_version: Option<u32>,
 
     /// Whether LLDB has native rust support
     pub lldb_native_rust: bool,
 
     /// Version of LLVM
-    pub llvm_version: Option<String>,
+    pub llvm_version: Option<u32>,
 
     /// Is LLVM a system LLVM
     pub system_llvm: bool,
@@ -310,6 +332,9 @@ pub struct Config {
     /// diagnostics but are missing `run-rustfix` annotations. The generated coverage file is
     /// created in `/<build_base>/rustfix_missing_coverage.txt`
     pub rustfix_coverage: bool,
+
+    /// whether to run `tidy` when a rustdoc test fails
+    pub has_tidy: bool,
 
     // Configuration for various run-make tests frobbing things like C compilers
     // or querying about various LLVM component information.

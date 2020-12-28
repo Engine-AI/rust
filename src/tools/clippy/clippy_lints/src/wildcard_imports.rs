@@ -36,7 +36,7 @@ declare_clippy_lint! {
 declare_clippy_lint! {
     /// **What it does:** Checks for wildcard imports `use _::*`.
     ///
-    /// **Why is this bad?** wildcard imports can polute the namespace. This is especially bad if
+    /// **Why is this bad?** wildcard imports can pollute the namespace. This is especially bad if
     /// you try to import something through a wildcard, that already has been imported by name from
     /// a different source:
     ///
@@ -101,8 +101,8 @@ impl WildcardImports {
 
 impl_lint_pass!(WildcardImports => [ENUM_GLOB_USE, WILDCARD_IMPORTS]);
 
-impl LateLintPass<'_, '_> for WildcardImports {
-    fn check_item(&mut self, cx: &LateContext<'_, '_>, item: &Item<'_>) {
+impl LateLintPass<'_> for WildcardImports {
+    fn check_item(&mut self, cx: &LateContext<'_>, item: &Item<'_>) {
         if is_test_module_or_function(item) {
             self.test_modules_deep = self.test_modules_deep.saturating_add(1);
         }
@@ -180,7 +180,7 @@ impl LateLintPass<'_, '_> for WildcardImports {
         }
     }
 
-    fn check_item_post(&mut self, _: &LateContext<'_, '_>, item: &Item<'_>) {
+    fn check_item_post(&mut self, _: &LateContext<'_>, item: &Item<'_>) {
         if is_test_module_or_function(item) {
             self.test_modules_deep = self.test_modules_deep.saturating_sub(1);
         }
@@ -195,13 +195,10 @@ impl WildcardImports {
     }
 }
 
-// Allow "...prelude::*" imports.
+// Allow "...prelude::..::*" imports.
 // Many crates have a prelude, and it is imported as a glob by design.
 fn is_prelude_import(segments: &[PathSegment<'_>]) -> bool {
-    segments
-        .iter()
-        .last()
-        .map_or(false, |ps| ps.ident.as_str() == "prelude")
+    segments.iter().any(|ps| ps.ident.as_str() == "prelude")
 }
 
 // Allow "super::*" imports in tests.

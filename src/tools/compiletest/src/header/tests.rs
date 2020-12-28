@@ -39,6 +39,7 @@ fn config() -> Config {
     let args = &[
         "compiletest",
         "--mode=ui",
+        "--suite=ui",
         "--compile-lib-path=",
         "--run-lib-path=",
         "--rustc-path=",
@@ -119,17 +120,17 @@ fn no_system_llvm() {
 fn llvm_version() {
     let mut config = config();
 
-    config.llvm_version = Some("8.1.2-rust".to_owned());
-    assert!(parse_rs(&config, "// min-llvm-version 9.0").ignore);
+    config.llvm_version = Some(80102);
+    assert!(parse_rs(&config, "// min-llvm-version: 9.0").ignore);
 
-    config.llvm_version = Some("9.0.1-rust-1.43.0-dev".to_owned());
-    assert!(parse_rs(&config, "// min-llvm-version 9.2").ignore);
+    config.llvm_version = Some(90001);
+    assert!(parse_rs(&config, "// min-llvm-version: 9.2").ignore);
 
-    config.llvm_version = Some("9.3.1-rust-1.43.0-dev".to_owned());
-    assert!(!parse_rs(&config, "// min-llvm-version 9.2").ignore);
+    config.llvm_version = Some(90301);
+    assert!(!parse_rs(&config, "// min-llvm-version: 9.2").ignore);
 
-    config.llvm_version = Some("10.0.0-rust".to_owned());
-    assert!(!parse_rs(&config, "// min-llvm-version 9.0").ignore);
+    config.llvm_version = Some(100000);
+    assert!(!parse_rs(&config, "// min-llvm-version: 9.0").ignore);
 }
 
 #[test]
@@ -200,4 +201,38 @@ fn debugger() {
 
     config.debugger = Some(Debugger::Lldb);
     assert!(parse_rs(&config, "// ignore-lldb").ignore);
+}
+
+#[test]
+fn sanitizers() {
+    let mut config = config();
+
+    // Target that supports all sanitizers:
+    config.target = "x86_64-unknown-linux-gnu".to_owned();
+    assert!(!parse_rs(&config, "// needs-sanitizer-address").ignore);
+    assert!(!parse_rs(&config, "// needs-sanitizer-leak").ignore);
+    assert!(!parse_rs(&config, "// needs-sanitizer-memory").ignore);
+    assert!(!parse_rs(&config, "// needs-sanitizer-thread").ignore);
+
+    // Target that doesn't support sanitizers:
+    config.target = "wasm32-unknown-emscripten".to_owned();
+    assert!(parse_rs(&config, "// needs-sanitizer-address").ignore);
+    assert!(parse_rs(&config, "// needs-sanitizer-leak").ignore);
+    assert!(parse_rs(&config, "// needs-sanitizer-memory").ignore);
+    assert!(parse_rs(&config, "// needs-sanitizer-thread").ignore);
+}
+
+#[test]
+fn test_extract_version_range() {
+    use super::{extract_llvm_version, extract_version_range};
+
+    assert_eq!(extract_version_range("1.2.3 - 4.5.6", extract_llvm_version), Some((10203, 40506)));
+    assert_eq!(extract_version_range("0   - 4.5.6", extract_llvm_version), Some((0, 40506)));
+    assert_eq!(extract_version_range("1.2.3 -", extract_llvm_version), None);
+    assert_eq!(extract_version_range("1.2.3 - ", extract_llvm_version), None);
+    assert_eq!(extract_version_range("- 4.5.6", extract_llvm_version), None);
+    assert_eq!(extract_version_range("-", extract_llvm_version), None);
+    assert_eq!(extract_version_range(" - 4.5.6", extract_llvm_version), None);
+    assert_eq!(extract_version_range("   - 4.5.6", extract_llvm_version), None);
+    assert_eq!(extract_version_range("0  -", extract_llvm_version), None);
 }

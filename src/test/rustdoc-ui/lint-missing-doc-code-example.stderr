@@ -17,5 +17,23 @@ error: missing code example in this documentation
 LL |   /// doc
    |   ^^^^^^^
 
-error: aborting due to 2 previous errors
+error: missing code example in this documentation
+  --> $DIR/lint-missing-doc-code-example.rs:49:1
+   |
+LL | /// Doc
+   | ^^^^^^^
+
+error: missing code example in this documentation
+  --> $DIR/lint-missing-doc-code-example.rs:56:1
+   |
+LL | /// Doc
+   | ^^^^^^^
+
+error: missing code example in this documentation
+  --> $DIR/lint-missing-doc-code-example.rs:63:1
+   |
+LL | /// Doc
+   | ^^^^^^^
+
+error: aborting due to 5 previous errors
 

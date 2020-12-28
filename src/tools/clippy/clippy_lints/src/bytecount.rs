@@ -1,6 +1,5 @@
 use crate::utils::{
-    contains_name, get_pat_name, match_type, paths, single_segment_path, snippet_with_applicability,
-    span_lint_and_sugg, walk_ptrs_ty,
+    contains_name, get_pat_name, match_type, paths, single_segment_path, snippet_with_applicability, span_lint_and_sugg,
 };
 use if_chain::if_chain;
 use rustc_ast::ast::UintTy;
@@ -9,6 +8,7 @@ use rustc_hir::{BinOpKind, BorrowKind, Expr, ExprKind, UnOp};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_middle::ty;
 use rustc_session::{declare_lint_pass, declare_tool_lint};
+use rustc_span::sym;
 use rustc_span::Symbol;
 
 declare_clippy_lint! {
@@ -35,8 +35,8 @@ declare_clippy_lint! {
 
 declare_lint_pass!(ByteCount => [NAIVE_BYTECOUNT]);
 
-impl<'a, 'tcx> LateLintPass<'a, 'tcx> for ByteCount {
-    fn check_expr(&mut self, cx: &LateContext<'_, '_>, expr: &Expr<'_>) {
+impl<'tcx> LateLintPass<'tcx> for ByteCount {
+    fn check_expr(&mut self, cx: &LateContext<'_>, expr: &Expr<'_>) {
         if_chain! {
             if let ExprKind::MethodCall(ref count, _, ref count_args, _) = expr.kind;
             if count.ident.name == sym!(count);
@@ -53,7 +53,7 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for ByteCount {
                     if let ExprKind::Binary(ref op, ref l, ref r) = body.value.kind;
                     if op.node == BinOpKind::Eq;
                     if match_type(cx,
-                               walk_ptrs_ty(cx.tables.expr_ty(&filter_args[0])),
+                               cx.typeck_results().expr_ty(&filter_args[0]).peel_refs(),
                                &paths::SLICE_ITER);
                     then {
                         let needle = match get_path_name(l) {
@@ -63,13 +63,13 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for ByteCount {
                                 _ => { return; }
                             }
                         };
-                        if ty::Uint(UintTy::U8) != walk_ptrs_ty(cx.tables.expr_ty(needle)).kind {
+                        if ty::Uint(UintTy::U8) != *cx.typeck_results().expr_ty(needle).peel_refs().kind() {
                             return;
                         }
                         let haystack = if let ExprKind::MethodCall(ref path, _, ref args, _) =
                                 filter_args[0].kind {
                             let p = path.ident.name;
-                            if (p == sym!(iter) || p == sym!(iter_mut)) && args.len() == 1 {
+                            if (p == sym::iter || p == sym!(iter_mut)) && args.len() == 1 {
                                 &args[0]
                             } else {
                                 &filter_args[0]
@@ -82,8 +82,8 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for ByteCount {
                             cx,
                             NAIVE_BYTECOUNT,
                             expr.span,
-                            "You appear to be counting bytes the naive way",
-                            "Consider using the bytecount crate",
+                            "you appear to be counting bytes the naive way",
+                            "consider using the bytecount crate",
                             format!("bytecount::count({}, {})",
                                     snippet_with_applicability(cx, haystack.span, "..", &mut applicability),
                                     snippet_with_applicability(cx, needle.span, "..", &mut applicability)),

@@ -1,14 +1,12 @@
 use crate::utils::{span_lint, span_lint_and_then};
-use rustc_ast::ast::{
-    Arm, AssocItem, AssocItemKind, Attribute, Block, FnDecl, Item, ItemKind, Local, MacCall, Pat, PatKind,
-};
-use rustc_ast::attr;
+use rustc_ast::ast::{Arm, AssocItem, AssocItemKind, Attribute, Block, FnDecl, Item, ItemKind, Local, Pat, PatKind};
 use rustc_ast::visit::{walk_block, walk_expr, walk_pat, Visitor};
 use rustc_lint::{EarlyContext, EarlyLintPass};
 use rustc_middle::lint::in_external_macro;
 use rustc_session::{declare_tool_lint, impl_lint_pass};
 use rustc_span::source_map::Span;
-use rustc_span::symbol::{Ident, SymbolStr};
+use rustc_span::sym;
+use rustc_span::symbol::{Ident, Symbol};
 use std::cmp::Ordering;
 
 declare_clippy_lint! {
@@ -75,10 +73,10 @@ pub struct NonExpressiveNames {
 impl_lint_pass!(NonExpressiveNames => [SIMILAR_NAMES, MANY_SINGLE_CHAR_NAMES, JUST_UNDERSCORES_AND_DIGITS]);
 
 struct ExistingName {
-    interned: SymbolStr,
+    interned: Symbol,
     span: Span,
     len: usize,
-    whitelist: &'static [&'static str],
+    exemptions: &'static [&'static str],
 }
 
 struct SimilarNamesLocalVisitor<'a, 'tcx> {
@@ -117,7 +115,7 @@ impl<'a, 'tcx> SimilarNamesLocalVisitor<'a, 'tcx> {
 // this list contains lists of names that are allowed to be similar
 // the assumption is that no name is ever contained in multiple lists.
 #[rustfmt::skip]
-const WHITELIST: &[&[&str]] = &[
+const ALLOWED_TO_BE_SIMILAR: &[&[&str]] = &[
     &["parsed", "parser"],
     &["lhs", "rhs"],
     &["tx", "rx"],
@@ -150,23 +148,20 @@ impl<'a, 'tcx, 'b> Visitor<'tcx> for SimilarNamesNameVisitor<'a, 'tcx, 'b> {
             _ => walk_pat(self, pat),
         }
     }
-    fn visit_mac(&mut self, _mac: &MacCall) {
-        // do not check macs
-    }
 }
 
 #[must_use]
-fn get_whitelist(interned_name: &str) -> Option<&'static [&'static str]> {
-    for &allow in WHITELIST {
-        if whitelisted(interned_name, allow) {
-            return Some(allow);
+fn get_exemptions(interned_name: &str) -> Option<&'static [&'static str]> {
+    for &list in ALLOWED_TO_BE_SIMILAR {
+        if allowed_to_be_similar(interned_name, list) {
+            return Some(list);
         }
     }
     None
 }
 
 #[must_use]
-fn whitelisted(interned_name: &str, list: &[&str]) -> bool {
+fn allowed_to_be_similar(interned_name: &str, list: &[&str]) -> bool {
     list.iter()
         .any(|&name| interned_name.starts_with(name) || interned_name.ends_with(name))
 }
@@ -212,24 +207,29 @@ impl<'a, 'tcx, 'b> SimilarNamesNameVisitor<'a, 'tcx, 'b> {
             return;
         }
         for existing_name in &self.0.names {
-            if whitelisted(&interned_name, existing_name.whitelist) {
+            if allowed_to_be_similar(&interned_name, existing_name.exemptions) {
                 continue;
             }
             let mut split_at = None;
             match existing_name.len.cmp(&count) {
                 Ordering::Greater => {
-                    if existing_name.len - count != 1 || levenstein_not_1(&interned_name, &existing_name.interned) {
+                    if existing_name.len - count != 1
+                        || levenstein_not_1(&interned_name, &existing_name.interned.as_str())
+                    {
                         continue;
                     }
                 },
                 Ordering::Less => {
-                    if count - existing_name.len != 1 || levenstein_not_1(&existing_name.interned, &interned_name) {
+                    if count - existing_name.len != 1
+                        || levenstein_not_1(&existing_name.interned.as_str(), &interned_name)
+                    {
                         continue;
                     }
                 },
                 Ordering::Equal => {
                     let mut interned_chars = interned_name.chars();
-                    let mut existing_chars = existing_name.interned.chars();
+                    let interned_str = existing_name.interned.as_str();
+                    let mut existing_chars = interned_str.chars();
                     let first_i = interned_chars.next().expect("we know we have at least one char");
                     let first_e = existing_chars.next().expect("we know we have at least one char");
                     let eq_or_numeric = |(a, b): (char, char)| a == b || a.is_numeric() && b.is_numeric();
@@ -301,8 +301,8 @@ impl<'a, 'tcx, 'b> SimilarNamesNameVisitor<'a, 'tcx, 'b> {
             return;
         }
         self.0.names.push(ExistingName {
-            whitelist: get_whitelist(&interned_name).unwrap_or(&[]),
-            interned: interned_name,
+            exemptions: get_exemptions(&interned_name).unwrap_or(&[]),
+            interned: ident.name,
             span: ident.span,
             len: count,
         });
@@ -352,9 +352,6 @@ impl<'a, 'tcx> Visitor<'tcx> for SimilarNamesLocalVisitor<'a, 'tcx> {
     fn visit_item(&mut self, _: &Item) {
         // do not recurse into inner items
     }
-    fn visit_mac(&mut self, _mac: &MacCall) {
-        // do not check macs
-    }
 }
 
 impl EarlyLintPass for NonExpressiveNames {
@@ -380,7 +377,7 @@ impl EarlyLintPass for NonExpressiveNames {
 }
 
 fn do_check(lint: &mut NonExpressiveNames, cx: &EarlyContext<'_>, attrs: &[Attribute], decl: &FnDecl, blk: &Block) {
-    if !attr::contains_name(attrs, sym!(test)) {
+    if !attrs.iter().any(|attr| attr.has_name(sym::test)) {
         let mut visitor = SimilarNamesLocalVisitor {
             names: Vec::new(),
             cx,
@@ -412,11 +409,10 @@ fn levenstein_not_1(a_name: &str, b_name: &str) -> bool {
         if let Some(b2) = b_chars.next() {
             // check if there's just one character inserted
             return a != b2 || a_chars.ne(b_chars);
-        } else {
-            // tuple
-            // ntuple
-            return true;
         }
+        // tuple
+        // ntuple
+        return true;
     }
     // for item in items
     true

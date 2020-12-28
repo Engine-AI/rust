@@ -6,9 +6,12 @@ use rustc_errors::Applicability;
 use rustc_hir::{BinOp, BinOpKind, Expr, ExprKind, QPath, TyKind};
 use rustc_lint::{LateContext, LateLintPass, LintContext};
 use rustc_middle::lint::in_external_macro;
-use rustc_session::{declare_lint_pass, declare_tool_lint};
+use rustc_semver::RustcVersion;
+use rustc_session::{declare_tool_lint, impl_lint_pass};
 
-use crate::utils::{snippet_with_applicability, span_lint_and_sugg, SpanlessEq};
+use crate::utils::{meets_msrv, snippet_with_applicability, span_lint_and_sugg, SpanlessEq};
+
+const CHECKED_CONVERSIONS_MSRV: RustcVersion = RustcVersion::new(1, 34, 0);
 
 declare_clippy_lint! {
     /// **What it does:** Checks for explicit bounds checking when casting.
@@ -39,10 +42,25 @@ declare_clippy_lint! {
     "`try_from` could replace manual bounds checking when casting"
 }
 
-declare_lint_pass!(CheckedConversions => [CHECKED_CONVERSIONS]);
+pub struct CheckedConversions {
+    msrv: Option<RustcVersion>,
+}
 
-impl<'a, 'tcx> LateLintPass<'a, 'tcx> for CheckedConversions {
-    fn check_expr(&mut self, cx: &LateContext<'_, '_>, item: &Expr<'_>) {
+impl CheckedConversions {
+    #[must_use]
+    pub fn new(msrv: Option<RustcVersion>) -> Self {
+        Self { msrv }
+    }
+}
+
+impl_lint_pass!(CheckedConversions => [CHECKED_CONVERSIONS]);
+
+impl<'tcx> LateLintPass<'tcx> for CheckedConversions {
+    fn check_expr(&mut self, cx: &LateContext<'_>, item: &Expr<'_>) {
+        if !meets_msrv(self.msrv.as_ref(), &CHECKED_CONVERSIONS_MSRV) {
+            return;
+        }
+
         let result = if_chain! {
             if !in_external_macro(cx.sess(), item.span);
             if let ExprKind::Binary(op, ref left, ref right) = &item.kind;
@@ -66,7 +84,7 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for CheckedConversions {
                     cx,
                     CHECKED_CONVERSIONS,
                     item.span,
-                    "Checked cast can be simplified.",
+                    "checked cast can be simplified",
                     "try",
                     format!("{}::try_from({}).is_ok()", to_type, snippet),
                     applicability,
@@ -74,6 +92,8 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for CheckedConversions {
             }
         }
     }
+
+    extract_msrv_attr!(LateContext);
 }
 
 /// Searches for a single check from unsigned to _ is done
@@ -83,12 +103,12 @@ fn single_check<'tcx>(expr: &'tcx Expr<'tcx>) -> Option<Conversion<'tcx>> {
 }
 
 /// Searches for a combination of upper & lower bound checks
-fn double_check<'a>(cx: &LateContext<'_, '_>, left: &'a Expr<'_>, right: &'a Expr<'_>) -> Option<Conversion<'a>> {
+fn double_check<'a>(cx: &LateContext<'_>, left: &'a Expr<'_>, right: &'a Expr<'_>) -> Option<Conversion<'a>> {
     let upper_lower = |l, r| {
         let upper = check_upper_bound(l);
         let lower = check_lower_bound(r);
 
-        transpose(upper, lower).and_then(|(l, r)| l.combine(r, cx))
+        upper.zip(lower).and_then(|(l, r)| l.combine(r, cx))
     };
 
     upper_lower(left, right).or_else(|| upper_lower(right, left))
@@ -112,7 +132,7 @@ enum ConversionType {
 
 impl<'a> Conversion<'a> {
     /// Combine multiple conversions if the are compatible
-    pub fn combine(self, other: Self, cx: &LateContext<'_, '_>) -> Option<Conversion<'a>> {
+    pub fn combine(self, other: Self, cx: &LateContext<'_>) -> Option<Conversion<'a>> {
         if self.is_compatible(&other, cx) {
             // Prefer a Conversion that contains a type-constraint
             Some(if self.to_type.is_some() { self } else { other })
@@ -123,7 +143,7 @@ impl<'a> Conversion<'a> {
 
     /// Checks if two conversions are compatible
     /// same type of conversion, same 'castee' and same 'to type'
-    pub fn is_compatible(&self, other: &Self, cx: &LateContext<'_, '_>) -> bool {
+    pub fn is_compatible(&self, other: &Self, cx: &LateContext<'_>) -> bool {
         (self.cvt == other.cvt)
             && (SpanlessEq::new(cx).eq_expr(self.expr_to_cast, other.expr_to_cast))
             && (self.has_compatible_to_type(other))
@@ -131,7 +151,10 @@ impl<'a> Conversion<'a> {
 
     /// Checks if the to-type is the same (if there is a type constraint)
     fn has_compatible_to_type(&self, other: &Self) -> bool {
-        transpose(self.to_type.as_ref(), other.to_type.as_ref()).map_or(true, |(l, r)| l == r)
+        match (self.to_type, other.to_type) {
+            (Some(l), Some(r)) => l == r,
+            _ => true,
+        }
     }
 
     /// Try to construct a new conversion if the conversion type is valid
@@ -319,14 +342,6 @@ fn int_ty_to_sym<'tcx>(path: &QPath<'_>) -> Option<&'tcx str> {
         } else {
             None
         }
-    }
-}
-
-/// (Option<T>, Option<U>) -> Option<(T, U)>
-fn transpose<T, U>(lhs: Option<T>, rhs: Option<U>) -> Option<(T, U)> {
-    match (lhs, rhs) {
-        (Some(l), Some(r)) => Some((l, r)),
-        _ => None,
     }
 }
 

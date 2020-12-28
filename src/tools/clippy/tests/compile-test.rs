@@ -1,9 +1,10 @@
 #![feature(test)] // compiletest_rs requires this attribute
+#![feature(once_cell)]
 
 use compiletest_rs as compiletest;
 use compiletest_rs::common::Mode as TestMode;
 
-use std::env::{self, set_var};
+use std::env::{self, set_var, var};
 use std::ffi::OsStr;
 use std::fs;
 use std::io;
@@ -11,20 +12,15 @@ use std::path::{Path, PathBuf};
 
 mod cargo;
 
+// whether to run internal tests or not
+const RUN_INTERNAL_TESTS: bool = cfg!(feature = "internal-lints");
+
 fn host_lib() -> PathBuf {
-    if let Some(path) = option_env!("HOST_LIBS") {
-        PathBuf::from(path)
-    } else {
-        cargo::CARGO_TARGET_DIR.join(env!("PROFILE"))
-    }
+    option_env!("HOST_LIBS").map_or(cargo::CARGO_TARGET_DIR.join(env!("PROFILE")), PathBuf::from)
 }
 
 fn clippy_driver_path() -> PathBuf {
-    if let Some(path) = option_env!("CLIPPY_DRIVER_PATH") {
-        PathBuf::from(path)
-    } else {
-        cargo::TARGET_LIB.join("clippy-driver")
-    }
+    option_env!("CLIPPY_DRIVER_PATH").map_or(cargo::TARGET_LIB.join("clippy-driver"), PathBuf::from)
 }
 
 // When we'll want to use `extern crate ..` for a dependency that is used
@@ -49,7 +45,9 @@ fn third_party_crates() -> String {
         if let Some(name) = path.file_name().and_then(OsStr::to_str) {
             for dep in CRATES {
                 if name.starts_with(&format!("lib{}-", dep)) && name.ends_with(".rlib") {
-                    crates.entry(dep).or_insert(path);
+                    if let Some(old) = crates.insert(dep, path.clone()) {
+                        panic!("Found multiple rlibs for crate `{}`: `{:?}` and `{:?}", dep, old, path);
+                    }
                     break;
                 }
             }
@@ -77,7 +75,7 @@ fn default_config() -> compiletest::Config {
     }
 
     config.target_rustcflags = Some(format!(
-        "-L {0} -L {1} -Dwarnings -Zui-testing {2}",
+        "--emit=metadata -L {0} -L {1} -Dwarnings -Zui-testing {2}",
         host_lib().join("deps").display(),
         cargo::TARGET_LIB.join("deps").display(),
         third_party_crates(),
@@ -98,6 +96,16 @@ fn default_config() -> compiletest::Config {
 fn run_mode(cfg: &mut compiletest::Config) {
     cfg.mode = TestMode::Ui;
     cfg.src_base = Path::new("tests").join("ui");
+    compiletest::run_tests(&cfg);
+}
+
+fn run_internal_tests(cfg: &mut compiletest::Config) {
+    // only run internal tests with the internal-tests feature
+    if !RUN_INTERNAL_TESTS {
+        return;
+    }
+    cfg.mode = TestMode::Ui;
+    cfg.src_base = Path::new("tests").join("ui-internal");
     compiletest::run_tests(&cfg);
 }
 
@@ -142,7 +150,9 @@ fn run_ui_toml(config: &mut compiletest::Config) {
 
     let tests = compiletest::make_tests(&config);
 
+    let manifest_dir = var("CARGO_MANIFEST_DIR").unwrap_or_default();
     let res = run_tests(&config, tests);
+    set_var("CARGO_MANIFEST_DIR", &manifest_dir);
     match res {
         Ok(true) => {},
         Ok(false) => panic!("Some tests failed"),
@@ -153,9 +163,6 @@ fn run_ui_toml(config: &mut compiletest::Config) {
 }
 
 fn run_ui_cargo(config: &mut compiletest::Config) {
-    if cargo::is_rustc_test_suite() {
-        return;
-    }
     fn run_tests(
         config: &compiletest::Config,
         filter: &Option<String>,
@@ -205,7 +212,6 @@ fn run_ui_cargo(config: &mut compiletest::Config) {
                         Some("main.rs") => {},
                         _ => continue,
                     }
-
                     let paths = compiletest::common::TestPaths {
                         file: file_path,
                         base: config.src_base.clone(),
@@ -221,6 +227,10 @@ fn run_ui_cargo(config: &mut compiletest::Config) {
             }
         }
         Ok(result)
+    }
+
+    if cargo::is_rustc_test_suite() {
+        return;
     }
 
     config.mode = TestMode::Ui;
@@ -255,4 +265,5 @@ fn compile_test() {
     run_mode(&mut config);
     run_ui_toml(&mut config);
     run_ui_cargo(&mut config);
+    run_internal_tests(&mut config);
 }

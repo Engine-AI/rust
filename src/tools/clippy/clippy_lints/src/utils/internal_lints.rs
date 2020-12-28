@@ -1,7 +1,7 @@
-use crate::utils::SpanlessEq;
+use crate::consts::{constant_simple, Constant};
 use crate::utils::{
-    is_expn_of, match_def_path, match_qpath, match_type, method_calls, paths, run_lints, snippet, span_lint,
-    span_lint_and_help, span_lint_and_sugg, walk_ptrs_ty,
+    is_expn_of, match_def_path, match_qpath, match_type, method_calls, path_to_res, paths, qpath_res, run_lints,
+    snippet, span_lint, span_lint_and_help, span_lint_and_sugg, SpanlessEq,
 };
 use if_chain::if_chain;
 use rustc_ast::ast::{Crate as AstCrate, ItemKind, LitKind, NodeId};
@@ -12,12 +12,15 @@ use rustc_hir as hir;
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::hir_id::CRATE_HIR_ID;
 use rustc_hir::intravisit::{NestedVisitorMap, Visitor};
-use rustc_hir::{Crate, Expr, ExprKind, HirId, Item, MutTy, Mutability, Path, StmtKind, Ty, TyKind};
+use rustc_hir::{Crate, Expr, ExprKind, HirId, Item, MutTy, Mutability, Node, Path, StmtKind, Ty, TyKind};
 use rustc_lint::{EarlyContext, EarlyLintPass, LateContext, LateLintPass};
 use rustc_middle::hir::map::Map;
+use rustc_middle::mir::interpret::ConstValue;
+use rustc_middle::ty;
 use rustc_session::{declare_lint_pass, declare_tool_lint, impl_lint_pass};
 use rustc_span::source_map::{Span, Spanned};
 use rustc_span::symbol::{Symbol, SymbolStr};
+use rustc_typeck::hir_ty_to_ty;
 
 use std::borrow::{Borrow, Cow};
 
@@ -207,6 +210,68 @@ declare_clippy_lint! {
     "found collapsible `span_lint_and_then` calls"
 }
 
+declare_clippy_lint! {
+    /// **What it does:** Checks for calls to `utils::match_type()` on a type diagnostic item
+    /// and suggests to use `utils::is_type_diagnostic_item()` instead.
+    ///
+    /// **Why is this bad?** `utils::is_type_diagnostic_item()` does not require hardcoded paths.
+    ///
+    /// **Known problems:** None.
+    ///
+    /// **Example:**
+    /// Bad:
+    /// ```rust,ignore
+    /// utils::match_type(cx, ty, &paths::VEC)
+    /// ```
+    ///
+    /// Good:
+    /// ```rust,ignore
+    /// utils::is_type_diagnostic_item(cx, ty, sym::vec_type)
+    /// ```
+    pub MATCH_TYPE_ON_DIAGNOSTIC_ITEM,
+    internal,
+    "using `utils::match_type()` instead of `utils::is_type_diagnostic_item()`"
+}
+
+declare_clippy_lint! {
+    /// **What it does:**
+    /// Checks the paths module for invalid paths.
+    ///
+    /// **Why is this bad?**
+    /// It indicates a bug in the code.
+    ///
+    /// **Known problems:** None.
+    ///
+    /// **Example:** None.
+    pub INVALID_PATHS,
+    internal,
+    "invalid path"
+}
+
+declare_clippy_lint! {
+    /// **What it does:**
+    /// Checks for interning symbols that have already been pre-interned and defined as constants.
+    ///
+    /// **Why is this bad?**
+    /// It's faster and easier to use the symbol constant.
+    ///
+    /// **Known problems:** None.
+    ///
+    /// **Example:**
+    /// Bad:
+    /// ```rust,ignore
+    /// let _ = sym!(f32);
+    /// ```
+    ///
+    /// Good:
+    /// ```rust,ignore
+    /// let _ = sym::f32;
+    /// ```
+    pub INTERNING_DEFINED_SYMBOL,
+    internal,
+    "interning a symbol that is pre-interned and defined as a constant"
+}
+
 declare_lint_pass!(ClippyLintsInternal => [CLIPPY_LINTS_INTERNAL]);
 
 impl EarlyLintPass for ClippyLintsInternal {
@@ -251,8 +316,8 @@ pub struct LintWithoutLintPass {
 
 impl_lint_pass!(LintWithoutLintPass => [DEFAULT_LINT, LINT_WITHOUT_LINT_PASS]);
 
-impl<'a, 'tcx> LateLintPass<'a, 'tcx> for LintWithoutLintPass {
-    fn check_item(&mut self, cx: &LateContext<'a, 'tcx>, item: &'tcx Item<'_>) {
+impl<'tcx> LateLintPass<'tcx> for LintWithoutLintPass {
+    fn check_item(&mut self, cx: &LateContext<'tcx>, item: &'tcx Item<'_>) {
         if !run_lints(cx, &[DEFAULT_LINT], item.hir_id) {
             return;
         }
@@ -310,7 +375,7 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for LintWithoutLintPass {
         }
     }
 
-    fn check_crate_post(&mut self, cx: &LateContext<'a, 'tcx>, _: &'tcx Crate<'_>) {
+    fn check_crate_post(&mut self, cx: &LateContext<'tcx>, _: &'tcx Crate<'_>) {
         if !run_lints(cx, &[LINT_WITHOUT_LINT_PASS], CRATE_HIR_ID) {
             return;
         }
@@ -337,7 +402,7 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for LintWithoutLintPass {
     }
 }
 
-fn is_lint_ref_type<'tcx>(cx: &LateContext<'_, 'tcx>, ty: &Ty<'_>) -> bool {
+fn is_lint_ref_type<'tcx>(cx: &LateContext<'tcx>, ty: &Ty<'_>) -> bool {
     if let TyKind::Rptr(
         _,
         MutTy {
@@ -347,7 +412,7 @@ fn is_lint_ref_type<'tcx>(cx: &LateContext<'_, 'tcx>, ty: &Ty<'_>) -> bool {
     ) = ty.kind
     {
         if let TyKind::Path(ref path) = inner.kind {
-            if let Res::Def(DefKind::Struct, def_id) = cx.tables.qpath_res(path, inner.hir_id) {
+            if let Res::Def(DefKind::Struct, def_id) = cx.qpath_res(path, inner.hir_id) {
                 return match_def_path(cx, def_id, &paths::LINT);
             }
         }
@@ -358,7 +423,7 @@ fn is_lint_ref_type<'tcx>(cx: &LateContext<'_, 'tcx>, ty: &Ty<'_>) -> bool {
 
 struct LintCollector<'a, 'tcx> {
     output: &'a mut FxHashSet<Symbol>,
-    cx: &'a LateContext<'a, 'tcx>,
+    cx: &'a LateContext<'tcx>,
 }
 
 impl<'a, 'tcx> Visitor<'tcx> for LintCollector<'a, 'tcx> {
@@ -395,8 +460,8 @@ impl CompilerLintFunctions {
 
 impl_lint_pass!(CompilerLintFunctions => [COMPILER_LINT_FUNCTIONS]);
 
-impl<'a, 'tcx> LateLintPass<'a, 'tcx> for CompilerLintFunctions {
-    fn check_expr(&mut self, cx: &LateContext<'a, 'tcx>, expr: &'tcx Expr<'_>) {
+impl<'tcx> LateLintPass<'tcx> for CompilerLintFunctions {
+    fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>) {
         if !run_lints(cx, &[COMPILER_LINT_FUNCTIONS], expr.hir_id) {
             return;
         }
@@ -405,7 +470,7 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for CompilerLintFunctions {
             if let ExprKind::MethodCall(ref path, _, ref args, _) = expr.kind;
             let fn_name = path.ident;
             if let Some(sugg) = self.map.get(&*fn_name.as_str());
-            let ty = walk_ptrs_ty(cx.tables.expr_ty(&args[0]));
+            let ty = cx.typeck_results().expr_ty(&args[0]).peel_refs();
             if match_type(cx, ty, &paths::EARLY_CONTEXT)
                 || match_type(cx, ty, &paths::LATE_CONTEXT);
             then {
@@ -424,8 +489,8 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for CompilerLintFunctions {
 
 declare_lint_pass!(OuterExpnDataPass => [OUTER_EXPN_EXPN_DATA]);
 
-impl<'a, 'tcx> LateLintPass<'a, 'tcx> for OuterExpnDataPass {
-    fn check_expr(&mut self, cx: &LateContext<'a, 'tcx>, expr: &'tcx hir::Expr<'_>) {
+impl<'tcx> LateLintPass<'tcx> for OuterExpnDataPass {
+    fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx hir::Expr<'_>) {
         if !run_lints(cx, &[OUTER_EXPN_EXPN_DATA], expr.hir_id) {
             return;
         }
@@ -438,7 +503,7 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for OuterExpnDataPass {
             let args = arg_lists[1];
             if args.len() == 1;
             let self_arg = &args[0];
-            let self_ty = walk_ptrs_ty(cx.tables.expr_ty(self_arg));
+            let self_ty = cx.typeck_results().expr_ty(self_arg).peel_refs();
             if match_type(cx, self_ty, &paths::SYNTAX_CONTEXT);
             then {
                 span_lint_and_sugg(
@@ -474,8 +539,8 @@ fn is_trigger_fn(fn_kind: FnKind<'_>) -> bool {
 
 declare_lint_pass!(CollapsibleCalls => [COLLAPSIBLE_SPAN_LINT_CALLS]);
 
-impl<'a, 'tcx> LateLintPass<'a, 'tcx> for CollapsibleCalls {
-    fn check_expr(&mut self, cx: &LateContext<'a, 'tcx>, expr: &'tcx hir::Expr<'_>) {
+impl<'tcx> LateLintPass<'tcx> for CollapsibleCalls {
+    fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx hir::Expr<'_>) {
         if !run_lints(cx, &[COLLAPSIBLE_SPAN_LINT_CALLS], expr.hir_id) {
             return;
         }
@@ -493,7 +558,7 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for CollapsibleCalls {
             if let StmtKind::Semi(only_expr) = &stmts[0].kind;
             if let ExprKind::MethodCall(ref ps, _, ref span_call_args, _) = &only_expr.kind;
             let and_then_snippets = get_and_then_snippets(cx, and_then_args);
-            let mut sle = SpanlessEq::new(cx).ignore_fn();
+            let mut sle = SpanlessEq::new(cx).deny_side_effects();
             then {
                 match &*ps.ident.as_str() {
                     "span_suggestion" if sle.eq_expr(&and_then_args[2], &span_call_args[1]) => {
@@ -529,10 +594,7 @@ struct AndThenSnippets<'a> {
     msg: Cow<'a, str>,
 }
 
-fn get_and_then_snippets<'a, 'hir>(
-    cx: &LateContext<'_, '_>,
-    and_then_snippets: &'hir [Expr<'hir>],
-) -> AndThenSnippets<'a> {
+fn get_and_then_snippets<'a, 'hir>(cx: &LateContext<'_>, and_then_snippets: &'hir [Expr<'hir>]) -> AndThenSnippets<'a> {
     let cx_snippet = snippet(cx, and_then_snippets[0].span, "cx");
     let lint_snippet = snippet(cx, and_then_snippets[1].span, "..");
     let span_snippet = snippet(cx, and_then_snippets[2].span, "span");
@@ -553,7 +615,7 @@ struct SpanSuggestionSnippets<'a> {
 }
 
 fn span_suggestion_snippets<'a, 'hir>(
-    cx: &LateContext<'_, '_>,
+    cx: &LateContext<'_>,
     span_call_args: &'hir [Expr<'hir>],
 ) -> SpanSuggestionSnippets<'a> {
     let help_snippet = snippet(cx, span_call_args[2].span, r#""...""#);
@@ -568,7 +630,7 @@ fn span_suggestion_snippets<'a, 'hir>(
 }
 
 fn suggest_suggestion(
-    cx: &LateContext<'_, '_>,
+    cx: &LateContext<'_>,
     expr: &Expr<'_>,
     and_then_snippets: &AndThenSnippets<'_>,
     span_suggestion_snippets: &SpanSuggestionSnippets<'_>,
@@ -594,7 +656,7 @@ fn suggest_suggestion(
 }
 
 fn suggest_help(
-    cx: &LateContext<'_, '_>,
+    cx: &LateContext<'_>,
     expr: &Expr<'_>,
     and_then_snippets: &AndThenSnippets<'_>,
     help: &str,
@@ -626,7 +688,7 @@ fn suggest_help(
 }
 
 fn suggest_note(
-    cx: &LateContext<'_, '_>,
+    cx: &LateContext<'_>,
     expr: &Expr<'_>,
     and_then_snippets: &AndThenSnippets<'_>,
     note: &str,
@@ -655,4 +717,204 @@ fn suggest_note(
         ),
         Applicability::MachineApplicable,
     );
+}
+
+declare_lint_pass!(MatchTypeOnDiagItem => [MATCH_TYPE_ON_DIAGNOSTIC_ITEM]);
+
+impl<'tcx> LateLintPass<'tcx> for MatchTypeOnDiagItem {
+    fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx hir::Expr<'_>) {
+        if !run_lints(cx, &[MATCH_TYPE_ON_DIAGNOSTIC_ITEM], expr.hir_id) {
+            return;
+        }
+
+        if_chain! {
+            // Check if this is a call to utils::match_type()
+            if let ExprKind::Call(fn_path, [context, ty, ty_path]) = expr.kind;
+            if let ExprKind::Path(fn_qpath) = &fn_path.kind;
+            if match_qpath(&fn_qpath, &["utils", "match_type"]);
+            // Extract the path to the matched type
+            if let Some(segments) = path_to_matched_type(cx, ty_path);
+            let segments: Vec<&str> = segments.iter().map(|sym| &**sym).collect();
+            if let Some(ty_did) = path_to_res(cx, &segments[..]).and_then(|res| res.opt_def_id());
+            // Check if the matched type is a diagnostic item
+            let diag_items = cx.tcx.diagnostic_items(ty_did.krate);
+            if let Some(item_name) = diag_items.iter().find_map(|(k, v)| if *v == ty_did { Some(k) } else { None });
+            then {
+                let cx_snippet = snippet(cx, context.span, "_");
+                let ty_snippet = snippet(cx, ty.span, "_");
+
+                span_lint_and_sugg(
+                    cx,
+                    MATCH_TYPE_ON_DIAGNOSTIC_ITEM,
+                    expr.span,
+                    "usage of `utils::match_type()` on a type diagnostic item",
+                    "try",
+                    format!("utils::is_type_diagnostic_item({}, {}, sym::{})", cx_snippet, ty_snippet, item_name),
+                    Applicability::MaybeIncorrect,
+                );
+            }
+        }
+    }
+}
+
+fn path_to_matched_type(cx: &LateContext<'_>, expr: &hir::Expr<'_>) -> Option<Vec<SymbolStr>> {
+    use rustc_hir::ItemKind;
+
+    match &expr.kind {
+        ExprKind::AddrOf(.., expr) => return path_to_matched_type(cx, expr),
+        ExprKind::Path(qpath) => match qpath_res(cx, qpath, expr.hir_id) {
+            Res::Local(hir_id) => {
+                let parent_id = cx.tcx.hir().get_parent_node(hir_id);
+                if let Some(Node::Local(local)) = cx.tcx.hir().find(parent_id) {
+                    if let Some(init) = local.init {
+                        return path_to_matched_type(cx, init);
+                    }
+                }
+            },
+            Res::Def(DefKind::Const | DefKind::Static, def_id) => {
+                if let Some(Node::Item(item)) = cx.tcx.hir().get_if_local(def_id) {
+                    if let ItemKind::Const(.., body_id) | ItemKind::Static(.., body_id) = item.kind {
+                        let body = cx.tcx.hir().body(body_id);
+                        return path_to_matched_type(cx, &body.value);
+                    }
+                }
+            },
+            _ => {},
+        },
+        ExprKind::Array(exprs) => {
+            let segments: Vec<SymbolStr> = exprs
+                .iter()
+                .filter_map(|expr| {
+                    if let ExprKind::Lit(lit) = &expr.kind {
+                        if let LitKind::Str(sym, _) = lit.node {
+                            return Some(sym.as_str());
+                        }
+                    }
+
+                    None
+                })
+                .collect();
+
+            if segments.len() == exprs.len() {
+                return Some(segments);
+            }
+        },
+        _ => {},
+    }
+
+    None
+}
+
+// This is not a complete resolver for paths. It works on all the paths currently used in the paths
+// module.  That's all it does and all it needs to do.
+pub fn check_path(cx: &LateContext<'_>, path: &[&str]) -> bool {
+    if path_to_res(cx, path).is_some() {
+        return true;
+    }
+
+    // Some implementations can't be found by `path_to_res`, particularly inherent
+    // implementations of native types. Check lang items.
+    let path_syms: Vec<_> = path.iter().map(|p| Symbol::intern(p)).collect();
+    let lang_items = cx.tcx.lang_items();
+    for lang_item in lang_items.items() {
+        if let Some(def_id) = lang_item {
+            let lang_item_path = cx.get_def_path(*def_id);
+            if path_syms.starts_with(&lang_item_path) {
+                if let [item] = &path_syms[lang_item_path.len()..] {
+                    for child in cx.tcx.item_children(*def_id) {
+                        if child.ident.name == *item {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    false
+}
+
+declare_lint_pass!(InvalidPaths => [INVALID_PATHS]);
+
+impl<'tcx> LateLintPass<'tcx> for InvalidPaths {
+    fn check_item(&mut self, cx: &LateContext<'tcx>, item: &'tcx Item<'_>) {
+        let local_def_id = &cx.tcx.parent_module(item.hir_id);
+        let mod_name = &cx.tcx.item_name(local_def_id.to_def_id());
+        if_chain! {
+            if mod_name.as_str() == "paths";
+            if let hir::ItemKind::Const(ty, body_id) = item.kind;
+            let ty = hir_ty_to_ty(cx.tcx, ty);
+            if let ty::Array(el_ty, _) = &ty.kind();
+            if let ty::Ref(_, el_ty, _) = &el_ty.kind();
+            if el_ty.is_str();
+            let body = cx.tcx.hir().body(body_id);
+            let typeck_results = cx.tcx.typeck_body(body_id);
+            if let Some(Constant::Vec(path)) = constant_simple(cx, typeck_results, &body.value);
+            let path: Vec<&str> = path.iter().map(|x| {
+                    if let Constant::Str(s) = x {
+                        s.as_str()
+                    } else {
+                        // We checked the type of the constant above
+                        unreachable!()
+                    }
+                }).collect();
+            if !check_path(cx, &path[..]);
+            then {
+                span_lint(cx, CLIPPY_LINTS_INTERNAL, item.span, "invalid path");
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct InterningDefinedSymbol {
+    // Maps the symbol value to the constant name.
+    symbol_map: FxHashMap<u32, String>,
+}
+
+impl_lint_pass!(InterningDefinedSymbol => [INTERNING_DEFINED_SYMBOL]);
+
+impl<'tcx> LateLintPass<'tcx> for InterningDefinedSymbol {
+    fn check_crate(&mut self, cx: &LateContext<'_>, _: &Crate<'_>) {
+        if !self.symbol_map.is_empty() {
+            return;
+        }
+
+        if let Some(Res::Def(_, def_id)) = path_to_res(cx, &paths::SYM_MODULE) {
+            for item in cx.tcx.item_children(def_id).iter() {
+                if_chain! {
+                    if let Res::Def(DefKind::Const, item_def_id) = item.res;
+                    let ty = cx.tcx.type_of(item_def_id);
+                    if match_type(cx, ty, &paths::SYMBOL);
+                    if let Ok(ConstValue::Scalar(value)) = cx.tcx.const_eval_poly(item_def_id);
+                    if let Ok(value) = value.to_u32();
+                    then {
+                        self.symbol_map.insert(value, item.ident.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>) {
+        if_chain! {
+            if let ExprKind::Call(func, [arg]) = &expr.kind;
+            if let ty::FnDef(def_id, _) = cx.typeck_results().expr_ty(func).kind();
+            if match_def_path(cx, *def_id, &paths::SYMBOL_INTERN);
+            if let Some(Constant::Str(arg)) = constant_simple(cx, cx.typeck_results(), arg);
+            let value = Symbol::intern(&arg).as_u32();
+            if let Some(symbol_const) = self.symbol_map.get(&value);
+            then {
+                span_lint_and_sugg(
+                    cx,
+                    INTERNING_DEFINED_SYMBOL,
+                    is_expn_of(expr.span, "sym").unwrap_or(expr.span),
+                    "interning a defined symbol",
+                    "try",
+                    format!("rustc_span::symbol::sym::{}", symbol_const),
+                    Applicability::MachineApplicable,
+                );
+            }
+        }
+    }
 }

@@ -7,7 +7,7 @@ use rustc_lint::{LateContext, LateLintPass, LintContext};
 use rustc_middle::hir::map::Map;
 use rustc_session::{declare_tool_lint, impl_lint_pass};
 use rustc_span::source_map::Span;
-use rustc_span::BytePos;
+use rustc_span::{sym, BytePos};
 
 use crate::utils::{is_type_diagnostic_item, snippet_opt, span_lint_and_help, LimitStack};
 
@@ -43,9 +43,9 @@ impl_lint_pass!(CognitiveComplexity => [COGNITIVE_COMPLEXITY]);
 
 impl CognitiveComplexity {
     #[allow(clippy::cast_possible_truncation)]
-    fn check<'a, 'tcx>(
+    fn check<'tcx>(
         &mut self,
-        cx: &'a LateContext<'a, 'tcx>,
+        cx: &LateContext<'tcx>,
         kind: FnKind<'tcx>,
         decl: &'tcx FnDecl<'_>,
         body: &'tcx Body<'_>,
@@ -60,8 +60,8 @@ impl CognitiveComplexity {
         let mut helper = CCHelper { cc: 1, returns: 0 };
         helper.visit_expr(expr);
         let CCHelper { cc, returns } = helper;
-        let ret_ty = cx.tables.node_type(expr.hir_id);
-        let ret_adjust = if is_type_diagnostic_item(cx, ret_ty, sym!(result_type)) {
+        let ret_ty = cx.typeck_results().node_type(expr.hir_id);
+        let ret_adjust = if is_type_diagnostic_item(cx, ret_ty, sym::result_type) {
             returns
         } else {
             #[allow(clippy::integer_division)]
@@ -112,10 +112,10 @@ impl CognitiveComplexity {
     }
 }
 
-impl<'a, 'tcx> LateLintPass<'a, 'tcx> for CognitiveComplexity {
+impl<'tcx> LateLintPass<'tcx> for CognitiveComplexity {
     fn check_fn(
         &mut self,
-        cx: &LateContext<'a, 'tcx>,
+        cx: &LateContext<'tcx>,
         kind: FnKind<'tcx>,
         decl: &'tcx FnDecl<'_>,
         body: &'tcx Body<'_>,
@@ -123,15 +123,15 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for CognitiveComplexity {
         hir_id: HirId,
     ) {
         let def_id = cx.tcx.hir().local_def_id(hir_id);
-        if !cx.tcx.has_attr(def_id.to_def_id(), sym!(test)) {
+        if !cx.tcx.has_attr(def_id.to_def_id(), sym::test) {
             self.check(cx, kind, decl, body, span);
         }
     }
 
-    fn enter_lint_attrs(&mut self, cx: &LateContext<'a, 'tcx>, attrs: &'tcx [Attribute]) {
+    fn enter_lint_attrs(&mut self, cx: &LateContext<'tcx>, attrs: &'tcx [Attribute]) {
         self.limit.push_attrs(cx.sess(), attrs, "cognitive_complexity");
     }
-    fn exit_lint_attrs(&mut self, cx: &LateContext<'a, 'tcx>, attrs: &'tcx [Attribute]) {
+    fn exit_lint_attrs(&mut self, cx: &LateContext<'tcx>, attrs: &'tcx [Attribute]) {
         self.limit.pop_attrs(cx.sess(), attrs, "cognitive_complexity");
     }
 }

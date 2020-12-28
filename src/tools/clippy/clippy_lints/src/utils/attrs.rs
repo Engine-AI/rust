@@ -1,5 +1,4 @@
 use rustc_ast::ast;
-use rustc_ast::expand::is_proc_macro_attr;
 use rustc_errors::Applicability;
 use rustc_session::Session;
 use std::str::FromStr;
@@ -22,6 +21,7 @@ pub const BUILTIN_ATTRIBUTES: &[(&str, DeprecationStatus)] = &[
         DeprecationStatus::Replaced("cognitive_complexity"),
     ),
     ("dump", DeprecationStatus::None),
+    ("msrv", DeprecationStatus::None),
 ];
 
 pub struct LimitStack {
@@ -58,49 +58,52 @@ pub fn get_attr<'a>(
     name: &'static str,
 ) -> impl Iterator<Item = &'a ast::Attribute> {
     attrs.iter().filter(move |attr| {
-        let attr = if let ast::AttrKind::Normal(ref attr) = attr.kind {
+        let attr = if let ast::AttrKind::Normal(ref attr, _) = attr.kind {
             attr
         } else {
             return false;
         };
         let attr_segments = &attr.path.segments;
         if attr_segments.len() == 2 && attr_segments[0].ident.to_string() == "clippy" {
-            if let Some(deprecation_status) =
-                BUILTIN_ATTRIBUTES
-                    .iter()
-                    .find_map(|(builtin_name, deprecation_status)| {
-                        if *builtin_name == attr_segments[1].ident.to_string() {
-                            Some(deprecation_status)
-                        } else {
-                            None
+            BUILTIN_ATTRIBUTES
+                .iter()
+                .find_map(|(builtin_name, deprecation_status)| {
+                    if *builtin_name == attr_segments[1].ident.to_string() {
+                        Some(deprecation_status)
+                    } else {
+                        None
+                    }
+                })
+                .map_or_else(
+                    || {
+                        sess.span_err(attr_segments[1].ident.span, "usage of unknown attribute");
+                        false
+                    },
+                    |deprecation_status| {
+                        let mut diag =
+                            sess.struct_span_err(attr_segments[1].ident.span, "usage of deprecated attribute");
+                        match *deprecation_status {
+                            DeprecationStatus::Deprecated => {
+                                diag.emit();
+                                false
+                            },
+                            DeprecationStatus::Replaced(new_name) => {
+                                diag.span_suggestion(
+                                    attr_segments[1].ident.span,
+                                    "consider using",
+                                    new_name.to_string(),
+                                    Applicability::MachineApplicable,
+                                );
+                                diag.emit();
+                                false
+                            },
+                            DeprecationStatus::None => {
+                                diag.cancel();
+                                attr_segments[1].ident.to_string() == name
+                            },
                         }
-                    })
-            {
-                let mut diag = sess.struct_span_err(attr_segments[1].ident.span, "Usage of deprecated attribute");
-                match *deprecation_status {
-                    DeprecationStatus::Deprecated => {
-                        diag.emit();
-                        false
                     },
-                    DeprecationStatus::Replaced(new_name) => {
-                        diag.span_suggestion(
-                            attr_segments[1].ident.span,
-                            "consider using",
-                            new_name.to_string(),
-                            Applicability::MachineApplicable,
-                        );
-                        diag.emit();
-                        false
-                    },
-                    DeprecationStatus::None => {
-                        diag.cancel();
-                        attr_segments[1].ident.to_string() == name
-                    },
-                }
-            } else {
-                sess.span_err(attr_segments[1].ident.span, "Usage of unknown attribute");
-                false
-            }
+                )
         } else {
             false
         }
@@ -121,8 +124,26 @@ fn parse_attrs<F: FnMut(u64)>(sess: &Session, attrs: &[ast::Attribute], name: &'
     }
 }
 
+pub fn get_unique_inner_attr(sess: &Session, attrs: &[ast::Attribute], name: &'static str) -> Option<ast::Attribute> {
+    let mut unique_attr = None;
+    for attr in get_attr(sess, attrs, name) {
+        match attr.style {
+            ast::AttrStyle::Inner if unique_attr.is_none() => unique_attr = Some(attr.clone()),
+            ast::AttrStyle::Inner => {
+                sess.struct_span_err(attr.span, &format!("`{}` is defined multiple times", name))
+                    .span_note(unique_attr.as_ref().unwrap().span, "first definition found here")
+                    .emit();
+            },
+            ast::AttrStyle::Outer => {
+                sess.span_err(attr.span, &format!("`{}` cannot be an outer attribute", name));
+            },
+        }
+    }
+    unique_attr
+}
+
 /// Return true if the attributes contain any of `proc_macro`,
 /// `proc_macro_derive` or `proc_macro_attribute`, false otherwise
-pub fn is_proc_macro(attrs: &[ast::Attribute]) -> bool {
-    attrs.iter().any(is_proc_macro_attr)
+pub fn is_proc_macro(sess: &Session, attrs: &[ast::Attribute]) -> bool {
+    attrs.iter().any(|attr| sess.is_proc_macro_attr(attr))
 }

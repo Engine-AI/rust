@@ -36,8 +36,8 @@ declare_clippy_lint! {
 
 declare_lint_pass!(ImplicitSaturatingSub => [IMPLICIT_SATURATING_SUB]);
 
-impl<'a, 'tcx> LateLintPass<'a, 'tcx> for ImplicitSaturatingSub {
-    fn check_expr(&mut self, cx: &LateContext<'a, 'tcx>, expr: &'tcx Expr<'tcx>) {
+impl<'tcx> LateLintPass<'tcx> for ImplicitSaturatingSub {
+    fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) {
         if in_macro(expr.span) {
             return;
         }
@@ -59,8 +59,7 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for ImplicitSaturatingSub {
             if let Some(target) = subtracts_one(cx, e);
 
             // Extracting out the variable name
-            if let ExprKind::Path(ref assign_path) = target.kind;
-            if let QPath::Resolved(_, ref ares_path) = assign_path;
+            if let ExprKind::Path(QPath::Resolved(_, ref ares_path)) = target.kind;
 
             then {
                 // Handle symmetric conditions in the if statement
@@ -81,7 +80,7 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for ImplicitSaturatingSub {
                 };
 
                 // Check if the variable in the condition statement is an integer
-                if !cx.tables.expr_ty(cond_var).is_integral() {
+                if !cx.typeck_results().expr_ty(cond_var).is_integral() {
                     return;
                 }
 
@@ -93,7 +92,7 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for ImplicitSaturatingSub {
                     ExprKind::Lit(ref cond_lit) => {
                         // Check if the constant is zero
                         if let LitKind::Int(0, _) = cond_lit.node {
-                            if cx.tables.expr_ty(cond_left).is_signed() {
+                            if cx.typeck_results().expr_ty(cond_left).is_signed() {
                             } else {
                                 print_lint_and_sugg(cx, &var_name, expr);
                             };
@@ -118,7 +117,7 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for ImplicitSaturatingSub {
     }
 }
 
-fn subtracts_one<'a>(cx: &LateContext<'_, '_>, expr: &Expr<'a>) -> Option<&'a Expr<'a>> {
+fn subtracts_one<'a>(cx: &LateContext<'_>, expr: &Expr<'a>) -> Option<&'a Expr<'a>> {
     match expr.kind {
         ExprKind::AssignOp(ref op1, ref target, ref value) => {
             if_chain! {
@@ -153,14 +152,14 @@ fn subtracts_one<'a>(cx: &LateContext<'_, '_>, expr: &Expr<'a>) -> Option<&'a Ex
     }
 }
 
-fn print_lint_and_sugg(cx: &LateContext<'_, '_>, var_name: &str, expr: &Expr<'_>) {
+fn print_lint_and_sugg(cx: &LateContext<'_>, var_name: &str, expr: &Expr<'_>) {
     span_lint_and_sugg(
         cx,
         IMPLICIT_SATURATING_SUB,
         expr.span,
-        "Implicitly performing saturating subtraction",
+        "implicitly performing saturating subtraction",
         "try",
-        format!("{} = {}.saturating_sub({});", var_name, var_name, 1.to_string()),
+        format!("{} = {}.saturating_sub({});", var_name, var_name, '1'),
         Applicability::MachineApplicable,
     );
 }

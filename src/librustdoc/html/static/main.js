@@ -4,6 +4,7 @@
 // Local js definitions:
 /* global addClass, getCurrentValue, hasClass */
 /* global onEachLazy, hasOwnProperty, removeClass, updateLocalStorage */
+/* global hideThemeButtonState, showThemeButtonState */
 
 if (!String.prototype.startsWith) {
     String.prototype.startsWith = function(searchString, position) {
@@ -39,12 +40,43 @@ if (!DOMTokenList.prototype.remove) {
     };
 }
 
+
+// Gets the human-readable string for the virtual-key code of the
+// given KeyboardEvent, ev.
+//
+// This function is meant as a polyfill for KeyboardEvent#key,
+// since it is not supported in IE 11 or Chrome for Android. We also test for
+// KeyboardEvent#keyCode because the handleShortcut handler is
+// also registered for the keydown event, because Blink doesn't fire
+// keypress on hitting the Escape key.
+//
+// So I guess you could say things are getting pretty interoperable.
+function getVirtualKey(ev) {
+    if ("key" in ev && typeof ev.key != "undefined") {
+        return ev.key;
+    }
+
+    var c = ev.charCode || ev.keyCode;
+    if (c == 27) {
+        return "Escape";
+    }
+    return String.fromCharCode(c);
+}
+
 function getSearchInput() {
     return document.getElementsByClassName("search-input")[0];
 }
 
 function getSearchElement() {
     return document.getElementById("search");
+}
+
+function getThemesElement() {
+    return document.getElementById("theme-choices");
+}
+
+function getThemePickerElement() {
+    return document.getElementById("theme-picker");
 }
 
 // Sets the focus on the search bar at the top of the page
@@ -89,9 +121,10 @@ function defocusSearchBar() {
                      "derive",
                      "traitalias"];
 
-    var disableShortcuts = getCurrentValue("rustdoc-disable-shortcuts") === "true";
+    var disableShortcuts = getSettingValue("disable-shortcuts") === "true";
     var search_input = getSearchInput();
     var searchTimeout = null;
+    var toggleAllDocsId = "toggle-all-docs";
 
     // On the search screen, so you remain on the last tab you opened.
     //
@@ -100,7 +133,10 @@ function defocusSearchBar() {
     // 2 for "In Return Types"
     var currentTab = 0;
 
+    var mouseMovedAfterSearch = true;
+
     var titleBeforeSearch = document.title;
+    var searchTitle = null;
 
     function clearInputTimeout() {
         if (searchTimeout !== null) {
@@ -110,9 +146,11 @@ function defocusSearchBar() {
     }
 
     function getPageId() {
-        var id = document.location.href.split("#")[1];
-        if (id) {
-            return id.split("?")[0].split("&")[0];
+        if (window.location.hash) {
+            var tmp = window.location.hash.replace(/^#/, "");
+            if (tmp.length > 0) {
+                return tmp;
+            }
         }
         return null;
     }
@@ -132,10 +170,6 @@ function defocusSearchBar() {
                 sidebar.appendChild(div);
             }
         }
-        var themePickers = document.getElementsByClassName("theme-picker");
-        if (themePickers && themePickers.length > 0) {
-            themePickers[0].style.display = "none";
-        }
     }
 
     function hideSidebar() {
@@ -150,10 +184,6 @@ function defocusSearchBar() {
             filler.remove();
         }
         document.getElementsByTagName("body")[0].style.marginTop = "";
-        var themePickers = document.getElementsByClassName("theme-picker");
-        if (themePickers && themePickers.length > 0) {
-            themePickers[0].style.display = null;
-        }
     }
 
     function showSearchResults(search) {
@@ -162,6 +192,8 @@ function defocusSearchBar() {
         }
         addClass(main, "hidden");
         removeClass(search, "hidden");
+        mouseMovedAfterSearch = false;
+        document.title = searchTitle;
     }
 
     function hideSearchResults(search) {
@@ -170,6 +202,7 @@ function defocusSearchBar() {
         }
         addClass(search, "hidden");
         removeClass(main, "hidden");
+        document.title = titleBeforeSearch;
     }
 
     // used for special search precedence
@@ -316,29 +349,8 @@ function defocusSearchBar() {
         }
     }
 
-    // Gets the human-readable string for the virtual-key code of the
-    // given KeyboardEvent, ev.
-    //
-    // This function is meant as a polyfill for KeyboardEvent#key,
-    // since it is not supported in Trident.  We also test for
-    // KeyboardEvent#keyCode because the handleShortcut handler is
-    // also registered for the keydown event, because Blink doesn't fire
-    // keypress on hitting the Escape key.
-    //
-    // So I guess you could say things are getting pretty interoperable.
-    function getVirtualKey(ev) {
-        if ("key" in ev && typeof ev.key != "undefined") {
-            return ev.key;
-        }
-
-        var c = ev.charCode || ev.keyCode;
-        if (c == 27) {
-            return "Escape";
-        }
-        return String.fromCharCode(c);
-    }
-
     function getHelpElement() {
+        buildHelperPopup();
         return document.getElementById("help");
     }
 
@@ -366,9 +378,9 @@ function defocusSearchBar() {
             clearInputTimeout();
             ev.preventDefault();
             hideSearchResults(search);
-            document.title = titleBeforeSearch;
         }
         defocusSearchBar();
+        hideThemeButtonState();
     }
 
     function handleShortcut(ev) {
@@ -403,11 +415,68 @@ function defocusSearchBar() {
                 break;
 
             case "?":
-                if (ev.shiftKey) {
-                    displayHelp(true, ev);
-                }
+                displayHelp(true, ev);
                 break;
+
+            case "t":
+            case "T":
+                displayHelp(false, ev);
+                ev.preventDefault();
+                var themePicker = getThemePickerElement();
+                themePicker.click();
+                themePicker.focus();
+                break;
+
+            default:
+                var themePicker = getThemePickerElement();
+                if (themePicker.parentNode.contains(ev.target)) {
+                    handleThemeKeyDown(ev);
+                }
             }
+        }
+    }
+
+    function handleThemeKeyDown(ev) {
+        var active = document.activeElement;
+        var themes = getThemesElement();
+        switch (getVirtualKey(ev)) {
+        case "ArrowUp":
+            ev.preventDefault();
+            if (active.previousElementSibling && ev.target.id !== "theme-picker") {
+                active.previousElementSibling.focus();
+            } else {
+                showThemeButtonState();
+                themes.lastElementChild.focus();
+            }
+            break;
+        case "ArrowDown":
+            ev.preventDefault();
+            if (active.nextElementSibling && ev.target.id !== "theme-picker") {
+                active.nextElementSibling.focus();
+            } else {
+                showThemeButtonState();
+                themes.firstElementChild.focus();
+            }
+            break;
+        case "Enter":
+        case "Return":
+        case "Space":
+            if (ev.target.id === "theme-picker" && themes.style.display === "none") {
+                ev.preventDefault();
+                showThemeButtonState();
+                themes.firstElementChild.focus();
+            }
+            break;
+        case "Home":
+            ev.preventDefault();
+            themes.firstElementChild.focus();
+            break;
+        case "End":
+            ev.preventDefault();
+            themes.lastElementChild.focus();
+            break;
+        // The escape key is handled in handleEscape, not here,
+        // so that pressing escape will close the menu even if it isn't focused
         }
     }
 
@@ -423,6 +492,12 @@ function defocusSearchBar() {
 
     document.addEventListener("keypress", handleShortcut);
     document.addEventListener("keydown", handleShortcut);
+
+    function resetMouseMoved(ev) {
+        mouseMovedAfterSearch = true;
+    }
+
+    document.addEventListener("mousemove", resetMouseMoved);
 
     var handleSourceHighlight = (function() {
         var prev_line_id = 0;
@@ -462,7 +537,9 @@ function defocusSearchBar() {
     }());
 
     document.addEventListener("click", function(ev) {
-        if (hasClass(ev.target, "collapse-toggle")) {
+        if (hasClass(ev.target, "help-button")) {
+            displayHelp(true, ev);
+        } else if (hasClass(ev.target, "collapse-toggle")) {
             collapseDocs(ev.target, "toggle");
         } else if (hasClass(ev.target.parentNode, "collapse-toggle")) {
             collapseDocs(ev.target.parentNode, "toggle");
@@ -1006,12 +1083,13 @@ function defocusSearchBar() {
                 var aliases = [];
                 var crateAliases = [];
                 var i;
-                if (filterCrates !== undefined &&
-                        ALIASES[filterCrates] &&
-                        ALIASES[filterCrates][query.search]) {
-                    for (i = 0; i < ALIASES[crate][query.search].length; ++i) {
-                        aliases.push(
-                            createAliasFromItem(searchIndex[ALIASES[filterCrates][query.search]]));
+                if (filterCrates !== undefined) {
+                    if (ALIASES[filterCrates] && ALIASES[filterCrates][query.search]) {
+                        for (i = 0; i < ALIASES[filterCrates][query.search].length; ++i) {
+                            aliases.push(
+                                createAliasFromItem(
+                                    searchIndex[ALIASES[filterCrates][query.search][i]]));
+                        }
                     }
                 } else {
                     Object.keys(ALIASES).forEach(function(crate) {
@@ -1353,20 +1431,22 @@ function defocusSearchBar() {
                 }
             };
             var mouseover_func = function(e) {
-                var el = e.target;
-                // to retrieve the real "owner" of the event.
-                while (el.tagName !== "TR") {
-                    el = el.parentNode;
-                }
-                clearTimeout(hoverTimeout);
-                hoverTimeout = setTimeout(function() {
-                    onEachLazy(document.getElementsByClassName("search-results"), function(e) {
-                        onEachLazy(e.getElementsByClassName("result"), function(i_e) {
-                            removeClass(i_e, "highlighted");
+                if (mouseMovedAfterSearch) {
+                    var el = e.target;
+                    // to retrieve the real "owner" of the event.
+                    while (el.tagName !== "TR") {
+                        el = el.parentNode;
+                    }
+                    clearTimeout(hoverTimeout);
+                    hoverTimeout = setTimeout(function() {
+                        onEachLazy(document.getElementsByClassName("search-results"), function(e) {
+                            onEachLazy(e.getElementsByClassName("result"), function(i_e) {
+                                removeClass(i_e, "highlighted");
+                            });
                         });
-                    });
-                    addClass(el, "highlighted");
-                }, 20);
+                        addClass(el, "highlighted");
+                    }, 20);
+                }
             };
             onEachLazy(document.getElementsByClassName("search-results"), function(e) {
                 onEachLazy(e.getElementsByClassName("result"), function(i_e) {
@@ -1382,22 +1462,28 @@ function defocusSearchBar() {
                 // "current" is used to know which tab we're looking into.
                 var current = 0;
                 onEachLazy(document.getElementById("results").childNodes, function(e) {
-                    onEachLazy(e.getElementsByClassName("highlighted"), function(e) {
-                        actives[current].push(e);
+                    onEachLazy(e.getElementsByClassName("highlighted"), function(h_e) {
+                        actives[current].push(h_e);
                     });
                     current += 1;
                 });
 
                 if (e.which === 38) { // up
-                    if (!actives[currentTab].length ||
-                        !actives[currentTab][0].previousElementSibling) {
-                        return;
+                    if (e.ctrlKey) { // Going through result tabs.
+                        printTab(currentTab > 0 ? currentTab - 1 : 2);
+                    } else {
+                        if (!actives[currentTab].length ||
+                            !actives[currentTab][0].previousElementSibling) {
+                            return;
+                        }
+                        addClass(actives[currentTab][0].previousElementSibling, "highlighted");
+                        removeClass(actives[currentTab][0], "highlighted");
                     }
-
-                    addClass(actives[currentTab][0].previousElementSibling, "highlighted");
-                    removeClass(actives[currentTab][0], "highlighted");
+                    e.preventDefault();
                 } else if (e.which === 40) { // down
-                    if (!actives[currentTab].length) {
+                    if (e.ctrlKey) { // Going through result tabs.
+                        printTab(currentTab > 1 ? 0 : currentTab + 1);
+                    } else if (!actives[currentTab].length) {
                         var results = document.getElementById("results").childNodes;
                         if (results.length > 0) {
                             var res = results[currentTab].getElementsByClassName("result");
@@ -1409,18 +1495,12 @@ function defocusSearchBar() {
                         addClass(actives[currentTab][0].nextElementSibling, "highlighted");
                         removeClass(actives[currentTab][0], "highlighted");
                     }
+                    e.preventDefault();
                 } else if (e.which === 13) { // return
                     if (actives[currentTab].length) {
                         document.location.href =
                             actives[currentTab][0].getElementsByTagName("a")[0].href;
                     }
-                } else if (e.which === 9) { // tab
-                    if (e.shiftKey) {
-                        printTab(currentTab > 0 ? currentTab - 1 : 2);
-                    } else {
-                        printTab(currentTab > 1 ? 0 : currentTab + 1);
-                    }
-                    e.preventDefault();
                 } else if (e.which === 16) { // shift
                     // Does nothing, it's just to avoid losing "focus" on the highlighted element.
                 } else if (actives[currentTab].length > 0) {
@@ -1529,7 +1609,7 @@ function defocusSearchBar() {
                               item.displayPath + "<span class=\"" + type + "\">" +
                               name + "</span></a></td><td>" +
                               "<a href=\"" + item.href + "\">" +
-                              "<span class=\"desc\">" + escape(item.desc) +
+                              "<span class=\"desc\">" + item.desc +
                               "&nbsp;</span></a></td></tr>";
                 });
                 output += "</table>";
@@ -1553,21 +1633,28 @@ function defocusSearchBar() {
 
         function makeTabHeader(tabNb, text, nbElems) {
             if (currentTab === tabNb) {
-                return "<div class=\"selected\">" + text +
-                       " <div class=\"count\">(" + nbElems + ")</div></div>";
+                return "<button class=\"selected\">" + text +
+                       " <div class=\"count\">(" + nbElems + ")</div></button>";
             }
-            return "<div>" + text + " <div class=\"count\">(" + nbElems + ")</div></div>";
+            return "<button>" + text + " <div class=\"count\">(" + nbElems + ")</div></button>";
         }
 
         function showResults(results) {
-            if (results.others.length === 1 &&
-                getCurrentValue("rustdoc-go-to-only-result") === "true") {
+            var search = getSearchElement();
+            if (results.others.length === 1
+                && getSettingValue("go-to-only-result") === "true"
+                // By default, the search DOM element is "empty" (meaning it has no children not
+                // text content). Once a search has been run, it won't be empty, even if you press
+                // ESC or empty the search input (which also "cancels" the search).
+                && (!search.firstChild || search.firstChild.innerText !== getSearchLoadingText()))
+            {
                 var elem = document.createElement("a");
                 elem.href = results.others[0].href;
                 elem.style.display = "none";
                 // For firefox, we need the element to be in the DOM so it can be clicked.
                 document.body.appendChild(elem);
                 elem.click();
+                return;
             }
             var query = getQuery(search_input.value);
 
@@ -1586,7 +1673,6 @@ function defocusSearchBar() {
                 "</div><div id=\"results\">" +
                 ret_others[0] + ret_in_args[0] + ret_returned[0] + "</div>";
 
-            var search = getSearchElement();
             search.innerHTML = output;
             showSearchResults(search);
             var tds = search.getElementsByTagName("td");
@@ -1706,7 +1792,7 @@ function defocusSearchBar() {
             }
 
             // Update document title to maintain a meaningful browser history
-            document.title = "Results for " + query.query + " - Rust";
+            searchTitle = "Results for " + query.query + " - Rust";
 
             // Because searching is incremental by character, only the most
             // recent search query is added to the browser history.
@@ -1925,7 +2011,9 @@ function defocusSearchBar() {
                     }
                     var link = document.createElement("a");
                     link.href = rootPath + crates[i] + "/index.html";
-                    link.title = rawSearchIndex[crates[i]].doc;
+                    // The summary in the search index has HTML, so we need to
+                    // dynamically render it as plaintext.
+                    link.title = convertHTMLToPlaintext(rawSearchIndex[crates[i]].doc);
                     link.className = klass;
                     link.textContent = crates[i];
 
@@ -1937,6 +2025,23 @@ function defocusSearchBar() {
             }
         }
     };
+
+    /**
+     * Convert HTML to plaintext:
+     *
+     *   * Replace "<code>foo</code>" with "`foo`"
+     *   * Strip all other HTML tags
+     *
+     * Used by the dynamic sidebar crate list renderer.
+     *
+     * @param  {[string]} html [The HTML to convert]
+     * @return {[string]}      [The resulting plaintext]
+     */
+    function convertHTMLToPlaintext(html) {
+        var x = document.createElement("div");
+        x.innerHTML = html.replace('<code>', '`').replace('</code>', '`');
+        return x.innerText;
+    }
 
 
     // delayed sidebar rendering.
@@ -2098,7 +2203,7 @@ function defocusSearchBar() {
     }
 
     function toggleAllDocs(pageId, fromAutoCollapse) {
-        var innerToggle = document.getElementById("toggle-all-docs");
+        var innerToggle = document.getElementById(toggleAllDocsId);
         if (!innerToggle) {
             return;
         }
@@ -2169,9 +2274,12 @@ function defocusSearchBar() {
 
         function implHider(addOrRemove, fullHide) {
             return function(n) {
-                var is_method = hasClass(n, "method") || fullHide;
-                if (is_method || hasClass(n, "type")) {
-                    if (is_method === true) {
+                var shouldHide =
+                    fullHide === true ||
+                    hasClass(n, "method") === true ||
+                    hasClass(n, "associatedconstant") === true;
+                if (shouldHide === true || hasClass(n, "type") === true) {
+                    if (shouldHide === true) {
                         if (addOrRemove) {
                             addClass(n, "hidden-by-impl-hider");
                         } else {
@@ -2179,7 +2287,7 @@ function defocusSearchBar() {
                         }
                     }
                     var ns = n.nextElementSibling;
-                    while (ns && (hasClass(ns, "docblock") || hasClass(ns, "stability"))) {
+                    while (ns && (hasClass(ns, "docblock") || hasClass(ns, "item-info"))) {
                         if (addOrRemove) {
                             addClass(ns, "hidden-by-impl-hider");
                         } else {
@@ -2195,7 +2303,7 @@ function defocusSearchBar() {
         var action = mode;
         if (hasClass(toggle.parentNode, "impl") === false) {
             relatedDoc = toggle.parentNode.nextElementSibling;
-            if (hasClass(relatedDoc, "stability")) {
+            if (hasClass(relatedDoc, "item-info")) {
                 relatedDoc = relatedDoc.nextElementSibling;
             }
             if (hasClass(relatedDoc, "docblock") || hasClass(relatedDoc, "sub-variant")) {
@@ -2227,8 +2335,7 @@ function defocusSearchBar() {
                 relatedDoc = relatedDoc.nextElementSibling;
             }
 
-            if ((!relatedDoc && hasClass(docblock, "docblock") === false) ||
-                (pageId && document.getElementById(pageId))) {
+            if (!relatedDoc && hasClass(docblock, "docblock") === false) {
                 return;
             }
 
@@ -2246,12 +2353,19 @@ function defocusSearchBar() {
             var dontApplyBlockRule = toggle.parentNode.parentNode.id !== "main";
             if (action === "show") {
                 removeClass(relatedDoc, "fns-now-collapsed");
-                removeClass(docblock, "hidden-by-usual-hider");
+                // Stability/deprecation/portability information is never hidden.
+                if (hasClass(docblock, "item-info") === false) {
+                    removeClass(docblock, "hidden-by-usual-hider");
+                }
                 onEachLazy(toggle.childNodes, adjustToggle(false, dontApplyBlockRule));
                 onEachLazy(relatedDoc.childNodes, implHider(false, dontApplyBlockRule));
             } else if (action === "hide") {
                 addClass(relatedDoc, "fns-now-collapsed");
-                addClass(docblock, "hidden-by-usual-hider");
+                // Stability/deprecation/portability information should be shown even when detailed
+                // info is hidden.
+                if (hasClass(docblock, "item-info") === false) {
+                    addClass(docblock, "hidden-by-usual-hider");
+                }
                 onEachLazy(toggle.childNodes, adjustToggle(true, dontApplyBlockRule));
                 onEachLazy(relatedDoc.childNodes, implHider(true, dontApplyBlockRule));
             }
@@ -2273,7 +2387,7 @@ function defocusSearchBar() {
     function autoCollapse(pageId, collapse) {
         if (collapse) {
             toggleAllDocs(pageId, true);
-        } else if (getCurrentValue("rustdoc-auto-hide-trait-implementations") !== "false") {
+        } else if (getSettingValue("auto-hide-trait-implementations") !== "false") {
             var impl_list = document.getElementById("trait-implementations-list");
 
             if (impl_list !== null) {
@@ -2290,11 +2404,6 @@ function defocusSearchBar() {
                 });
             }
         }
-    }
-
-    var toggles = document.getElementById("toggle-all-docs");
-    if (toggles) {
-        toggles.onclick = toggleAllDocs;
     }
 
     function insertAfter(newNode, referenceNode) {
@@ -2346,18 +2455,25 @@ function defocusSearchBar() {
     }
 
     (function() {
+        var toggles = document.getElementById(toggleAllDocsId);
+        if (toggles) {
+            toggles.onclick = toggleAllDocs;
+        }
+
         var toggle = createSimpleToggle(false);
-        var hideMethodDocs = getCurrentValue("rustdoc-auto-hide-method-docs") === "true";
+        var hideMethodDocs = getSettingValue("auto-hide-method-docs") === "true";
+        var hideImplementors = getSettingValue("auto-collapse-implementors") !== "false";
         var pageId = getPageId();
 
         var func = function(e) {
             var next = e.nextElementSibling;
+            if (next && hasClass(next, "item-info")) {
+              next = next.nextElementSibling;
+            }
             if (!next) {
                 return;
             }
-            if (hasClass(next, "docblock") === true ||
-                (hasClass(next, "stability") === true &&
-                 hasClass(next.nextElementSibling, "docblock") === true)) {
+            if (hasClass(next, "docblock")) {
                 var newToggle = toggle.cloneNode(true);
                 insertAfter(newToggle, e.childNodes[e.childNodes.length - 1]);
                 if (hideMethodDocs === true && hasClass(e, "method") === true) {
@@ -2368,6 +2484,9 @@ function defocusSearchBar() {
 
         var funcImpl = function(e) {
             var next = e.nextElementSibling;
+            if (next && hasClass(next, "item-info")) {
+                next = next.nextElementSibling;
+            }
             if (next && hasClass(next, "docblock")) {
                 next = next.nextElementSibling;
             }
@@ -2377,7 +2496,13 @@ function defocusSearchBar() {
             if (hasClass(e, "impl") &&
                 (next.getElementsByClassName("method").length > 0 ||
                  next.getElementsByClassName("associatedconstant").length > 0)) {
-                insertAfter(toggle.cloneNode(true), e.childNodes[e.childNodes.length - 1]);
+                var newToggle = toggle.cloneNode(true);
+                insertAfter(newToggle, e.childNodes[e.childNodes.length - 1]);
+                // In case the option "auto-collapse implementors" is not set to false, we collapse
+                // all implementors.
+                if (hideImplementors === true && e.parentNode.id === "implementors-list") {
+                    collapseDocs(newToggle, "hide", pageId);
+                }
             }
         };
 
@@ -2457,7 +2582,7 @@ function defocusSearchBar() {
                 });
             }
         }
-        var showItemDeclarations = getCurrentValue("rustdoc-auto-hide-" + className);
+        var showItemDeclarations = getSettingValue("auto-hide-" + className);
         if (showItemDeclarations === null) {
             if (className === "enum" || className === "macro") {
                 showItemDeclarations = "false";
@@ -2465,7 +2590,7 @@ function defocusSearchBar() {
                 showItemDeclarations = "true";
             } else {
                 // In case we found an unknown type, we just use the "parent" value.
-                showItemDeclarations = getCurrentValue("rustdoc-auto-hide-declarations");
+                showItemDeclarations = getSettingValue("auto-hide-declarations");
             }
         }
         showItemDeclarations = showItemDeclarations === "false";
@@ -2537,6 +2662,13 @@ function defocusSearchBar() {
 
         onEachLazy(document.getElementsByClassName("docblock"), buildToggleWrapper);
         onEachLazy(document.getElementsByClassName("sub-variant"), buildToggleWrapper);
+        var pageId = getPageId();
+
+        autoCollapse(pageId, getSettingValue("collapse") === "true");
+
+        if (pageId !== null) {
+            expandSection(pageId);
+        }
     }());
 
     function createToggleWrapper(tog) {
@@ -2555,7 +2687,7 @@ function defocusSearchBar() {
     (function() {
         // To avoid checking on "rustdoc-item-attributes" value on every loop...
         var itemAttributesFunc = function() {};
-        if (getCurrentValue("rustdoc-auto-hide-attributes") !== "false") {
+        if (getSettingValue("auto-hide-attributes") !== "false") {
             itemAttributesFunc = function(x) {
                 collapseDocs(x.previousSibling.childNodes[0], "toggle");
             };
@@ -2574,7 +2706,7 @@ function defocusSearchBar() {
     (function() {
         // To avoid checking on "rustdoc-line-numbers" value on every loop...
         var lineNumbersFunc = function() {};
-        if (getCurrentValue("rustdoc-line-numbers") === "true") {
+        if (getSettingValue("line-numbers") === "true") {
             lineNumbersFunc = function(x) {
                 var count = x.textContent.split("\n").length;
                 var elems = [];
@@ -2606,6 +2738,13 @@ function defocusSearchBar() {
             lineNumbersFunc(e);
         });
     }());
+
+    onEachLazy(document.getElementsByClassName("notable-traits"), function(e) {
+        e.onclick = function() {
+            this.getElementsByClassName('notable-traits-tooltiptext')[0]
+                .classList.toggle("force-tooltip");
+        };
+    });
 
     // In the search display, allows to switch between tabs.
     function printTab(nb) {
@@ -2640,7 +2779,12 @@ function defocusSearchBar() {
                                      "",
                                      "?search=" + encodeURIComponent(search_input.value));
             }
+            document.title = searchTitle;
         }
+    }
+
+    function getSearchLoadingText() {
+        return "Loading search results...";
     }
 
     if (search_input) {
@@ -2652,7 +2796,7 @@ function defocusSearchBar() {
     var params = getQueryStringParams();
     if (params && params.search) {
         var search = getSearchElement();
-        search.innerHTML = "<h3 style=\"text-align: center;\">Loading search results...</h3>";
+        search.innerHTML = "<h3 style=\"text-align: center;\">" + getSearchLoadingText() + "</h3>";
         showSearchResults(search);
     }
 
@@ -2666,16 +2810,6 @@ function defocusSearchBar() {
                 showSidebar();
             }
         };
-    }
-
-    window.onresize = function() {
-        hideSidebar();
-    };
-
-    autoCollapse(getPageId(), getCurrentValue("rustdoc-collapse") === "true");
-
-    if (window.location.hash && window.location.hash.length > 0) {
-        expandSection(window.location.hash.replace(/^#/, ""));
     }
 
     if (main) {
@@ -2698,10 +2832,17 @@ function defocusSearchBar() {
         });
     }
 
+    function enableSearchInput() {
+        if (search_input) {
+            search_input.removeAttribute('disabled');
+        }
+    }
+
     window.addSearchOptions = function(crates) {
         var elem = document.getElementById("crate-search");
 
         if (!elem) {
+            enableSearchInput();
             return;
         }
         var crates_text = [];
@@ -2723,7 +2864,7 @@ function defocusSearchBar() {
             }
             return 0;
         });
-        var savedCrate = getCurrentValue("rustdoc-saved-filter-crate");
+        var savedCrate = getSettingValue("saved-filter-crate");
         for (var i = 0; i < crates_text.length; ++i) {
             var option = document.createElement("option");
             option.value = crates_text[i];
@@ -2739,10 +2880,7 @@ function defocusSearchBar() {
                 elem.value = savedCrate;
             }
         }
-
-        if (search_input) {
-            search_input.removeAttribute('disabled');
-        }
+        enableSearchInput();
     };
 
     function buildHelperPopup() {
@@ -2750,25 +2888,33 @@ function defocusSearchBar() {
         addClass(popup, "hidden");
         popup.id = "help";
 
+        var book_info = document.createElement("span");
+        book_info.innerHTML = "You can find more information in \
+            <a href=\"https://doc.rust-lang.org/rustdoc/\">the rustdoc book</a>.";
+
         var container = document.createElement("div");
         var shortcuts = [
             ["?", "Show this help dialog"],
             ["S", "Focus the search field"],
+            ["T", "Focus the theme picker menu"],
             ["↑", "Move up in search results"],
             ["↓", "Move down in search results"],
-            ["↹", "Switch tab"],
+            ["ctrl + ↑ / ↓", "Switch result tab"],
             ["&#9166;", "Go to active search result"],
             ["+", "Expand all sections"],
             ["-", "Collapse all sections"],
-        ].map(x => "<dt><kbd>" + x[0] + "</kbd></dt><dd>" + x[1] + "</dd>").join("");
+        ].map(x => "<dt>" +
+            x[0].split(" ")
+                .map((y, index) => (index & 1) === 0 ? "<kbd>" + y + "</kbd>" : y)
+                .join("") + "</dt><dd>" + x[1] + "</dd>").join("");
         var div_shortcuts = document.createElement("div");
         addClass(div_shortcuts, "shortcuts");
         div_shortcuts.innerHTML = "<h2>Keyboard Shortcuts</h2><dl>" + shortcuts + "</dl></div>";
 
         var infos = [
             "Prefix searches with a type followed by a colon (e.g., <code>fn:</code>) to \
-             restrict the search to a given type.",
-            "Accepted types are: <code>fn</code>, <code>mod</code>, <code>struct</code>, \
+             restrict the search to a given item kind.",
+            "Accepted kinds are: <code>fn</code>, <code>mod</code>, <code>struct</code>, \
              <code>enum</code>, <code>trait</code>, <code>type</code>, <code>macro</code>, \
              and <code>const</code>.",
             "Search functions by type signature (e.g., <code>vec -&gt; usize</code> or \
@@ -2783,17 +2929,18 @@ function defocusSearchBar() {
         addClass(div_infos, "infos");
         div_infos.innerHTML = "<h2>Search Tricks</h2>" + infos;
 
+        container.appendChild(book_info);
         container.appendChild(div_shortcuts);
         container.appendChild(div_infos);
 
         popup.appendChild(container);
         insertAfter(popup, getSearchElement());
+        // So that it's only built once and then it'll do nothing when called!
+        buildHelperPopup = function() {};
     }
 
     onHashChange(null);
     window.onhashchange = onHashChange;
-
-    buildHelperPopup();
 }());
 
 // This is required in firefox. Explanations: when going back in the history, firefox doesn't re-run

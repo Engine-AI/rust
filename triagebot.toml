@@ -3,6 +3,7 @@ allow-unauthenticated = [
     "C-*", "A-*", "E-*", "NLL-*", "O-*", "S-*", "T-*", "WG-*", "F-*",
     "D-*",
     "requires-nightly",
+    "regression-*",
     # I-* without I-nominated
     "I-*", "!I-nominated",
     "AsyncAwait-OnDeck",
@@ -58,11 +59,23 @@ Thanks! <3
 """
 label = "O-ARM"
 
+[ping.risc-v]
+message = """\
+Hey RISC-V Group! This bug has been identified as a good "RISC-V candidate".
+In case it's useful, here are some [instructions] for tackling these sorts of
+bugs. Maybe take a look?
+Thanks! <3
+
+[instructions]: https://rustc-dev-guide.rust-lang.org/notification-groups/risc-v.html
+"""
+label = "O-riscv"
+
 [prioritize]
 label = "I-prioritize"
 
 [autolabel."I-prioritize"]
 trigger_labels = [
+    "regression-untriaged",
     "regression-from-stable-to-stable",
     "regression-from-stable-to-beta",
     "regression-from-stable-to-nightly",
@@ -76,44 +89,21 @@ exclude_labels = [
 ]
 
 [notify-zulip."I-prioritize"]
-zulip_stream = 227806 # #t-compiler/wg-prioritization
-topic = "I-prioritize #{number} {title}"
-message_on_add = "@*WG-prioritization* issue #{number} has been requested for prioritization."
+zulip_stream = 245100 # #t-compiler/wg-prioritization/alerts
+topic = "#{number} {title}"
+message_on_add = """\
+@*WG-prioritization/alerts* issue #{number} has been requested for prioritization.
+
+# [Procedure](https://forge.rust-lang.org/compiler/prioritization/procedure.html#assign-priority-to-unprioritized-issues-with-i-prioritize-label)
+- Priority?
+- Regression?
+- Notify people/groups?
+- Needs `I-nominated`?
+"""
 message_on_remove = "Issue #{number}'s prioritization request has been removed."
 
-[notify-zulip."I-nominated"]
-required_labels = ["T-compiler"]
-zulip_stream = 227806 # #t-compiler/wg-prioritization
-topic = "I-prioritize #{number} {title}"
-message_on_add = "@*WG-prioritization* #{number} has been nominated for discussion in `T-compiler` meeting."
-message_on_remove = "#{number}'s nomination has been removed."
-
-[notify-zulip."beta-nominated"]
-zulip_stream = 227806 # #t-compiler/wg-prioritization
-topic = "Backport #{number} {title}"
-message_on_add = "@*WG-prioritization* PR #{number} has been requested for beta backport."
-message_on_remove = "PR #{number}'s beta backport request has been removed."
-
-[notify-zulip."stable-nominated"]
-zulip_stream = 227806 # #t-compiler/wg-prioritization
-topic = "Backport #{number} {title}"
-message_on_add = "@*WG-prioritization* PR #{number} has been requested for stable backport."
-message_on_remove = "PR #{number}'s stable backport request has been removed."
-
-[notify-zulip."S-waiting-on-team"]
-required_labels = ["T-compiler"]
-zulip_stream = 227806 # #t-compiler/wg-prioritization
-topic = "S-waiting-on-team #{number} {title}"
-message_on_add = "@*WG-prioritization* PR #{number} is waiting on `T-compiler`."
-message_on_remove = "PR #{number}'s is no longer waiting on `T-compiler`."
-
-[notify-zulip."P-critical"]
-zulip_stream = 227806 # #t-compiler/wg-prioritization
-topic = "P-critical #{number} {title}"
-message_on_add = "@*WG-prioritization* issue #{number} has been assigned `P-critical`."
-
-[notify-zulip."P-high"]
-required_labels = ["regression-from-stable-to-*"]
-zulip_stream = 227806 # #t-compiler/wg-prioritization
-topic = "P-high regression #{number} {title}"
-message_on_add = "@*WG-prioritization* issue #{number} has been assigned `P-high` and is a regression."
+[github-releases]
+format = "rustc"
+project-name = "Rust"
+changelog-path = "RELEASES.md"
+changelog-branch = "master"

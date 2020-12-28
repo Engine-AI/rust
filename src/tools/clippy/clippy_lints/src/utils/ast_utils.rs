@@ -5,10 +5,21 @@
 #![allow(clippy::similar_names, clippy::wildcard_imports, clippy::enum_glob_use)]
 
 use crate::utils::{both, over};
-use rustc_ast::ast::{self, *};
 use rustc_ast::ptr::P;
+use rustc_ast::{self as ast, *};
 use rustc_span::symbol::Ident;
 use std::mem;
+
+pub mod ident_iter;
+pub use ident_iter::IdentIter;
+
+pub fn is_useless_with_eq_exprs(kind: BinOpKind) -> bool {
+    use BinOpKind::*;
+    matches!(
+        kind,
+        Sub | Div | Eq | Lt | Le | Gt | Ge | Ne | And | Or | BitXor | BitAnd | BitOr
+    )
+}
 
 /// Checks if each element in the first slice is contained within the latter as per `eq_fn`.
 pub fn unordered_over<X>(left: &[X], right: &[X], mut eq_fn: impl FnMut(&X, &X) -> bool) -> bool {
@@ -107,6 +118,14 @@ pub fn eq_expr_opt(l: &Option<P<Expr>>, r: &Option<P<Expr>>) -> bool {
     both(l, r, |l, r| eq_expr(l, r))
 }
 
+pub fn eq_struct_rest(l: &StructRest, r: &StructRest) -> bool {
+    match (l, r) {
+        (StructRest::Base(lb), StructRest::Base(rb)) => eq_expr(lb, rb),
+        (StructRest::Rest(_), StructRest::Rest(_)) | (StructRest::None, StructRest::None) => true,
+        _ => false,
+    }
+}
+
 pub fn eq_expr(l: &Expr, r: &Expr) -> bool {
     use ExprKind::*;
     if !over(&l.attrs, &r.attrs, |l, r| eq_attr(l, r)) {
@@ -150,7 +169,7 @@ pub fn eq_expr(l: &Expr, r: &Expr) -> bool {
         (Path(lq, lp), Path(rq, rp)) => both(lq, rq, |l, r| eq_qself(l, r)) && eq_path(lp, rp),
         (MacCall(l), MacCall(r)) => eq_mac_call(l, r),
         (Struct(lp, lfs, lb), Struct(rp, rfs, rb)) => {
-            eq_path(lp, rp) && eq_expr_opt(lb, rb) && unordered_over(lfs, rfs, |l, r| eq_field(l, r))
+            eq_path(lp, rp) && eq_struct_rest(lb, rb) && unordered_over(lfs, rfs, |l, r| eq_field(l, r))
         },
         _ => false,
     }
@@ -191,7 +210,9 @@ pub fn eq_stmt(l: &Stmt, r: &Stmt) -> bool {
         (Item(l), Item(r)) => eq_item(l, r, eq_item_kind),
         (Expr(l), Expr(r)) | (Semi(l), Semi(r)) => eq_expr(l, r),
         (Empty, Empty) => true,
-        (MacCall(l), MacCall(r)) => l.1 == r.1 && eq_mac_call(&l.0, &r.0) && over(&l.2, &r.2, |l, r| eq_attr(l, r)),
+        (MacCall(l), MacCall(r)) => {
+            l.style == r.style && eq_mac_call(&l.mac, &r.mac) && over(&l.attrs, &r.attrs, |l, r| eq_attr(l, r))
+        },
         _ => false,
     }
 }
@@ -387,15 +408,15 @@ pub fn eq_use_tree_kind(l: &UseTreeKind, r: &UseTreeKind) -> bool {
 }
 
 pub fn eq_defaultness(l: Defaultness, r: Defaultness) -> bool {
-    match (l, r) {
-        (Defaultness::Final, Defaultness::Final) | (Defaultness::Default(_), Defaultness::Default(_)) => true,
-        _ => false,
-    }
+    matches!(
+        (l, r),
+        (Defaultness::Final, Defaultness::Final) | (Defaultness::Default(_), Defaultness::Default(_))
+    )
 }
 
 pub fn eq_vis(l: &Visibility, r: &Visibility) -> bool {
     use VisibilityKind::*;
-    match (&l.node, &r.node) {
+    match (&l.kind, &r.kind) {
         (Public, Public) | (Inherited, Inherited) | (Crate(_), Crate(_)) => true,
         (Restricted { path: l, .. }, Restricted { path: r, .. }) => eq_path(l, r),
         _ => false,
@@ -476,7 +497,7 @@ pub fn eq_generic_param(l: &GenericParam, r: &GenericParam) -> bool {
         && match (&l.kind, &r.kind) {
             (Lifetime, Lifetime) => true,
             (Type { default: l }, Type { default: r }) => both(l, r, |l, r| eq_ty(l, r)),
-            (Const { ty: l }, Const { ty: r }) => eq_ty(l, r),
+            (Const { ty: l, kw_span: _ }, Const { ty: r, kw_span: _ }) => eq_ty(l, r),
             _ => false,
         }
         && over(&l.attrs, &r.attrs, |l, r| eq_attr(l, r))
@@ -509,8 +530,8 @@ pub fn eq_attr(l: &Attribute, r: &Attribute) -> bool {
     use AttrKind::*;
     l.style == r.style
         && match (&l.kind, &r.kind) {
-            (DocComment(l), DocComment(r)) => l == r,
-            (Normal(l), Normal(r)) => eq_path(&l.path, &r.path) && eq_mac_args(&l.args, &r.args),
+            (DocComment(l1, l2), DocComment(r1, r2)) => l1 == r1 && l2 == r2,
+            (Normal(l, _), Normal(r, _)) => eq_path(&l.path, &r.path) && eq_mac_args(&l.args, &r.args),
             _ => false,
         }
 }

@@ -19,19 +19,19 @@ Useful Rustc dev guide links:
 Sometimes you may want to retrieve the type `Ty` of an expression `Expr`, for example to answer following questions:
 
 - which type does this expression correspond to (using its [`TyKind`][TyKind])?
-- is it a sized type? 
+- is it a sized type?
 - is it a primitive type?
 - does it implement a trait?
 
-This operation is performed using the [`expr_ty()`][expr_ty] method from the [`TypeckTables`][TypeckTables] struct, 
+This operation is performed using the [`expr_ty()`][expr_ty] method from the [`TypeckResults`][TypeckResults] struct,
 that gives you access to the underlying structure [`TyS`][TyS].
 
 Example of use:
 ```rust
-impl LateLintPass<'_, '_> for MyStructLint {
-    fn check_expr(&mut self, cx: &LateContext<'_, '_>, expr: &Expr<'_>) {
+impl LateLintPass<'_> for MyStructLint {
+    fn check_expr(&mut self, cx: &LateContext<'_>, expr: &Expr<'_>) {
         // Get type of `expr`
-        let ty = cx.tables.expr_ty(expr);
+        let ty = cx.typeck_results().expr_ty(expr);
         // Match its kind to enter its type
         match ty.kind {
             ty::Adt(adt_def, _) if adt_def.is_struct() => println!("Our `expr` is a struct!"),
@@ -41,26 +41,28 @@ impl LateLintPass<'_, '_> for MyStructLint {
 }
 ```
 
-Similarly in [`TypeckTables`][TypeckTables] methods, you have the [`pat_ty()`][pat_ty] method 
+Similarly in [`TypeckResults`][TypeckResults] methods, you have the [`pat_ty()`][pat_ty] method
 to retrieve a type from a pattern.
 
 Two noticeable items here:
-- `cx` is the lint context [`LateContext`][LateContext]. 
-  The two most useful data structures in this context are `tcx` and `tables`, 
-  allowing us to jump to type definitions and other compilation stages such as HIR.
-- `tables` is [`TypeckTables`][TypeckTables] and is created by type checking step, 
-  it includes useful information such as types of expressions, ways to resolve methods and so on.
+- `cx` is the lint context [`LateContext`][LateContext]. The two most useful
+  data structures in this context are `tcx` and the `TypeckResults` returned by
+  `LateContext::typeck_results`, allowing us to jump to type definitions and
+  other compilation stages such as HIR.
+- `typeck_results`'s return value is [`TypeckResults`][TypeckResults] and is
+  created by type checking step, it includes useful information such as types
+  of expressions, ways to resolve methods and so on.
 
 # Checking if an expr is calling a specific method
 
 Starting with an `expr`, you can check whether it is calling a specific method `some_method`:
 
 ```rust
-impl LateLintPass<'_, '_> for MyStructLint {
-    fn check_expr(&mut self, cx: &LateContext<'a, 'tcx>, expr: &'tcx hir::Expr<'_>) {
+impl LateLintPass<'_> for MyStructLint {
+    fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx hir::Expr<'_>) {
         if_chain! {
             // Check our expr is calling a method
-            if let hir::ExprKind::MethodCall(path, _, _args) = &expr.kind;
+            if let hir::ExprKind::MethodCall(path, _, _args, _) = &expr.kind;
             // Check the name of this method is `some_method`
             if path.ident.name == sym!(some_method);
             then {
@@ -78,8 +80,8 @@ There are two ways to do this, depending if the target trait is part of lang ite
 ```rust
 use crate::utils::{implements_trait, match_trait_method, paths};
 
-impl LateLintPass<'_, '_> for MyStructLint {
-    fn check_expr(&mut self, cx: &LateContext<'_, '_>, expr: &Expr<'_>) {
+impl LateLintPass<'_> for MyStructLint {
+    fn check_expr(&mut self, cx: &LateContext<'_>, expr: &Expr<'_>) {
         // 1. Using expression and Clippy's convenient method
         // we use `match_trait_method` function from Clippy's toolbox
         if match_trait_method(cx, expr, &paths::INTO) {
@@ -87,7 +89,7 @@ impl LateLintPass<'_, '_> for MyStructLint {
         }
 
         // 2. Using type context `TyCtxt`
-        let ty = cx.tables.expr_ty(expr);
+        let ty = cx.typeck_results().expr_ty(expr);
         if cx.tcx.lang_items()
             // we are looking for the `DefId` of `Drop` trait in lang items
             .drop_trait()
@@ -112,8 +114,8 @@ To check if our type defines a method called `some_method`:
 ```rust
 use crate::utils::{is_type_diagnostic_item, return_ty};
 
-impl<'a, 'tcx> LateLintPass<'a, 'tcx> for MyTypeImpl {
-    fn check_impl_item(&mut self, cx: &LateContext<'a, 'tcx>, impl_item: &'tcx ImplItem<'_>) {
+impl<'tcx> LateLintPass<'tcx> for MyTypeImpl {
+    fn check_impl_item(&mut self, cx: &LateContext<'tcx>, impl_item: &'tcx ImplItem<'_>) {
         if_chain! {
             // Check if item is a method/function
             if let ImplItemKind::Fn(ref signature, _) = impl_item.kind;
@@ -192,9 +194,9 @@ assert_eq!(differing_macro_contexts(x_is_some_span, x_unwrap_span), true);
 
 [TyS]: https://doc.rust-lang.org/nightly/nightly-rustc/rustc_middle/ty/struct.TyS.html
 [TyKind]: https://doc.rust-lang.org/nightly/nightly-rustc/rustc_middle/ty/enum.TyKind.html
-[TypeckTables]: https://doc.rust-lang.org/nightly/nightly-rustc/rustc_middle/ty/struct.TypeckTables.html
-[expr_ty]: https://doc.rust-lang.org/nightly/nightly-rustc/rustc_middle/ty/struct.TypeckTables.html#method.expr_ty
+[TypeckResults]: https://doc.rust-lang.org/nightly/nightly-rustc/rustc_middle/ty/struct.TypeckResults.html
+[expr_ty]: https://doc.rust-lang.org/nightly/nightly-rustc/rustc_middle/ty/struct.TypeckResults.html#method.expr_ty
 [LateContext]: https://doc.rust-lang.org/nightly/nightly-rustc/rustc_lint/struct.LateContext.html
 [TyCtxt]: https://doc.rust-lang.org/nightly/nightly-rustc/rustc_middle/ty/context/struct.TyCtxt.html
-[pat_ty]: https://doc.rust-lang.org/nightly/nightly-rustc/rustc_middle/ty/context/struct.TypeckTables.html#method.pat_ty
+[pat_ty]: https://doc.rust-lang.org/nightly/nightly-rustc/rustc_middle/ty/context/struct.TypeckResults.html#method.pat_ty
 [paths]: ../clippy_lints/src/utils/paths.rs

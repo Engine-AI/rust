@@ -3,13 +3,13 @@ use crate::utils::differing_macro_contexts;
 use rustc_ast::ast::InlineAsmTemplatePiece;
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
 use rustc_hir::{
-    BinOpKind, Block, BlockCheckMode, BodyId, BorrowKind, CaptureBy, Expr, ExprKind, Field, FnRetTy, GenericArg,
-    GenericArgs, Guard, InlineAsmOperand, Lifetime, LifetimeName, ParamName, Pat, PatKind, Path, PathSegment, QPath,
-    Stmt, StmtKind, Ty, TyKind, TypeBinding,
+    BinOpKind, Block, BlockCheckMode, BodyId, BorrowKind, CaptureBy, Expr, ExprKind, Field, FieldPat, FnRetTy,
+    GenericArg, GenericArgs, Guard, InlineAsmOperand, Lifetime, LifetimeName, ParamName, Pat, PatKind, Path,
+    PathSegment, QPath, Stmt, StmtKind, Ty, TyKind, TypeBinding,
 };
 use rustc_lint::LateContext;
 use rustc_middle::ich::StableHashingContextProvider;
-use rustc_middle::ty::TypeckTables;
+use rustc_middle::ty::TypeckResults;
 use rustc_span::Symbol;
 use std::hash::Hash;
 
@@ -21,27 +21,25 @@ use std::hash::Hash;
 /// Note that some expressions kinds are not considered but could be added.
 pub struct SpanlessEq<'a, 'tcx> {
     /// Context used to evaluate constant expressions.
-    cx: &'a LateContext<'a, 'tcx>,
-    tables: &'a TypeckTables<'tcx>,
-    /// If is true, never consider as equal expressions containing function
-    /// calls.
-    ignore_fn: bool,
+    cx: &'a LateContext<'tcx>,
+    maybe_typeck_results: Option<&'tcx TypeckResults<'tcx>>,
+    allow_side_effects: bool,
 }
 
 impl<'a, 'tcx> SpanlessEq<'a, 'tcx> {
-    pub fn new(cx: &'a LateContext<'a, 'tcx>) -> Self {
+    pub fn new(cx: &'a LateContext<'tcx>) -> Self {
         Self {
             cx,
-            tables: cx.tables,
-            ignore_fn: false,
+            maybe_typeck_results: cx.maybe_typeck_results(),
+            allow_side_effects: true,
         }
     }
 
-    pub fn ignore_fn(self) -> Self {
+    /// Consider expressions containing potential side effects as not equal.
+    pub fn deny_side_effects(self) -> Self {
         Self {
-            cx: self.cx,
-            tables: self.cx.tables,
-            ignore_fn: true,
+            allow_side_effects: false,
+            ..self
         }
     }
 
@@ -68,20 +66,22 @@ impl<'a, 'tcx> SpanlessEq<'a, 'tcx> {
 
     #[allow(clippy::similar_names)]
     pub fn eq_expr(&mut self, left: &Expr<'_>, right: &Expr<'_>) -> bool {
-        if self.ignore_fn && differing_macro_contexts(left.span, right.span) {
+        if !self.allow_side_effects && differing_macro_contexts(left.span, right.span) {
             return false;
         }
 
-        if let (Some(l), Some(r)) = (
-            constant_simple(self.cx, self.tables, left),
-            constant_simple(self.cx, self.tables, right),
-        ) {
-            if l == r {
-                return true;
+        if let Some(typeck_results) = self.maybe_typeck_results {
+            if let (Some(l), Some(r)) = (
+                constant_simple(self.cx, typeck_results, left),
+                constant_simple(self.cx, typeck_results, right),
+            ) {
+                if l == r {
+                    return true;
+                }
             }
         }
 
-        match (&left.kind, &right.kind) {
+        match (&reduce_exprkind(&left.kind), &reduce_exprkind(&right.kind)) {
             (&ExprKind::AddrOf(lb, l_mut, ref le), &ExprKind::AddrOf(rb, r_mut, ref re)) => {
                 lb == rb && l_mut == r_mut && self.eq_expr(le, re)
             },
@@ -89,10 +89,10 @@ impl<'a, 'tcx> SpanlessEq<'a, 'tcx> {
                 both(&li.label, &ri.label, |l, r| l.ident.as_str() == r.ident.as_str())
             },
             (&ExprKind::Assign(ref ll, ref lr, _), &ExprKind::Assign(ref rl, ref rr, _)) => {
-                self.eq_expr(ll, rl) && self.eq_expr(lr, rr)
+                self.allow_side_effects && self.eq_expr(ll, rl) && self.eq_expr(lr, rr)
             },
             (&ExprKind::AssignOp(ref lo, ref ll, ref lr), &ExprKind::AssignOp(ref ro, ref rl, ref rr)) => {
-                lo.node == ro.node && self.eq_expr(ll, rl) && self.eq_expr(lr, rr)
+                self.allow_side_effects && lo.node == ro.node && self.eq_expr(ll, rl) && self.eq_expr(lr, rr)
             },
             (&ExprKind::Block(ref l, _), &ExprKind::Block(ref r, _)) => self.eq_block(l, r),
             (&ExprKind::Binary(l_op, ref ll, ref lr), &ExprKind::Binary(r_op, ref rl, ref rr)) => {
@@ -107,7 +107,7 @@ impl<'a, 'tcx> SpanlessEq<'a, 'tcx> {
             },
             (&ExprKind::Box(ref l), &ExprKind::Box(ref r)) => self.eq_expr(l, r),
             (&ExprKind::Call(l_fun, l_args), &ExprKind::Call(r_fun, r_args)) => {
-                !self.ignore_fn && self.eq_expr(l_fun, r_fun) && self.eq_exprs(l_args, r_args)
+                self.allow_side_effects && self.eq_expr(l_fun, r_fun) && self.eq_exprs(l_args, r_args)
             },
             (&ExprKind::Cast(ref lx, ref lt), &ExprKind::Cast(ref rx, ref rt))
             | (&ExprKind::Type(ref lx, ref lt), &ExprKind::Type(ref rx, ref rt)) => {
@@ -133,12 +133,12 @@ impl<'a, 'tcx> SpanlessEq<'a, 'tcx> {
                     })
             },
             (&ExprKind::MethodCall(l_path, _, l_args, _), &ExprKind::MethodCall(r_path, _, r_args, _)) => {
-                !self.ignore_fn && self.eq_path_segment(l_path, r_path) && self.eq_exprs(l_args, r_args)
+                self.allow_side_effects && self.eq_path_segment(l_path, r_path) && self.eq_exprs(l_args, r_args)
             },
             (&ExprKind::Repeat(ref le, ref ll_id), &ExprKind::Repeat(ref re, ref rl_id)) => {
-                let mut celcx = constant_context(self.cx, self.cx.tcx.body_tables(ll_id.body));
+                let mut celcx = constant_context(self.cx, self.cx.tcx.typeck_body(ll_id.body));
                 let ll = celcx.expr(&self.cx.tcx.hir().body(ll_id.body).value);
-                let mut celcx = constant_context(self.cx, self.cx.tcx.body_tables(rl_id.body));
+                let mut celcx = constant_context(self.cx, self.cx.tcx.typeck_body(rl_id.body));
                 let rl = celcx.expr(&self.cx.tcx.hir().body(rl_id.body).value);
 
                 self.eq_expr(le, re) && ll == rl
@@ -169,6 +169,8 @@ impl<'a, 'tcx> SpanlessEq<'a, 'tcx> {
     fn eq_guard(&mut self, left: &Guard<'_>, right: &Guard<'_>) -> bool {
         match (left, right) {
             (Guard::If(l), Guard::If(r)) => self.eq_expr(l, r),
+            (Guard::IfLet(lp, le), Guard::IfLet(rp, re)) => self.eq_pat(lp, rp) && self.eq_expr(le, re),
+            _ => false,
         }
     }
 
@@ -184,10 +186,18 @@ impl<'a, 'tcx> SpanlessEq<'a, 'tcx> {
         left.name == right.name
     }
 
+    pub fn eq_fieldpat(&mut self, left: &FieldPat<'_>, right: &FieldPat<'_>) -> bool {
+        let (FieldPat { ident: li, pat: lp, .. }, FieldPat { ident: ri, pat: rp, .. }) = (&left, &right);
+        li.name.as_str() == ri.name.as_str() && self.eq_pat(lp, rp)
+    }
+
     /// Checks whether two patterns are the same.
     pub fn eq_pat(&mut self, left: &Pat<'_>, right: &Pat<'_>) -> bool {
         match (&left.kind, &right.kind) {
             (&PatKind::Box(ref l), &PatKind::Box(ref r)) => self.eq_pat(l, r),
+            (&PatKind::Struct(ref lp, ref la, ..), &PatKind::Struct(ref rp, ref ra, ..)) => {
+                self.eq_qpath(lp, rp) && over(la, ra, |l, r| self.eq_fieldpat(l, r))
+            },
             (&PatKind::TupleStruct(ref lp, ref la, ls), &PatKind::TupleStruct(ref rp, ref ra, rs)) => {
                 self.eq_qpath(lp, rp) && over(la, ra, |l, r| self.eq_pat(l, r)) && ls == rs
             },
@@ -222,6 +232,7 @@ impl<'a, 'tcx> SpanlessEq<'a, 'tcx> {
             (&QPath::TypeRelative(ref lty, ref lseg), &QPath::TypeRelative(ref rty, ref rseg)) => {
                 self.eq_ty(lty, rty) && self.eq_path_segment(lseg, rseg)
             },
+            (&QPath::LangItem(llang_item, _), &QPath::LangItem(rlang_item, _)) => llang_item == rlang_item,
             _ => false,
         }
     }
@@ -252,14 +263,8 @@ impl<'a, 'tcx> SpanlessEq<'a, 'tcx> {
     pub fn eq_path_segment(&mut self, left: &PathSegment<'_>, right: &PathSegment<'_>) -> bool {
         // The == of idents doesn't work with different contexts,
         // we have to be explicit about hygiene
-        if left.ident.as_str() != right.ident.as_str() {
-            return false;
-        }
-        match (&left.args, &right.args) {
-            (&None, &None) => true,
-            (&Some(ref l), &Some(ref r)) => self.eq_path_parameters(l, r),
-            _ => false,
-        }
+        left.ident.as_str() == right.ident.as_str()
+            && both(&left.args, &right.args, |l, r| self.eq_path_parameters(l, r))
     }
 
     pub fn eq_ty(&mut self, left: &Ty<'_>, right: &Ty<'_>) -> bool {
@@ -271,18 +276,18 @@ impl<'a, 'tcx> SpanlessEq<'a, 'tcx> {
         match (left, right) {
             (&TyKind::Slice(ref l_vec), &TyKind::Slice(ref r_vec)) => self.eq_ty(l_vec, r_vec),
             (&TyKind::Array(ref lt, ref ll_id), &TyKind::Array(ref rt, ref rl_id)) => {
-                let full_table = self.tables;
+                let old_maybe_typeck_results = self.maybe_typeck_results;
 
-                let mut celcx = constant_context(self.cx, self.cx.tcx.body_tables(ll_id.body));
-                self.tables = self.cx.tcx.body_tables(ll_id.body);
+                let mut celcx = constant_context(self.cx, self.cx.tcx.typeck_body(ll_id.body));
+                self.maybe_typeck_results = Some(self.cx.tcx.typeck_body(ll_id.body));
                 let ll = celcx.expr(&self.cx.tcx.hir().body(ll_id.body).value);
 
-                let mut celcx = constant_context(self.cx, self.cx.tcx.body_tables(rl_id.body));
-                self.tables = self.cx.tcx.body_tables(rl_id.body);
+                let mut celcx = constant_context(self.cx, self.cx.tcx.typeck_body(rl_id.body));
+                self.maybe_typeck_results = Some(self.cx.tcx.typeck_body(rl_id.body));
                 let rl = celcx.expr(&self.cx.tcx.hir().body(rl_id.body).value);
 
                 let eq_ty = self.eq_ty(lt, rt);
-                self.tables = full_table;
+                self.maybe_typeck_results = old_maybe_typeck_results;
                 eq_ty && ll == rl
             },
             (&TyKind::Ptr(ref l_mut), &TyKind::Ptr(ref r_mut)) => {
@@ -303,24 +308,47 @@ impl<'a, 'tcx> SpanlessEq<'a, 'tcx> {
     }
 }
 
+/// Some simple reductions like `{ return }` => `return`
+fn reduce_exprkind<'hir>(kind: &'hir ExprKind<'hir>) -> &ExprKind<'hir> {
+    if let ExprKind::Block(block, _) = kind {
+        match (block.stmts, block.expr) {
+            // `{}` => `()`
+            ([], None) => &ExprKind::Tup(&[]),
+            ([], Some(expr)) => match expr.kind {
+                // `{ return .. }` => `return ..`
+                ExprKind::Ret(..) => &expr.kind,
+                _ => kind,
+            },
+            ([stmt], None) => match stmt.kind {
+                StmtKind::Expr(expr) | StmtKind::Semi(expr) => match expr.kind {
+                    // `{ return ..; }` => `return ..`
+                    ExprKind::Ret(..) => &expr.kind,
+                    _ => kind,
+                },
+                _ => kind,
+            },
+            _ => kind,
+        }
+    } else {
+        kind
+    }
+}
+
 fn swap_binop<'a>(
     binop: BinOpKind,
     lhs: &'a Expr<'a>,
     rhs: &'a Expr<'a>,
 ) -> Option<(BinOpKind, &'a Expr<'a>, &'a Expr<'a>)> {
     match binop {
-        BinOpKind::Add
-        | BinOpKind::Mul
-        | BinOpKind::Eq
-        | BinOpKind::Ne
-        | BinOpKind::BitAnd
-        | BinOpKind::BitXor
-        | BinOpKind::BitOr => Some((binop, rhs, lhs)),
+        BinOpKind::Add | BinOpKind::Eq | BinOpKind::Ne | BinOpKind::BitAnd | BinOpKind::BitXor | BinOpKind::BitOr => {
+            Some((binop, rhs, lhs))
+        },
         BinOpKind::Lt => Some((BinOpKind::Gt, rhs, lhs)),
         BinOpKind::Le => Some((BinOpKind::Ge, rhs, lhs)),
         BinOpKind::Ge => Some((BinOpKind::Le, rhs, lhs)),
         BinOpKind::Gt => Some((BinOpKind::Lt, rhs, lhs)),
-        BinOpKind::Shl
+        BinOpKind::Mul // Not always commutative, e.g. with matrices. See issue #5698
+        | BinOpKind::Shl
         | BinOpKind::Shr
         | BinOpKind::Rem
         | BinOpKind::Sub
@@ -342,6 +370,11 @@ pub fn over<X>(left: &[X], right: &[X], mut eq_fn: impl FnMut(&X, &X) -> bool) -
     left.len() == right.len() && left.iter().zip(right).all(|(x, y)| eq_fn(x, y))
 }
 
+/// Checks if two expressions evaluate to the same value, and don't contain any side effects.
+pub fn eq_expr_value(cx: &LateContext<'_>, left: &Expr<'_>, right: &Expr<'_>) -> bool {
+    SpanlessEq::new(cx).deny_side_effects().eq_expr(left, right)
+}
+
 /// Type used to hash an ast element. This is different from the `Hash` trait
 /// on ast types as this
 /// trait would consider IDs and spans.
@@ -349,16 +382,16 @@ pub fn over<X>(left: &[X], right: &[X], mut eq_fn: impl FnMut(&X, &X) -> bool) -
 /// All expressions kind are hashed, but some might have a weaker hash.
 pub struct SpanlessHash<'a, 'tcx> {
     /// Context used to evaluate constant expressions.
-    cx: &'a LateContext<'a, 'tcx>,
-    tables: &'a TypeckTables<'tcx>,
+    cx: &'a LateContext<'tcx>,
+    maybe_typeck_results: Option<&'tcx TypeckResults<'tcx>>,
     s: StableHasher,
 }
 
 impl<'a, 'tcx> SpanlessHash<'a, 'tcx> {
-    pub fn new(cx: &'a LateContext<'a, 'tcx>, tables: &'a TypeckTables<'tcx>) -> Self {
+    pub fn new(cx: &'a LateContext<'tcx>) -> Self {
         Self {
             cx,
-            tables,
+            maybe_typeck_results: cx.maybe_typeck_results(),
             s: StableHasher::new(),
         }
     }
@@ -387,7 +420,9 @@ impl<'a, 'tcx> SpanlessHash<'a, 'tcx> {
 
     #[allow(clippy::many_single_char_names, clippy::too_many_lines)]
     pub fn hash_expr(&mut self, e: &Expr<'_>) {
-        let simple_const = constant_simple(self.cx, self.tables, e);
+        let simple_const = self
+            .maybe_typeck_results
+            .and_then(|typeck_results| constant_simple(self.cx, typeck_results, e));
 
         // const hashing may result in the same hash as some unrelated node, so add a sort of
         // discriminant depending on which path we're choosing next
@@ -458,7 +493,7 @@ impl<'a, 'tcx> SpanlessHash<'a, 'tcx> {
                     CaptureBy::Ref => 1,
                 }
                 .hash(&mut self.s);
-                // closures inherit TypeckTables
+                // closures inherit TypeckResults
                 self.hash_expr(&self.cx.tcx.hir().body(eid).value);
             },
             ExprKind::Field(ref e, ref f) => {
@@ -484,7 +519,7 @@ impl<'a, 'tcx> SpanlessHash<'a, 'tcx> {
                     }
                 }
                 asm.options.hash(&mut self.s);
-                for op in asm.operands {
+                for (op, _op_sp) in asm.operands {
                     match op {
                         InlineAsmOperand::In { reg, expr } => {
                             reg.hash(&mut self.s);
@@ -546,6 +581,9 @@ impl<'a, 'tcx> SpanlessHash<'a, 'tcx> {
                 self.hash_name(path.ident.name);
                 self.hash_exprs(args);
             },
+            ExprKind::ConstBlock(ref l_id) => {
+                self.hash_body(l_id.body);
+            },
             ExprKind::Repeat(ref e, ref l_id) => {
                 self.hash_expr(e);
                 self.hash_body(l_id.body);
@@ -601,8 +639,11 @@ impl<'a, 'tcx> SpanlessHash<'a, 'tcx> {
             QPath::TypeRelative(_, ref path) => {
                 self.hash_name(path.ident.name);
             },
+            QPath::LangItem(lang_item, ..) => {
+                lang_item.hash_stable(&mut self.cx.tcx.get_stable_hashing_context(), &mut self.s);
+            },
         }
-        // self.cx.tables.qpath_res(p, id).hash(&mut self.s);
+        // self.maybe_typeck_results.unwrap().qpath_res(p, id).hash(&mut self.s);
     }
 
     pub fn hash_path(&mut self, p: &Path<'_>) {
@@ -630,7 +671,7 @@ impl<'a, 'tcx> SpanlessHash<'a, 'tcx> {
 
     pub fn hash_guard(&mut self, g: &Guard<'_>) {
         match g {
-            Guard::If(ref expr) => {
+            Guard::If(ref expr) | Guard::IfLet(_, ref expr) => {
                 self.hash_expr(expr);
             },
         }
@@ -703,21 +744,19 @@ impl<'a, 'tcx> SpanlessHash<'a, 'tcx> {
                     }
                     for segment in path.segments {
                         segment.ident.name.hash(&mut self.s);
+                        self.hash_generic_args(segment.generic_args().args);
                     }
                 },
                 QPath::TypeRelative(ref ty, ref segment) => {
                     self.hash_ty(ty);
                     segment.ident.name.hash(&mut self.s);
                 },
+                QPath::LangItem(lang_item, ..) => {
+                    lang_item.hash(&mut self.s);
+                },
             },
             TyKind::OpaqueDef(_, arg_list) => {
-                for arg in *arg_list {
-                    match arg {
-                        GenericArg::Lifetime(ref l) => self.hash_lifetime(l),
-                        GenericArg::Type(ref ty) => self.hash_ty(&ty),
-                        GenericArg::Const(ref ca) => self.hash_body(ca.value.body),
-                    }
-                }
+                self.hash_generic_args(arg_list);
             },
             TyKind::TraitObject(_, lifetime) => {
                 self.hash_lifetime(lifetime);
@@ -730,10 +769,19 @@ impl<'a, 'tcx> SpanlessHash<'a, 'tcx> {
     }
 
     pub fn hash_body(&mut self, body_id: BodyId) {
-        // swap out TypeckTables when hashing a body
-        let old_tables = self.tables;
-        self.tables = self.cx.tcx.body_tables(body_id);
+        // swap out TypeckResults when hashing a body
+        let old_maybe_typeck_results = self.maybe_typeck_results.replace(self.cx.tcx.typeck_body(body_id));
         self.hash_expr(&self.cx.tcx.hir().body(body_id).value);
-        self.tables = old_tables;
+        self.maybe_typeck_results = old_maybe_typeck_results;
+    }
+
+    fn hash_generic_args(&mut self, arg_list: &[GenericArg<'_>]) {
+        for arg in arg_list {
+            match arg {
+                GenericArg::Lifetime(ref l) => self.hash_lifetime(l),
+                GenericArg::Type(ref ty) => self.hash_ty(&ty),
+                GenericArg::Const(ref ca) => self.hash_body(ca.value.body),
+            }
+        }
     }
 }
