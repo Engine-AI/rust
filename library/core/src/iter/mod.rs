@@ -389,6 +389,8 @@ pub use self::traits::{
     DoubleEndedIterator, ExactSizeIterator, Extend, FromIterator, IntoIterator, Product, Sum,
 };
 
+#[unstable(feature = "iter_zip", issue = "83574")]
+pub use self::adapters::zip;
 #[stable(feature = "iter_cloned", since = "1.1.0")]
 pub use self::adapters::Cloned;
 #[stable(feature = "iter_copied", since = "1.36.0")]
@@ -408,6 +410,8 @@ pub use self::adapters::{
     Chain, Cycle, Enumerate, Filter, FilterMap, FlatMap, Fuse, Inspect, Map, Peekable, Rev, Scan,
     Skip, SkipWhile, Take, TakeWhile, Zip,
 };
+#[unstable(feature = "iter_intersperse", reason = "recently added", issue = "79524")]
+pub use self::adapters::{Intersperse, IntersperseWith};
 
 pub(crate) use self::adapters::process_results;
 

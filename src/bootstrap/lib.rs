@@ -547,7 +547,7 @@ impl Build {
     fn std_features(&self, target: TargetSelection) -> String {
         let mut features = "panic-unwind".to_string();
 
-        match self.config.llvm_libunwind.unwrap_or_default() {
+        match self.config.llvm_libunwind {
             LlvmLibunwind::InTree => features.push_str(" llvm-libunwind"),
             LlvmLibunwind::System => features.push_str(" system-llvm-libunwind"),
             LlvmLibunwind::No => {}
@@ -635,6 +635,10 @@ impl Build {
     /// Output directory for all documentation for a target
     fn doc_out(&self, target: TargetSelection) -> PathBuf {
         self.out.join(&*target.triple).join("doc")
+    }
+
+    fn test_out(&self, target: TargetSelection) -> PathBuf {
+        self.out.join(&*target.triple).join("test")
     }
 
     /// Output directory for all documentation for a target
@@ -1083,7 +1087,7 @@ impl Build {
         if let Some(ref s) = self.config.description {
             version.push_str(" (");
             version.push_str(s);
-            version.push_str(")");
+            version.push(')');
         }
         version
     }
@@ -1144,7 +1148,7 @@ impl Build {
                     && (dep != "profiler_builtins"
                         || target
                             .map(|t| self.config.profiler_enabled(t))
-                            .unwrap_or(self.config.any_profiler_enabled()))
+                            .unwrap_or_else(|| self.config.any_profiler_enabled()))
                     && (dep != "rustc_codegen_llvm" || self.config.llvm_enabled())
                 {
                     list.push(*dep);

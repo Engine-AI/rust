@@ -203,6 +203,10 @@ function betterLookingDiff(entry, data) {
         if (!entry.hasOwnProperty(key)) {
             continue;
         }
+        if (!data || !data.hasOwnProperty(key)) {
+            output += '-' + spaces + contentToDiffLine(key, entry[key]) + '\n';
+            continue;
+        }
         let value = data[key];
         if (value !== entry[key]) {
             output += '-' + spaces + contentToDiffLine(key, entry[key]) + '\n';
@@ -260,11 +264,11 @@ function loadMainJsAndIndex(mainJs, searchIndex, storageJs, crate) {
     // execQuery last parameter is built in buildIndex.
     // buildIndex requires the hashmap from search-index.
     var functionsToLoad = ["buildHrefAndPath", "pathSplitter", "levenshtein", "validateResult",
-                           "handleAliases", "getQuery", "buildIndex", "execQuery", "execSearch"];
+                           "handleAliases", "getQuery", "buildIndex", "execQuery", "execSearch",
+                           "removeEmptyStringsFromArray"];
 
     ALIASES = {};
-    finalJS += 'window = { "currentCrate": "' + crate + '" };\n';
-    finalJS += 'var rootPath = "../";\n';
+    finalJS += 'window = { "currentCrate": "' + crate + '", rootPath: "../" };\n';
     finalJS += loadThings(["hasOwnProperty", "onEach"], 'function', extractFunction, storageJs);
     finalJS += loadThings(arraysToLoad, 'array', extractArrayVariable, mainJs);
     finalJS += loadThings(variablesToLoad, 'variable', extractVariable, mainJs);

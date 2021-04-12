@@ -1,4 +1,4 @@
-use rustc_ast::{FloatTy, InlineAsmTemplatePiece, IntTy, UintTy};
+use rustc_ast::InlineAsmTemplatePiece;
 use rustc_errors::struct_span_err;
 use rustc_hir as hir;
 use rustc_hir::def::{DefKind, Res};
@@ -7,7 +7,7 @@ use rustc_hir::intravisit::{self, NestedVisitorMap, Visitor};
 use rustc_index::vec::Idx;
 use rustc_middle::ty::layout::{LayoutError, SizeSkeleton};
 use rustc_middle::ty::query::Providers;
-use rustc_middle::ty::{self, Ty, TyCtxt};
+use rustc_middle::ty::{self, FloatTy, IntTy, Ty, TyCtxt, UintTy};
 use rustc_session::lint;
 use rustc_span::{sym, Span, Symbol, DUMMY_SP};
 use rustc_target::abi::{Pointer, VariantIdx};
@@ -78,7 +78,7 @@ impl ExprVisitor<'tcx> {
                 return;
             }
 
-            // Special-case transmutting from `typeof(function)` and
+            // Special-case transmuting from `typeof(function)` and
             // `Option<typeof(function)>` to present a clearer error.
             let from = unpack_option_like(self.tcx, from);
             if let (&ty::FnDef(..), SizeSkeleton::Known(size_to)) = (from.kind(), sk_to) {
@@ -347,7 +347,7 @@ impl ExprVisitor<'tcx> {
     }
 
     fn check_asm(&self, asm: &hir::InlineAsm<'tcx>) {
-        for (idx, (op, _op_sp)) in asm.operands.iter().enumerate() {
+        for (idx, (op, op_sp)) in asm.operands.iter().enumerate() {
             match *op {
                 hir::InlineAsmOperand::In { reg, ref expr } => {
                     self.check_asm_operand_type(idx, reg, expr, asm.template, None);
@@ -372,14 +372,15 @@ impl ExprVisitor<'tcx> {
                         );
                     }
                 }
-                hir::InlineAsmOperand::Const { ref expr } => {
-                    let ty = self.typeck_results.expr_ty_adjusted(expr);
-                    match ty.kind() {
+                hir::InlineAsmOperand::Const { ref anon_const } => {
+                    let anon_const_def_id = self.tcx.hir().local_def_id(anon_const.hir_id);
+                    let value = ty::Const::from_anon_const(self.tcx, anon_const_def_id);
+                    match value.ty.kind() {
                         ty::Int(_) | ty::Uint(_) | ty::Float(_) => {}
                         _ => {
                             let msg =
                                 "asm `const` arguments must be integer or floating-point values";
-                            self.tcx.sess.span_err(expr.span, msg);
+                            self.tcx.sess.span_err(*op_sp, msg);
                         }
                     }
                 }

@@ -18,14 +18,14 @@ use crate::{Edition, Span, DUMMY_SP, SESSION_GLOBALS};
 #[cfg(test)]
 mod tests;
 
-// The proc macro code for this is in `src/librustc_macros/src/symbols.rs`.
+// The proc macro code for this is in `compiler/rustc_macros/src/symbols.rs`.
 symbols! {
     // After modifying this list adjust `is_special`, `is_used_keyword`/`is_unused_keyword`,
     // this should be rarely necessary though if the keywords are kept in alphabetic order.
     Keywords {
         // Special reserved identifiers used internally for elided lifetimes,
         // unnamed method parameters, crate root module, error recovery etc.
-        Invalid:            "",
+        Empty:              "",
         PathRoot:           "{{root}}",
         DollarCrate:        "$crate",
         Underscore:         "_",
@@ -126,6 +126,10 @@ symbols! {
         Argument,
         ArgumentV1,
         Arguments,
+        BTreeMap,
+        BTreeSet,
+        BinaryHeap,
+        Borrow,
         C,
         CString,
         Center,
@@ -133,9 +137,12 @@ symbols! {
         Copy,
         Count,
         Debug,
+        DebugStruct,
+        DebugTuple,
         Decodable,
         Decoder,
         Default,
+        Deref,
         Encodable,
         Encoder,
         Eq,
@@ -161,16 +168,21 @@ symbols! {
         Iterator,
         Layout,
         Left,
+        LinkedList,
         LintPass,
         None,
         Ok,
         Option,
         Ord,
         Ordering,
+        OsStr,
+        OsString,
         Output,
         Param,
         PartialEq,
         PartialOrd,
+        Path,
+        PathBuf,
         Pending,
         Pin,
         Poll,
@@ -185,6 +197,7 @@ symbols! {
         RangeToInclusive,
         Rc,
         Ready,
+        Receiver,
         Result,
         Return,
         Right,
@@ -196,6 +209,8 @@ symbols! {
         StructuralPartialEq,
         Sync,
         Target,
+        ToOwned,
+        ToString,
         Try,
         Ty,
         TyCtxt,
@@ -218,6 +233,7 @@ symbols! {
         abi,
         abi_amdgpu_kernel,
         abi_avr_interrupt,
+        abi_c_cmse_nonsecure_call,
         abi_efiapi,
         abi_msp430_interrupt,
         abi_ptx,
@@ -249,7 +265,6 @@ symbols! {
         allow_fail,
         allow_internal_unsafe,
         allow_internal_unstable,
-        allow_internal_unstable_backcompat_hack,
         allowed,
         always,
         and,
@@ -315,6 +330,7 @@ symbols! {
         bridge,
         bswap,
         c_str,
+        c_unwind,
         c_variadic,
         call,
         call_mut,
@@ -329,6 +345,7 @@ symbols! {
         cfg_attr,
         cfg_attr_multi,
         cfg_doctest,
+        cfg_eval,
         cfg_panic,
         cfg_sanitize,
         cfg_target_feature,
@@ -367,7 +384,9 @@ symbols! {
         const_fn_fn_ptr_basics,
         const_fn_transmute,
         const_fn_union,
+        const_generic_defaults,
         const_generics,
+        const_generics_defaults,
         const_if_match,
         const_impl_trait,
         const_in_array_repeat_expressions,
@@ -380,6 +399,7 @@ symbols! {
         const_ptr,
         const_raw_ptr_deref,
         const_raw_ptr_to_usize_cast,
+        const_refs_to_cell,
         const_slice_ptr,
         const_trait_bound_opt_out,
         const_trait_impl,
@@ -396,6 +416,8 @@ symbols! {
         copysignf64,
         core,
         core_intrinsics,
+        core_panic,
+        core_panic_2015_macro,
         core_panic_macro,
         cosf32,
         cosf64,
@@ -455,6 +477,7 @@ symbols! {
         doc_cfg,
         doc_keyword,
         doc_masked,
+        doc_notable_trait,
         doc_spotlight,
         doctest,
         document_private_items,
@@ -469,7 +492,9 @@ symbols! {
         dropck_eyepatch,
         dropck_parametricity,
         dylib,
+        dyn_metadata,
         dyn_trait,
+        edition_macro_pats,
         eh_catch_typeinfo,
         eh_personality,
         emit_enum,
@@ -536,6 +561,7 @@ symbols! {
         fmt,
         fmt_internals,
         fmul_fast,
+        fn_align,
         fn_must_use,
         fn_mut,
         fn_once,
@@ -546,6 +572,7 @@ symbols! {
         format_args,
         format_args_capture,
         format_args_nl,
+        format_macro,
         freeze,
         freg,
         frem_fast,
@@ -577,6 +604,8 @@ symbols! {
         gt,
         half_open_range_patterns,
         hash,
+        hashmap_type,
+        hashset_type,
         hexagon_target_feature,
         hidden,
         homogeneous_aggregate,
@@ -585,6 +614,7 @@ symbols! {
         html_no_source,
         html_playground_url,
         html_root_url,
+        hwaddress,
         i,
         i128,
         i128_type,
@@ -611,6 +641,7 @@ symbols! {
         index_mut,
         infer_outlives_requirements,
         infer_static_outlives_requirements,
+        inherent_associated_types,
         inlateout,
         inline,
         inline_const,
@@ -619,6 +650,8 @@ symbols! {
         intel,
         into_iter,
         into_result,
+        into_trait,
+        intra_doc_pointers,
         intrinsics,
         irrefutable_let_patterns,
         isa_attribute,
@@ -669,6 +702,7 @@ symbols! {
         loop_break_value,
         lt,
         macro_at_most_once_rep,
+        macro_attributes_in_derive_output,
         macro_escape,
         macro_export,
         macro_lifetime_matcher,
@@ -698,12 +732,14 @@ symbols! {
         memory,
         message,
         meta,
+        metadata_type,
         min_align_of,
         min_align_of_val,
         min_const_fn,
         min_const_generics,
         min_const_unsafe_fn,
         min_specialization,
+        min_type_alias_impl_trait,
         minnumf32,
         minnumf64,
         mips_target_feature,
@@ -713,7 +749,6 @@ symbols! {
         more_struct_aliases,
         movbe_target_feature,
         move_ref_pattern,
-        move_val_init,
         mul,
         mul_assign,
         mul_with_overflow,
@@ -762,9 +797,13 @@ symbols! {
         none_error,
         nontemporal_store,
         nontrapping_dash_fptoint: "nontrapping-fptoint",
+        noop_method_borrow,
+        noop_method_clone,
+        noop_method_deref,
         noreturn,
         nostack,
         not,
+        notable_trait,
         note,
         object_safe_for_dispatch,
         of,
@@ -791,6 +830,8 @@ symbols! {
         owned_box,
         packed,
         panic,
+        panic_2015,
+        panic_2021,
         panic_abort,
         panic_bounds_check,
         panic_handler,
@@ -808,6 +849,8 @@ symbols! {
         partial_ord,
         passes,
         pat,
+        pat2015,
+        pat2021,
         path,
         pattern_parentheses,
         phantom_data,
@@ -817,6 +860,7 @@ symbols! {
         plugin,
         plugin_registrar,
         plugins,
+        pointee_trait,
         pointer,
         pointer_trait,
         pointer_trait_fmt,
@@ -857,6 +901,7 @@ symbols! {
         ptr_guaranteed_eq,
         ptr_guaranteed_ne,
         ptr_offset_from,
+        pub_macro_rules,
         pub_restricted,
         pure,
         pushpop_unsafe,
@@ -894,6 +939,7 @@ symbols! {
         register_attr,
         register_tool,
         relaxed_adts,
+        relaxed_struct_unsize,
         rem,
         rem_assign,
         repr,
@@ -918,8 +964,12 @@ symbols! {
         rt,
         rtm_target_feature,
         rust,
+        rust_2015,
         rust_2015_preview,
+        rust_2018,
         rust_2018_preview,
+        rust_2021,
+        rust_2021_preview,
         rust_begin_unwind,
         rust_eh_catch_typeinfo,
         rust_eh_personality,
@@ -954,6 +1004,7 @@ symbols! {
         rustc_layout,
         rustc_layout_scalar_valid_range_end,
         rustc_layout_scalar_valid_range_start,
+        rustc_legacy_const_generics,
         rustc_macro_transparency,
         rustc_mir,
         rustc_nonnull_optimization_guaranteed,
@@ -985,6 +1036,7 @@ symbols! {
         rustc_then_this_would_need,
         rustc_unsafe_specialization_marker,
         rustc_variance,
+        rustdoc,
         rustfmt,
         rvalue_static_promotion,
         sanitize,
@@ -1033,6 +1085,7 @@ symbols! {
         simd_lt,
         simd_mul,
         simd_ne,
+        simd_neg,
         simd_or,
         simd_reduce_add_ordered,
         simd_reduce_add_unordered,
@@ -1064,6 +1117,7 @@ symbols! {
         size_of,
         size_of_val,
         sized,
+        skip,
         slice,
         slice_alloc,
         slice_patterns,
@@ -1089,6 +1143,8 @@ symbols! {
         staticlib,
         std,
         std_inject,
+        std_panic,
+        std_panic_2015_macro,
         std_panic_macro,
         stmt,
         stmt_expr_attributes,
@@ -1153,6 +1209,8 @@ symbols! {
         truncf32,
         truncf64,
         try_blocks,
+        try_from_trait,
+        try_into_trait,
         try_trait,
         tt,
         tuple,
@@ -1224,6 +1282,7 @@ symbols! {
         variant_count,
         vec,
         vec_type,
+        vecdeque_type,
         version,
         vis,
         visible_private_types,
@@ -1236,6 +1295,7 @@ symbols! {
         vreg,
         vreg_low16,
         warn,
+        wasm_abi,
         wasm_import_module,
         wasm_target_feature,
         while_let,
@@ -1273,7 +1333,7 @@ impl Ident {
 
     #[inline]
     pub fn invalid() -> Ident {
-        Ident::with_dummy_span(kw::Invalid)
+        Ident::with_dummy_span(kw::Empty)
     }
 
     /// Maps a string to an identifier with a dummy span.
@@ -1451,12 +1511,6 @@ impl Symbol {
         with_interner(|interner| interner.intern(string))
     }
 
-    /// Access the symbol's chars. This is a slowish operation because it
-    /// requires locking the symbol interner.
-    pub fn with<F: FnOnce(&str) -> R, R>(self, f: F) -> R {
-        with_interner(|interner| f(interner.get(self)))
-    }
-
     /// Convert to a `SymbolStr`. This is a slowish operation because it
     /// requires locking the symbol interner.
     pub fn as_str(self) -> SymbolStr {
@@ -1470,7 +1524,7 @@ impl Symbol {
     }
 
     pub fn is_empty(self) -> bool {
-        self == kw::Invalid
+        self == kw::Empty
     }
 
     /// This method is supposed to be used in error messages, so it's expected to be
@@ -1484,19 +1538,19 @@ impl Symbol {
 
 impl fmt::Debug for Symbol {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.with(|str| fmt::Debug::fmt(&str, f))
+        fmt::Debug::fmt(&self.as_str(), f)
     }
 }
 
 impl fmt::Display for Symbol {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.with(|str| fmt::Display::fmt(&str, f))
+        fmt::Display::fmt(&self.as_str(), f)
     }
 }
 
 impl<S: Encoder> Encodable<S> for Symbol {
     fn encode(&self, s: &mut S) -> Result<(), S::Error> {
-        self.with(|string| s.emit_str(string))
+        s.emit_str(&self.as_str())
     }
 }
 
@@ -1589,6 +1643,7 @@ pub mod sym {
     use super::Symbol;
     use std::convert::TryInto;
 
+    #[doc(inline)]
     pub use super::sym_generated::*;
 
     // Used from a macro in `librustc_feature/accepted.rs`
@@ -1654,7 +1709,7 @@ impl Symbol {
 
     /// Returns `true` if this symbol can be a raw identifier.
     pub fn can_be_raw(self) -> bool {
-        self != kw::Invalid && self != kw::Underscore && !self.is_path_segment_keyword()
+        self != kw::Empty && self != kw::Underscore && !self.is_path_segment_keyword()
     }
 }
 

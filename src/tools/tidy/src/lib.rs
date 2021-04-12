@@ -3,8 +3,6 @@
 //! This library contains the tidy lints and exposes it
 //! to be used by tools.
 
-#![feature(str_split_once)]
-
 use std::fs::File;
 use std::io::Read;
 use walkdir::{DirEntry, WalkDir};
@@ -40,7 +38,6 @@ macro_rules! tidy_error {
 }
 
 pub mod bins;
-pub mod cargo;
 pub mod debug_artifacts;
 pub mod deps;
 pub mod edition;
@@ -56,6 +53,7 @@ pub mod unstable_book;
 
 fn filter_dirs(path: &Path) -> bool {
     let skip = [
+        "tidy-test-file",
         "compiler/rustc_codegen_cranelift",
         "src/llvm-project",
         "library/backtrace",

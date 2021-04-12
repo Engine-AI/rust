@@ -347,7 +347,7 @@ To learn more about a subcommand, run `./x.py <subcommand> -h`",
         };
 
         // Done specifying what options are possible, so do the getopts parsing
-        let matches = opts.parse(&args[..]).unwrap_or_else(|e| {
+        let matches = opts.parse(args).unwrap_or_else(|e| {
             // Invalid argument/option format
             println!("\n{}\n", e);
             usage(1, &opts, false, &subcommand_help);
@@ -614,14 +614,10 @@ Arguments:
         };
 
         if let Subcommand::Check { .. } = &cmd {
-            if matches.opt_str("stage").is_some() {
-                println!("--stage not supported for x.py check, always treated as stage 0");
-                process::exit(1);
-            }
             if matches.opt_str("keep-stage").is_some()
                 || matches.opt_str("keep-stage-std").is_some()
             {
-                println!("--keep-stage not supported for x.py check, only one stage available");
+                println!("--keep-stage not yet supported for x.py check");
                 process::exit(1);
             }
         }

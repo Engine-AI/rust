@@ -38,7 +38,7 @@ fn make_test_crate_name() {
     let input = "use asdf::qwop;
 assert_eq!(2+2, 4);";
     let expected = "#![allow(unused)]
-extern crate asdf;
+extern crate r#asdf;
 fn main() {
 use asdf::qwop;
 assert_eq!(2+2, 4);
@@ -128,7 +128,7 @@ fn make_test_opts_attrs() {
     let input = "use asdf::qwop;
 assert_eq!(2+2, 4);";
     let expected = "#![feature(sick_rad)]
-extern crate asdf;
+extern crate r#asdf;
 fn main() {
 use asdf::qwop;
 assert_eq!(2+2, 4);
@@ -141,7 +141,7 @@ assert_eq!(2+2, 4);
     opts.attrs.push("feature(hella_dope)".to_string());
     let expected = "#![feature(sick_rad)]
 #![feature(hella_dope)]
-extern crate asdf;
+extern crate r#asdf;
 fn main() {
 use asdf::qwop;
 assert_eq!(2+2, 4);
@@ -250,7 +250,7 @@ assert_eq!(asdf::foo, 4);";
 
     let expected = "#![allow(unused)]
 extern crate hella_qwop;
-extern crate asdf;
+extern crate r#asdf;
 fn main() {
 assert_eq!(asdf::foo, 4);
 }"
@@ -292,7 +292,7 @@ use std::io;
 let mut input = String::new();
 io::stdin().read_line(&mut input)?;
 Ok::<(), io:Error>(())
-}; _inner().unwrap() }"
+} _inner().unwrap() }"
         .to_string();
     let (output, len, _) = make_test(input, None, false, &opts, DEFAULT_EDITION, None);
     assert_eq!((output, len), (expected, 2));
@@ -306,7 +306,7 @@ fn make_test_named_wrapper() {
     let expected = "#![allow(unused)]
 fn main() { #[allow(non_snake_case)] fn _doctest_main__some_unique_name() {
 assert_eq!(2+2, 4);
-}; _doctest_main__some_unique_name() }"
+} _doctest_main__some_unique_name() }"
         .to_string();
     let (output, len, _) =
         make_test(input, None, false, &opts, DEFAULT_EDITION, Some("_some_unique_name"));

@@ -24,6 +24,7 @@ use tracing::{debug, info};
 use std::ffi::{CStr, CString};
 use std::fs::File;
 use std::io;
+use std::iter;
 use std::path::Path;
 use std::ptr;
 use std::slice;
@@ -732,10 +733,7 @@ pub unsafe fn optimize_thin_module(
     let diag_handler = cgcx.create_diag_handler();
 
     let module_name = &thin_module.shared.module_names[thin_module.idx];
-    let split_dwarf_file = cgcx
-        .output_filenames
-        .split_dwarf_filename(cgcx.split_dwarf_kind, Some(module_name.to_str().unwrap()));
-    let tm_factory_config = TargetMachineFactoryConfig { split_dwarf_file };
+    let tm_factory_config = TargetMachineFactoryConfig::new(cgcx, module_name.to_str().unwrap());
     let tm =
         (cgcx.tm_factory)(tm_factory_config).map_err(|e| write::llvm_err(&diag_handler, &e))?;
 
@@ -919,9 +917,7 @@ impl ThinLTOKeysMap {
         modules: &[llvm::ThinLTOModule],
         names: &[CString],
     ) -> Self {
-        let keys = modules
-            .iter()
-            .zip(names.iter())
+        let keys = iter::zip(modules, names)
             .map(|(module, name)| {
                 let key = build_string(|rust_str| unsafe {
                     llvm::LLVMRustComputeLTOCacheKey(rust_str, module.identifier, data.0);

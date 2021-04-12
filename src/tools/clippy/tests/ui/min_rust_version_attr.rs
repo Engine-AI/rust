@@ -57,6 +57,14 @@ pub fn checked_conversion() {
     let _ = value <= (u32::MAX as i64) && value >= 0;
 }
 
+pub struct FromOverInto(String);
+
+impl Into<FromOverInto> for String {
+    fn into(self) -> FromOverInto {
+        FromOverInto(self)
+    }
+}
+
 pub fn filter_map_next() {
     let a = ["1", "lol", "3", "NaN", "5"];
 
@@ -115,6 +123,11 @@ fn missing_const_for_fn() -> i32 {
     1
 }
 
+fn unnest_or_patterns() {
+    struct TS(u8, u8);
+    if let TS(0, x) | TS(1, x) = TS(0, 0) {}
+}
+
 fn main() {
     filter_map_next();
     checked_conversion();
@@ -130,6 +143,7 @@ fn main() {
     replace_with_default();
     map_unwrap_or();
     missing_const_for_fn();
+    unnest_or_patterns();
 }
 
 mod meets_msrv {

@@ -15,6 +15,7 @@ pub(crate) enum OverlayKind {
     Clippy,
     Miri,
     Rustfmt,
+    RustDemangler,
     RLS,
     RustAnalyzer,
 }
@@ -47,6 +48,9 @@ impl OverlayKind {
                 "src/tools/rustfmt/LICENSE-APACHE",
                 "src/tools/rustfmt/LICENSE-MIT",
             ],
+            OverlayKind::RustDemangler => {
+                &["src/tools/rust-demangler/README.md", "LICENSE-APACHE", "LICENSE-MIT"]
+            }
             OverlayKind::RLS => &[
                 "src/tools/rls/README.md",
                 "src/tools/rls/LICENSE-APACHE",
@@ -64,6 +68,7 @@ impl OverlayKind {
         match self {
             OverlayKind::Rust => builder.rust_version(),
             OverlayKind::LLVM => builder.rust_version(),
+            OverlayKind::RustDemangler => builder.release_num("rust-demangler"),
             OverlayKind::Cargo => {
                 builder.cargo_info.version(builder, &builder.release_num("cargo"))
             }
@@ -97,7 +102,6 @@ pub(crate) struct Tarball<'a> {
 
     include_target_in_component_name: bool,
     is_preview: bool,
-    delete_temp_dir: bool,
 }
 
 impl<'a> Tarball<'a> {
@@ -112,7 +116,7 @@ impl<'a> Tarball<'a> {
     fn new_inner(builder: &'a Builder<'a>, component: &str, target: Option<String>) -> Self {
         let pkgname = crate::dist::pkgname(builder, component);
 
-        let mut temp_dir = builder.out.join("tmp").join("tarball");
+        let mut temp_dir = builder.out.join("tmp").join("tarball").join(component);
         if let Some(target) = &target {
             temp_dir = temp_dir.join(target);
         }
@@ -136,7 +140,6 @@ impl<'a> Tarball<'a> {
 
             include_target_in_component_name: false,
             is_preview: false,
-            delete_temp_dir: true,
         }
     }
 
@@ -198,12 +201,7 @@ impl<'a> Tarball<'a> {
         self.builder.cp_r(src.as_ref(), &dest);
     }
 
-    pub(crate) fn persist_work_dir(&mut self) -> PathBuf {
-        self.delete_temp_dir = false;
-        self.temp_dir.clone()
-    }
-
-    pub(crate) fn generate(self) -> PathBuf {
+    pub(crate) fn generate(self) -> GeneratedTarball {
         let mut component_name = self.component.clone();
         if self.is_preview {
             component_name.push_str("-preview");
@@ -227,20 +225,20 @@ impl<'a> Tarball<'a> {
         })
     }
 
-    pub(crate) fn combine(self, tarballs: &[PathBuf]) {
-        let mut input_tarballs = tarballs[0].as_os_str().to_os_string();
+    pub(crate) fn combine(self, tarballs: &[GeneratedTarball]) -> GeneratedTarball {
+        let mut input_tarballs = tarballs[0].path.as_os_str().to_os_string();
         for tarball in &tarballs[1..] {
             input_tarballs.push(",");
-            input_tarballs.push(tarball);
+            input_tarballs.push(&tarball.path);
         }
 
         self.run(|this, cmd| {
             cmd.arg("combine").arg("--input-tarballs").arg(input_tarballs);
             this.non_bare_args(cmd);
-        });
+        })
     }
 
-    pub(crate) fn bare(self) -> PathBuf {
+    pub(crate) fn bare(self) -> GeneratedTarball {
         // Bare tarballs should have the top level directory match the package
         // name, not "image". We rename the image directory just before passing
         // into rust-installer.
@@ -276,7 +274,7 @@ impl<'a> Tarball<'a> {
             .arg(crate::dist::distdir(self.builder));
     }
 
-    fn run(self, build_cli: impl FnOnce(&Tarball<'a>, &mut Command)) -> PathBuf {
+    fn run(self, build_cli: impl FnOnce(&Tarball<'a>, &mut Command)) -> GeneratedTarball {
         t!(std::fs::create_dir_all(&self.overlay_dir));
         self.builder.create(&self.overlay_dir.join("version"), &self.overlay.version(self.builder));
         if let Some(sha) = self.builder.rust_sha() {
@@ -294,11 +292,47 @@ impl<'a> Tarball<'a> {
 
         build_cli(&self, &mut cmd);
         cmd.arg("--work-dir").arg(&self.temp_dir);
-        self.builder.run(&mut cmd);
-        if self.delete_temp_dir {
-            t!(std::fs::remove_dir_all(&self.temp_dir));
+        if let Some(formats) = &self.builder.config.dist_compression_formats {
+            assert!(!formats.is_empty(), "dist.compression-formats can't be empty");
+            cmd.arg("--compression-formats").arg(formats.join(","));
         }
+        self.builder.run(&mut cmd);
 
-        crate::dist::distdir(self.builder).join(format!("{}.tar.gz", package_name))
+        // Use either the first compression format defined, or "gz" as the default.
+        let ext = self
+            .builder
+            .config
+            .dist_compression_formats
+            .as_ref()
+            .and_then(|formats| formats.get(0))
+            .map(|s| s.as_str())
+            .unwrap_or("gz");
+
+        GeneratedTarball {
+            path: crate::dist::distdir(self.builder).join(format!("{}.tar.{}", package_name, ext)),
+            decompressed_output: self.temp_dir.join(package_name),
+            work: self.temp_dir,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct GeneratedTarball {
+    path: PathBuf,
+    decompressed_output: PathBuf,
+    work: PathBuf,
+}
+
+impl GeneratedTarball {
+    pub(crate) fn tarball(&self) -> &Path {
+        &self.path
+    }
+
+    pub(crate) fn decompressed_output(&self) -> &Path {
+        &self.decompressed_output
+    }
+
+    pub(crate) fn work_dir(&self) -> &Path {
+        &self.work
     }
 }

@@ -8,13 +8,6 @@ use super::from_str_radix;
 use super::{IntErrorKind, ParseIntError};
 use crate::intrinsics;
 
-macro_rules! doc_comment {
-    ($x:expr, $($tt:tt)*) => {
-        #[doc = $x]
-        $($tt)*
-    };
-}
-
 macro_rules! impl_nonzero_fmt {
     ( #[$stability: meta] ( $( $Trait: ident ),+ ) for $Ty: ident ) => {
         $(
@@ -32,24 +25,21 @@ macro_rules! impl_nonzero_fmt {
 macro_rules! nonzero_integers {
     ( $( #[$stability: meta] $Ty: ident($Int: ty); )+ ) => {
         $(
-            doc_comment! {
-                concat!("An integer that is known not to equal zero.
-
-This enables some memory layout optimization.
-For example, `Option<", stringify!($Ty), ">` is the same size as `", stringify!($Int), "`:
-
-```rust
-use std::mem::size_of;
-assert_eq!(size_of::<Option<core::num::", stringify!($Ty), ">>(), size_of::<", stringify!($Int),
-">());
-```"),
-                #[$stability]
-                #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
-                #[repr(transparent)]
-                #[rustc_layout_scalar_valid_range_start(1)]
-                #[rustc_nonnull_optimization_guaranteed]
-                pub struct $Ty($Int);
-            }
+            /// An integer that is known not to equal zero.
+            ///
+            /// This enables some memory layout optimization.
+            #[doc = concat!("For example, `Option<", stringify!($Ty), ">` is the same size as `", stringify!($Int), "`:")]
+            ///
+            /// ```rust
+            /// use std::mem::size_of;
+            #[doc = concat!("assert_eq!(size_of::<Option<core::num::", stringify!($Ty), ">>(), size_of::<", stringify!($Int), ">());")]
+            /// ```
+            #[$stability]
+            #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+            #[repr(transparent)]
+            #[rustc_layout_scalar_valid_range_start(1)]
+            #[rustc_nonnull_optimization_guaranteed]
+            pub struct $Ty($Int);
 
             impl $Ty {
                 /// Creates a non-zero without checking the value.
@@ -90,13 +80,10 @@ assert_eq!(size_of::<Option<core::num::", stringify!($Ty), ">>(), size_of::<", s
 
             #[stable(feature = "from_nonzero", since = "1.31.0")]
             impl From<$Ty> for $Int {
-                doc_comment! {
-                    concat!(
-"Converts a `", stringify!($Ty), "` into an `", stringify!($Int), "`"),
-                    #[inline]
-                    fn from(nonzero: $Ty) -> Self {
-                        nonzero.0
-                    }
+                #[doc = concat!("Converts a `", stringify!($Ty), "` into an `", stringify!($Int), "`")]
+                #[inline]
+                fn from(nonzero: $Ty) -> Self {
+                    nonzero.0
                 }
             }
 
@@ -195,53 +182,49 @@ macro_rules! nonzero_leading_trailing_zeros {
     ( $( $Ty: ident($Uint: ty) , $LeadingTestExpr:expr ;)+ ) => {
         $(
             impl $Ty {
-                doc_comment! {
-                    concat!("Returns the number of leading zeros in the binary representation of `self`.
-
-On many architectures, this function can perform better than `leading_zeros()` on the underlying integer type, as special handling of zero can be avoided.
-
-# Examples
-
-Basic usage:
-
-```
-#![feature(nonzero_leading_trailing_zeros)]
-let n = std::num::", stringify!($Ty), "::new(", stringify!($LeadingTestExpr), ").unwrap();
-
-assert_eq!(n.leading_zeros(), 0);
-```"),
-                    #[unstable(feature = "nonzero_leading_trailing_zeros", issue = "79143")]
-                    #[rustc_const_unstable(feature = "nonzero_leading_trailing_zeros", issue = "79143")]
-                    #[inline]
-                    pub const fn leading_zeros(self) -> u32 {
-                        // SAFETY: since `self` can not be zero it is safe to call ctlz_nonzero
-                        unsafe { intrinsics::ctlz_nonzero(self.0 as $Uint) as u32 }
-                    }
+                /// Returns the number of leading zeros in the binary representation of `self`.
+                ///
+                /// On many architectures, this function can perform better than `leading_zeros()` on the underlying integer type, as special handling of zero can be avoided.
+                ///
+                /// # Examples
+                ///
+                /// Basic usage:
+                ///
+                /// ```
+                /// #![feature(nonzero_leading_trailing_zeros)]
+                #[doc = concat!("let n = std::num::", stringify!($Ty), "::new(", stringify!($LeadingTestExpr), ").unwrap();")]
+                ///
+                /// assert_eq!(n.leading_zeros(), 0);
+                /// ```
+                #[unstable(feature = "nonzero_leading_trailing_zeros", issue = "79143")]
+                #[rustc_const_unstable(feature = "nonzero_leading_trailing_zeros", issue = "79143")]
+                #[inline]
+                pub const fn leading_zeros(self) -> u32 {
+                    // SAFETY: since `self` can not be zero it is safe to call ctlz_nonzero
+                    unsafe { intrinsics::ctlz_nonzero(self.0 as $Uint) as u32 }
                 }
 
-                doc_comment! {
-                    concat!("Returns the number of trailing zeros in the binary representation
-of `self`.
-
-On many architectures, this function can perform better than `trailing_zeros()` on the underlying integer type, as special handling of zero can be avoided.
-
-# Examples
-
-Basic usage:
-
-```
-#![feature(nonzero_leading_trailing_zeros)]
-let n = std::num::", stringify!($Ty), "::new(0b0101000).unwrap();
-
-assert_eq!(n.trailing_zeros(), 3);
-```"),
-                    #[unstable(feature = "nonzero_leading_trailing_zeros", issue = "79143")]
-                    #[rustc_const_unstable(feature = "nonzero_leading_trailing_zeros", issue = "79143")]
-                    #[inline]
-                    pub const fn trailing_zeros(self) -> u32 {
-                        // SAFETY: since `self` can not be zero it is safe to call cttz_nonzero
-                        unsafe { intrinsics::cttz_nonzero(self.0 as $Uint) as u32 }
-                    }
+                /// Returns the number of trailing zeros in the binary representation
+                /// of `self`.
+                ///
+                /// On many architectures, this function can perform better than `trailing_zeros()` on the underlying integer type, as special handling of zero can be avoided.
+                ///
+                /// # Examples
+                ///
+                /// Basic usage:
+                ///
+                /// ```
+                /// #![feature(nonzero_leading_trailing_zeros)]
+                #[doc = concat!("let n = std::num::", stringify!($Ty), "::new(0b0101000).unwrap();")]
+                ///
+                /// assert_eq!(n.trailing_zeros(), 3);
+                /// ```
+                #[unstable(feature = "nonzero_leading_trailing_zeros", issue = "79143")]
+                #[rustc_const_unstable(feature = "nonzero_leading_trailing_zeros", issue = "79143")]
+                #[inline]
+                pub const fn trailing_zeros(self) -> u32 {
+                    // SAFETY: since `self` can not be zero it is safe to call cttz_nonzero
+                    unsafe { intrinsics::cttz_nonzero(self.0 as $Uint) as u32 }
                 }
 
             }
@@ -303,3 +286,43 @@ nonzero_integers_div! {
     NonZeroU128(u128);
     NonZeroUsize(usize);
 }
+
+macro_rules! nonzero_unsigned_is_power_of_two {
+    ( $( $Ty: ident )+ ) => {
+        $(
+            impl $Ty {
+
+                /// Returns `true` if and only if `self == (1 << k)` for some `k`.
+                ///
+                /// On many architectures, this function can perform better than `is_power_of_two()`
+                /// on the underlying integer type, as special handling of zero can be avoided.
+                ///
+                /// # Examples
+                ///
+                /// Basic usage:
+                ///
+                /// ```
+                /// #![feature(nonzero_is_power_of_two)]
+                ///
+                #[doc = concat!("let eight = std::num::", stringify!($Ty), "::new(8).unwrap();")]
+                /// assert!(eight.is_power_of_two());
+                #[doc = concat!("let ten = std::num::", stringify!($Ty), "::new(10).unwrap();")]
+                /// assert!(!ten.is_power_of_two());
+                /// ```
+                #[unstable(feature = "nonzero_is_power_of_two", issue = "81106")]
+                #[inline]
+                pub const fn is_power_of_two(self) -> bool {
+                    // LLVM 11 normalizes `unchecked_sub(x, 1) & x == 0` to the implementation seen here.
+                    // On the basic x86-64 target, this saves 3 instructions for the zero check.
+                    // On x86_64 with BMI1, being nonzero lets it codegen to `BLSR`, which saves an instruction
+                    // compared to the `POPCNT` implementation on the underlying integer type.
+
+                    intrinsics::ctpop(self.get()) < 2
+                }
+
+            }
+        )+
+    }
+}
+
+nonzero_unsigned_is_power_of_two! { NonZeroU8 NonZeroU16 NonZeroU32 NonZeroU64 NonZeroU128 NonZeroUsize }

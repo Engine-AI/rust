@@ -34,7 +34,6 @@ use super::{InferCtxt, MiscVariable, TypeTrace};
 
 use crate::traits::{Obligation, PredicateObligations};
 
-use rustc_ast as ast;
 use rustc_data_structures::sso::SsoHashMap;
 use rustc_hir::def_id::DefId;
 use rustc_middle::traits::ObligationCause;
@@ -222,6 +221,7 @@ impl<'infcx, 'tcx> InferCtxt<'infcx, 'tcx> {
     /// As `3 + 4` contains `N` in its substs, this must not succeed.
     ///
     /// See `src/test/ui/const-generics/occurs-check/` for more examples where this is relevant.
+    #[instrument(level = "debug", skip(self))]
     fn unify_const_variable(
         &self,
         param_env: ty::ParamEnv<'tcx>,
@@ -281,7 +281,7 @@ impl<'infcx, 'tcx> InferCtxt<'infcx, 'tcx> {
         &self,
         vid_is_expected: bool,
         vid: ty::FloatVid,
-        val: ast::FloatTy,
+        val: ty::FloatTy,
     ) -> RelateResult<'tcx, Ty<'tcx>> {
         self.inner
             .borrow_mut()
@@ -358,7 +358,7 @@ impl<'infcx, 'tcx> CombineFields<'infcx, 'tcx> {
             self.obligations.push(Obligation::new(
                 self.trace.cause.clone(),
                 self.param_env,
-                ty::PredicateAtom::WellFormed(b_ty.into()).to_predicate(self.infcx.tcx),
+                ty::PredicateKind::WellFormed(b_ty.into()).to_predicate(self.infcx.tcx),
             ));
         }
 
@@ -451,9 +451,9 @@ impl<'infcx, 'tcx> CombineFields<'infcx, 'tcx> {
         b: &'tcx ty::Const<'tcx>,
     ) {
         let predicate = if a_is_expected {
-            ty::PredicateAtom::ConstEquate(a, b)
+            ty::PredicateKind::ConstEquate(a, b)
         } else {
-            ty::PredicateAtom::ConstEquate(b, a)
+            ty::PredicateKind::ConstEquate(b, a)
         };
         self.obligations.push(Obligation::new(
             self.trace.cause.clone(),
@@ -543,15 +543,11 @@ impl TypeRelation<'tcx> for Generalizer<'_, 'tcx> {
         true
     }
 
-    fn visit_ct_substs(&self) -> bool {
-        true
-    }
-
     fn binders<T>(
         &mut self,
-        a: ty::Binder<T>,
-        b: ty::Binder<T>,
-    ) -> RelateResult<'tcx, ty::Binder<T>>
+        a: ty::Binder<'tcx, T>,
+        b: ty::Binder<'tcx, T>,
+    ) -> RelateResult<'tcx, ty::Binder<'tcx, T>>
     where
         T: Relate<'tcx>,
     {
@@ -737,6 +733,16 @@ impl TypeRelation<'tcx> for Generalizer<'_, 'tcx> {
                     }
                 }
             }
+            ty::ConstKind::Unevaluated(ty::Unevaluated { def, substs, promoted })
+                if self.tcx().lazy_normalization() =>
+            {
+                assert_eq!(promoted, None);
+                let substs = self.relate_with_variance(ty::Variance::Invariant, substs, substs)?;
+                Ok(self.tcx().mk_const(ty::Const {
+                    ty: c.ty,
+                    val: ty::ConstKind::Unevaluated(ty::Unevaluated { def, substs, promoted }),
+                }))
+            }
             _ => relate::super_relate_consts(self, c, c),
         }
     }
@@ -822,10 +828,6 @@ impl TypeRelation<'tcx> for ConstInferUnifier<'_, 'tcx> {
         true
     }
 
-    fn visit_ct_substs(&self) -> bool {
-        true
-    }
-
     fn relate_with_variance<T: Relate<'tcx>>(
         &mut self,
         _variance: ty::Variance,
@@ -838,9 +840,9 @@ impl TypeRelation<'tcx> for ConstInferUnifier<'_, 'tcx> {
 
     fn binders<T>(
         &mut self,
-        a: ty::Binder<T>,
-        b: ty::Binder<T>,
-    ) -> RelateResult<'tcx, ty::Binder<T>>
+        a: ty::Binder<'tcx, T>,
+        b: ty::Binder<'tcx, T>,
+    ) -> RelateResult<'tcx, ty::Binder<'tcx, T>>
     where
         T: Relate<'tcx>,
     {
@@ -958,6 +960,16 @@ impl TypeRelation<'tcx> for ConstInferUnifier<'_, 'tcx> {
                         }
                     }
                 }
+            }
+            ty::ConstKind::Unevaluated(ty::Unevaluated { def, substs, promoted })
+                if self.tcx().lazy_normalization() =>
+            {
+                assert_eq!(promoted, None);
+                let substs = self.relate_with_variance(ty::Variance::Invariant, substs, substs)?;
+                Ok(self.tcx().mk_const(ty::Const {
+                    ty: c.ty,
+                    val: ty::ConstKind::Unevaluated(ty::Unevaluated { def, substs, promoted }),
+                }))
             }
             _ => relate::super_relate_consts(self, c, c),
         }
