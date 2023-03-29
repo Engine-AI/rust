@@ -1,5 +1,5 @@
 use clippy_utils::diagnostics::span_lint_and_sugg;
-use clippy_utils::in_macro;
+use clippy_utils::is_test_module_or_function;
 use clippy_utils::source::{snippet, snippet_with_applicability};
 use if_chain::if_chain;
 use rustc_errors::Applicability;
@@ -8,38 +8,50 @@ use rustc_hir::{
     Item, ItemKind, PathSegment, UseKind,
 };
 use rustc_lint::{LateContext, LateLintPass};
+use rustc_middle::ty;
 use rustc_session::{declare_tool_lint, impl_lint_pass};
 use rustc_span::symbol::kw;
 use rustc_span::{sym, BytePos};
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for `use Enum::*`.
+    /// ### What it does
+    /// Checks for `use Enum::*`.
     ///
-    /// **Why is this bad?** It is usually better style to use the prefixed name of
+    /// ### Why is this bad?
+    /// It is usually better style to use the prefixed name of
     /// an enumeration variant, rather than importing variants.
     ///
-    /// **Known problems:** Old-style enumerations that prefix the variants are
+    /// ### Known problems
+    /// Old-style enumerations that prefix the variants are
     /// still around.
     ///
-    /// **Example:**
-    /// ```rust,ignore
-    /// // Bad
+    /// ### Example
+    /// ```rust
     /// use std::cmp::Ordering::*;
-    /// foo(Less);
     ///
-    /// // Good
+    /// # fn foo(_: std::cmp::Ordering) {}
+    /// foo(Less);
+    /// ```
+    ///
+    /// Use instead:
+    /// ```rust
     /// use std::cmp::Ordering;
+    ///
+    /// # fn foo(_: Ordering) {}
     /// foo(Ordering::Less)
     /// ```
+    #[clippy::version = "pre 1.29.0"]
     pub ENUM_GLOB_USE,
     pedantic,
     "use items that import all variants of an enum"
 }
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for wildcard imports `use _::*`.
+    /// ### What it does
+    /// Checks for wildcard imports `use _::*`.
     ///
-    /// **Why is this bad?** wildcard imports can pollute the namespace. This is especially bad if
+    /// ### Why is this bad?
+    /// wildcard imports can pollute the namespace. This is especially bad if
     /// you try to import something through a wildcard, that already has been imported by name from
     /// a different source:
     ///
@@ -52,8 +64,7 @@ declare_clippy_lint! {
     ///
     /// This can lead to confusing error messages at best and to unexpected behavior at worst.
     ///
-    /// **Exceptions:**
-    ///
+    /// ### Exceptions
     /// Wildcard imports are allowed from modules named `prelude`. Many crates (including the standard library)
     /// provide modules named "prelude" specifically designed for wildcard import.
     ///
@@ -61,27 +72,27 @@ declare_clippy_lint! {
     ///
     /// These exceptions can be disabled using the `warn-on-all-wildcard-imports` configuration flag.
     ///
-    /// **Known problems:** If macros are imported through the wildcard, this macro is not included
+    /// ### Known problems
+    /// If macros are imported through the wildcard, this macro is not included
     /// by the suggestion and has to be added by hand.
     ///
     /// Applying the suggestion when explicit imports of the things imported with a glob import
     /// exist, may result in `unused_imports` warnings.
     ///
-    /// **Example:**
-    ///
+    /// ### Example
     /// ```rust,ignore
-    /// // Bad
     /// use crate1::*;
     ///
     /// foo();
     /// ```
     ///
+    /// Use instead:
     /// ```rust,ignore
-    /// // Good
     /// use crate1::foo;
     ///
     /// foo();
     /// ```
+    #[clippy::version = "1.43.0"]
     pub WILDCARD_IMPORTS,
     pedantic,
     "lint `use _::*` statements"
@@ -106,16 +117,17 @@ impl_lint_pass!(WildcardImports => [ENUM_GLOB_USE, WILDCARD_IMPORTS]);
 
 impl LateLintPass<'_> for WildcardImports {
     fn check_item(&mut self, cx: &LateContext<'_>, item: &Item<'_>) {
-        if is_test_module_or_function(item) {
+        if is_test_module_or_function(cx.tcx, item) {
             self.test_modules_deep = self.test_modules_deep.saturating_add(1);
         }
-        if item.vis.node.is_pub() || item.vis.node.is_pub_restricted() {
+        let module = cx.tcx.parent_module_from_def_id(item.owner_id.def_id);
+        if cx.tcx.visibility(item.owner_id.def_id) != ty::Visibility::Restricted(module.to_def_id()) {
             return;
         }
         if_chain! {
             if let ItemKind::Use(use_path, UseKind::Glob) = &item.kind;
             if self.warn_on_all || !self.check_exceptions(item, use_path.segments);
-            let used_imports = cx.tcx.names_imported_by_glob_use(item.def_id);
+            let used_imports = cx.tcx.names_imported_by_glob_use(item.owner_id.def_id);
             if !used_imports.is_empty(); // Already handled by `unused_imports`
             then {
                 let mut applicability = Applicability::MachineApplicable;
@@ -143,28 +155,23 @@ impl LateLintPass<'_> for WildcardImports {
                     )
                 };
 
-                let imports_string = if used_imports.len() == 1 {
-                    used_imports.iter().next().unwrap().to_string()
+                let mut imports = used_imports.items().map(ToString::to_string).into_sorted_stable_ord(false);
+                let imports_string = if imports.len() == 1 {
+                    imports.pop().unwrap()
+                } else if braced_glob {
+                    imports.join(", ")
                 } else {
-                    let mut imports = used_imports
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>();
-                    imports.sort();
-                    if braced_glob {
-                        imports.join(", ")
-                    } else {
-                        format!("{{{}}}", imports.join(", "))
-                    }
+                    format!("{{{}}}", imports.join(", "))
                 };
 
                 let sugg = if braced_glob {
                     imports_string
                 } else {
-                    format!("{}::{}", import_source_snippet, imports_string)
+                    format!("{import_source_snippet}::{imports_string}")
                 };
 
-                let (lint, message) = if let Res::Def(DefKind::Enum, _) = use_path.res {
+                // Glob imports always have a single resolution.
+                let (lint, message) = if let Res::Def(DefKind::Enum, _) = use_path.res[0] {
                     (ENUM_GLOB_USE, "usage of wildcard import for enum variants")
                 } else {
                     (WILDCARD_IMPORTS, "usage of wildcard import")
@@ -183,8 +190,8 @@ impl LateLintPass<'_> for WildcardImports {
         }
     }
 
-    fn check_item_post(&mut self, _: &LateContext<'_>, item: &Item<'_>) {
-        if is_test_module_or_function(item) {
+    fn check_item_post(&mut self, cx: &LateContext<'_>, item: &Item<'_>) {
+        if is_test_module_or_function(cx.tcx, item) {
             self.test_modules_deep = self.test_modules_deep.saturating_sub(1);
         }
     }
@@ -192,7 +199,7 @@ impl LateLintPass<'_> for WildcardImports {
 
 impl WildcardImports {
     fn check_exceptions(&self, item: &Item<'_>, segments: &[PathSegment<'_>]) -> bool {
-        in_macro(item.span)
+        item.span.from_expansion()
             || is_prelude_import(segments)
             || (is_super_only_import(segments) && self.test_modules_deep > 0)
     }
@@ -207,8 +214,4 @@ fn is_prelude_import(segments: &[PathSegment<'_>]) -> bool {
 // Allow "super::*" imports in tests.
 fn is_super_only_import(segments: &[PathSegment<'_>]) -> bool {
     segments.len() == 1 && segments[0].ident.name == kw::Super
-}
-
-fn is_test_module_or_function(item: &Item<'_>) -> bool {
-    matches!(item.kind, ItemKind::Mod(..)) && item.ident.name.as_str().contains("test")
 }

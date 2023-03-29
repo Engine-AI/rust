@@ -1,14 +1,14 @@
 //! The data that we will serialize and deserialize.
 //!
 //! The dep-graph is serialized as a sequence of NodeInfo, with the dependencies
-//! specified inline.  The total number of nodes and edges are stored as the last
+//! specified inline. The total number of nodes and edges are stored as the last
 //! 16 bytes of the file, so we can find them easily at decoding time.
 //!
 //! The serialisation is performed on-demand when each node is emitted. Using this
 //! scheme, we do not need to keep the current graph in memory.
 //!
-//! The deserisalisation is performed manually, in order to convert from the stored
-//! sequence of NodeInfos to the different arrays in SerializedDepGraph.  Since the
+//! The deserialization is performed manually, in order to convert from the stored
+//! sequence of NodeInfos to the different arrays in SerializedDepGraph. Since the
 //! node and edge count are stored at the end of the file, all the arrays can be
 //! pre-allocated with the right length.
 
@@ -19,35 +19,35 @@ use rustc_data_structures::fx::FxHashMap;
 use rustc_data_structures::profiling::SelfProfilerRef;
 use rustc_data_structures::sync::Lock;
 use rustc_index::vec::{Idx, IndexVec};
-use rustc_serialize::opaque::{self, FileEncodeResult, FileEncoder, IntEncodedWithFixedSize};
+use rustc_serialize::opaque::{FileEncodeResult, FileEncoder, IntEncodedWithFixedSize, MemDecoder};
 use rustc_serialize::{Decodable, Decoder, Encodable};
 use smallvec::SmallVec;
-use std::convert::TryInto;
 
 // The maximum value of `SerializedDepNodeIndex` leaves the upper two bits
 // unused so that we can store multiple index types in `CompressedHybridIndex`,
 // and use those bits to encode which index type it contains.
 rustc_index::newtype_index! {
-    pub struct SerializedDepNodeIndex {
-        MAX = 0x7FFF_FFFF
-    }
+    #[max = 0x7FFF_FFFF]
+    pub struct SerializedDepNodeIndex {}
 }
 
 /// Data for use when recompiling the **current crate**.
 #[derive(Debug)]
 pub struct SerializedDepGraph<K: DepKind> {
     /// The set of all DepNodes in the graph
-    pub nodes: IndexVec<SerializedDepNodeIndex, DepNode<K>>,
+    nodes: IndexVec<SerializedDepNodeIndex, DepNode<K>>,
     /// The set of all Fingerprints in the graph. Each Fingerprint corresponds to
     /// the DepNode at the same index in the nodes vector.
-    pub fingerprints: IndexVec<SerializedDepNodeIndex, Fingerprint>,
+    fingerprints: IndexVec<SerializedDepNodeIndex, Fingerprint>,
     /// For each DepNode, stores the list of edges originating from that
     /// DepNode. Encoded as a [start, end) pair indexing into edge_list_data,
     /// which holds the actual DepNodeIndices of the target nodes.
-    pub edge_list_indices: IndexVec<SerializedDepNodeIndex, (u32, u32)>,
+    edge_list_indices: IndexVec<SerializedDepNodeIndex, (u32, u32)>,
     /// A flattened list of all edge targets in the graph. Edge sources are
     /// implicit in edge_list_indices.
-    pub edge_list_data: Vec<SerializedDepNodeIndex>,
+    edge_list_data: Vec<SerializedDepNodeIndex>,
+    /// Reciprocal map to `nodes`.
+    index: FxHashMap<DepNode<K>, SerializedDepNodeIndex>,
 }
 
 impl<K: DepKind> Default for SerializedDepGraph<K> {
@@ -57,6 +57,7 @@ impl<K: DepKind> Default for SerializedDepGraph<K> {
             fingerprints: Default::default(),
             edge_list_indices: Default::default(),
             edge_list_data: Default::default(),
+            index: Default::default(),
         }
     }
 }
@@ -67,13 +68,32 @@ impl<K: DepKind> SerializedDepGraph<K> {
         let targets = self.edge_list_indices[source];
         &self.edge_list_data[targets.0 as usize..targets.1 as usize]
     }
+
+    #[inline]
+    pub fn index_to_node(&self, dep_node_index: SerializedDepNodeIndex) -> DepNode<K> {
+        self.nodes[dep_node_index]
+    }
+
+    #[inline]
+    pub fn node_to_index_opt(&self, dep_node: &DepNode<K>) -> Option<SerializedDepNodeIndex> {
+        self.index.get(dep_node).cloned()
+    }
+
+    #[inline]
+    pub fn fingerprint_by_index(&self, dep_node_index: SerializedDepNodeIndex) -> Fingerprint {
+        self.fingerprints[dep_node_index]
+    }
+
+    pub fn node_count(&self) -> usize {
+        self.index.len()
+    }
 }
 
-impl<'a, K: DepKind + Decodable<opaque::Decoder<'a>>> Decodable<opaque::Decoder<'a>>
+impl<'a, K: DepKind + Decodable<MemDecoder<'a>>> Decodable<MemDecoder<'a>>
     for SerializedDepGraph<K>
 {
-    #[instrument(skip(d))]
-    fn decode(d: &mut opaque::Decoder<'a>) -> Result<SerializedDepGraph<K>, String> {
+    #[instrument(level = "debug", skip(d))]
+    fn decode(d: &mut MemDecoder<'a>) -> SerializedDepGraph<K> {
         let start_position = d.position();
 
         // The last 16 bytes are the node count and edge count.
@@ -81,8 +101,8 @@ impl<'a, K: DepKind + Decodable<opaque::Decoder<'a>>> Decodable<opaque::Decoder<
         d.set_position(d.data.len() - 2 * IntEncodedWithFixedSize::ENCODED_SIZE);
         debug!("position: {:?}", d.position());
 
-        let node_count = IntEncodedWithFixedSize::decode(d)?.0 as usize;
-        let edge_count = IntEncodedWithFixedSize::decode(d)?.0 as usize;
+        let node_count = IntEncodedWithFixedSize::decode(d).0 as usize;
+        let edge_count = IntEncodedWithFixedSize::decode(d).0 as usize;
         debug!(?node_count, ?edge_count);
 
         debug!("position: {:?}", d.position());
@@ -95,33 +115,30 @@ impl<'a, K: DepKind + Decodable<opaque::Decoder<'a>>> Decodable<opaque::Decoder<
         let mut edge_list_data = Vec::with_capacity(edge_count);
 
         for _index in 0..node_count {
-            d.read_struct("NodeInfo", 3, |d| {
-                let dep_node: DepNode<K> = d.read_struct_field("node", 0, Decodable::decode)?;
-                let _i: SerializedDepNodeIndex = nodes.push(dep_node);
-                debug_assert_eq!(_i.index(), _index);
+            let dep_node: DepNode<K> = Decodable::decode(d);
+            let _i: SerializedDepNodeIndex = nodes.push(dep_node);
+            debug_assert_eq!(_i.index(), _index);
 
-                let fingerprint: Fingerprint =
-                    d.read_struct_field("fingerprint", 1, Decodable::decode)?;
-                let _i: SerializedDepNodeIndex = fingerprints.push(fingerprint);
-                debug_assert_eq!(_i.index(), _index);
+            let fingerprint: Fingerprint = Decodable::decode(d);
+            let _i: SerializedDepNodeIndex = fingerprints.push(fingerprint);
+            debug_assert_eq!(_i.index(), _index);
 
-                d.read_struct_field("edges", 2, |d| {
-                    d.read_seq(|d, len| {
-                        let start = edge_list_data.len().try_into().unwrap();
-                        for e in 0..len {
-                            let edge = d.read_seq_elt(e, Decodable::decode)?;
-                            edge_list_data.push(edge);
-                        }
-                        let end = edge_list_data.len().try_into().unwrap();
-                        let _i: SerializedDepNodeIndex = edge_list_indices.push((start, end));
-                        debug_assert_eq!(_i.index(), _index);
-                        Ok(())
-                    })
-                })
-            })?;
+            // Deserialize edges -- sequence of DepNodeIndex
+            let len = d.read_usize();
+            let start = edge_list_data.len().try_into().unwrap();
+            for _ in 0..len {
+                let edge = Decodable::decode(d);
+                edge_list_data.push(edge);
+            }
+            let end = edge_list_data.len().try_into().unwrap();
+            let _i: SerializedDepNodeIndex = edge_list_indices.push((start, end));
+            debug_assert_eq!(_i.index(), _index);
         }
 
-        Ok(SerializedDepGraph { nodes, fingerprints, edge_list_indices, edge_list_data })
+        let index: FxHashMap<_, _> =
+            nodes.iter_enumerated().map(|(idx, &dep_node)| (dep_node, idx)).collect();
+
+        SerializedDepGraph { nodes, fingerprints, edge_list_indices, edge_list_data, index }
     }
 }
 
@@ -142,7 +159,6 @@ struct EncoderState<K: DepKind> {
     encoder: FileEncoder,
     total_node_count: usize,
     total_edge_count: usize,
-    result: FileEncodeResult,
     stats: Option<FxHashMap<K, Stat<K>>>,
 }
 
@@ -152,12 +168,10 @@ impl<K: DepKind> EncoderState<K> {
             encoder,
             total_edge_count: 0,
             total_node_count: 0,
-            result: Ok(()),
-            stats: if record_stats { Some(FxHashMap::default()) } else { None },
+            stats: record_stats.then(FxHashMap::default),
         }
     }
 
-    #[instrument(skip(self, record_graph))]
     fn encode_node(
         &mut self,
         node: &NodeInfo<K>,
@@ -184,28 +198,30 @@ impl<K: DepKind> EncoderState<K> {
             stat.edge_counter += edge_count as u64;
         }
 
-        debug!(?index, ?node);
         let encoder = &mut self.encoder;
-        if self.result.is_ok() {
-            self.result = node.encode(encoder);
-        }
+        node.encode(encoder);
         index
     }
 
-    fn finish(self) -> FileEncodeResult {
-        let Self { mut encoder, total_node_count, total_edge_count, result, stats: _ } = self;
-        let () = result?;
+    fn finish(self, profiler: &SelfProfilerRef) -> FileEncodeResult {
+        let Self { mut encoder, total_node_count, total_edge_count, stats: _ } = self;
 
         let node_count = total_node_count.try_into().unwrap();
         let edge_count = total_edge_count.try_into().unwrap();
 
         debug!(?node_count, ?edge_count);
         debug!("position: {:?}", encoder.position());
-        IntEncodedWithFixedSize(node_count).encode(&mut encoder)?;
-        IntEncodedWithFixedSize(edge_count).encode(&mut encoder)?;
+        IntEncodedWithFixedSize(node_count).encode(&mut encoder);
+        IntEncodedWithFixedSize(edge_count).encode(&mut encoder);
         debug!("position: {:?}", encoder.position());
         // Drop the encoder so that nothing is written after the counts.
-        encoder.flush()
+        let result = encoder.finish();
+        if let Ok(position) = result {
+            // FIXME(rylev): we hardcode the dep graph file name so we
+            // don't need a dependency on rustc_incremental just for that.
+            profiler.artifact_size("dep_graph", "dep-graph.bin", position as u64);
+        }
+        result
     }
 }
 
@@ -221,8 +237,7 @@ impl<K: DepKind + Encodable<FileEncoder>> GraphEncoder<K> {
         record_graph: bool,
         record_stats: bool,
     ) -> Self {
-        let record_graph =
-            if record_graph { Some(Lock::new(DepGraphQuery::new(prev_node_count))) } else { None };
+        let record_graph = record_graph.then(|| Lock::new(DepGraphQuery::new(prev_node_count)));
         let status = Lock::new(EncoderState::new(encoder, record_stats));
         GraphEncoder { status, record_graph }
     }
@@ -249,17 +264,14 @@ impl<K: DepKind + Encodable<FileEncoder>> GraphEncoder<K> {
 
             eprintln!("[incremental]");
             eprintln!("[incremental] DepGraph Statistics");
-            eprintln!("{}", SEPARATOR);
+            eprintln!("{SEPARATOR}");
             eprintln!("[incremental]");
             eprintln!("[incremental] Total Node Count: {}", status.total_node_count);
             eprintln!("[incremental] Total Edge Count: {}", status.total_edge_count);
 
             if cfg!(debug_assertions) {
-                eprintln!("[incremental] Total Edge Reads: {}", total_read_count);
-                eprintln!(
-                    "[incremental] Total Duplicate Edge Reads: {}",
-                    total_duplicate_read_count
-                );
+                eprintln!("[incremental] Total Edge Reads: {total_read_count}");
+                eprintln!("[incremental] Total Duplicate Edge Reads: {total_duplicate_read_count}");
             }
 
             eprintln!("[incremental]");
@@ -267,7 +279,7 @@ impl<K: DepKind + Encodable<FileEncoder>> GraphEncoder<K> {
                 "[incremental]  {:<36}| {:<17}| {:<12}| {:<17}|",
                 "Node Kind", "Node Frequency", "Node Count", "Avg. Edge Count"
             );
-            eprintln!("{}", SEPARATOR);
+            eprintln!("{SEPARATOR}");
 
             for stat in stats {
                 let node_kind_ratio =
@@ -283,7 +295,7 @@ impl<K: DepKind + Encodable<FileEncoder>> GraphEncoder<K> {
                 );
             }
 
-            eprintln!("{}", SEPARATOR);
+            eprintln!("{SEPARATOR}");
             eprintln!("[incremental]");
         }
     }
@@ -302,6 +314,6 @@ impl<K: DepKind + Encodable<FileEncoder>> GraphEncoder<K> {
 
     pub fn finish(self, profiler: &SelfProfilerRef) -> FileEncodeResult {
         let _prof_timer = profiler.generic_activity("incr_comp_encode_dep_graph");
-        self.status.into_inner().finish()
+        self.status.into_inner().finish(profiler)
     }
 }

@@ -2,73 +2,63 @@
 
 use crate::infer::region_constraints::Constraint;
 use crate::infer::region_constraints::GenericKind;
-use crate::infer::region_constraints::MemberConstraint;
 use crate::infer::region_constraints::RegionConstraintData;
 use crate::infer::region_constraints::VarInfos;
 use crate::infer::region_constraints::VerifyBound;
 use crate::infer::RegionRelations;
 use crate::infer::RegionVariableOrigin;
-use crate::infer::RegionckMode;
 use crate::infer::SubregionOrigin;
 use rustc_data_structures::fx::FxHashSet;
 use rustc_data_structures::graph::implementation::{
     Direction, Graph, NodeIndex, INCOMING, OUTGOING,
 };
-use rustc_index::vec::{Idx, IndexVec};
+use rustc_data_structures::intern::Interned;
+use rustc_index::vec::IndexVec;
 use rustc_middle::ty::fold::TypeFoldable;
+use rustc_middle::ty::PlaceholderRegion;
 use rustc_middle::ty::{self, Ty, TyCtxt};
-use rustc_middle::ty::{ReEarlyBound, ReEmpty, ReErased, ReFree, ReStatic};
+use rustc_middle::ty::{ReEarlyBound, ReErased, ReError, ReFree, ReStatic};
 use rustc_middle::ty::{ReLateBound, RePlaceholder, ReVar};
 use rustc_middle::ty::{Region, RegionVid};
 use rustc_span::Span;
 use std::fmt;
+
+use super::outlives::test_type_match;
 
 /// This function performs lexical region resolution given a complete
 /// set of constraints and variable origins. It performs a fixed-point
 /// iteration to find region values which satisfy all constraints,
 /// assuming such values can be found. It returns the final values of
 /// all the variables as well as a set of errors that must be reported.
-pub fn resolve<'tcx>(
+#[instrument(level = "debug", skip(region_rels, var_infos, data))]
+pub(crate) fn resolve<'tcx>(
+    param_env: ty::ParamEnv<'tcx>,
     region_rels: &RegionRelations<'_, 'tcx>,
     var_infos: VarInfos,
     data: RegionConstraintData<'tcx>,
-    mode: RegionckMode,
 ) -> (LexicalRegionResolutions<'tcx>, Vec<RegionResolutionError<'tcx>>) {
-    debug!("RegionConstraintData: resolve_regions()");
     let mut errors = vec![];
-    let mut resolver = LexicalResolver { region_rels, var_infos, data };
-    match mode {
-        RegionckMode::Solve => {
-            let values = resolver.infer_variable_values(&mut errors);
-            (values, errors)
-        }
-        RegionckMode::Erase { suppress_errors: false } => {
-            // Do real inference to get errors, then erase the results.
-            let mut values = resolver.infer_variable_values(&mut errors);
-            let re_erased = region_rels.tcx.lifetimes.re_erased;
-
-            values.values.iter_mut().for_each(|v| match *v {
-                VarValue::Value(ref mut r) => *r = re_erased,
-                VarValue::ErrorValue => {}
-            });
-            (values, errors)
-        }
-        RegionckMode::Erase { suppress_errors: true } => {
-            // Skip region inference entirely.
-            (resolver.erased_data(region_rels.tcx), Vec::new())
-        }
-    }
+    let mut resolver = LexicalResolver { param_env, region_rels, var_infos, data };
+    let values = resolver.infer_variable_values(&mut errors);
+    (values, errors)
 }
 
 /// Contains the result of lexical region resolution. Offers methods
 /// to lookup up the final value of a region variable.
+#[derive(Clone)]
 pub struct LexicalRegionResolutions<'tcx> {
-    values: IndexVec<RegionVid, VarValue<'tcx>>,
-    error_region: ty::Region<'tcx>,
+    pub(crate) values: IndexVec<RegionVid, VarValue<'tcx>>,
 }
 
 #[derive(Copy, Clone, Debug)]
-enum VarValue<'tcx> {
+pub(crate) enum VarValue<'tcx> {
+    /// Empty lifetime is for data that is never accessed. We tag the
+    /// empty lifetime with a universe -- the idea is that we don't
+    /// want `exists<'a> { forall<'b> { 'b: 'a } }` to be satisfiable.
+    /// Therefore, the `'empty` in a universe `U` is less than all
+    /// regions visible from `U`, but not less than regions not visible
+    /// from `U`.
+    Empty(ty::UniverseIndex),
     Value(Region<'tcx>),
     ErrorValue,
 }
@@ -80,7 +70,7 @@ pub enum RegionResolutionError<'tcx> {
     /// `o` requires that `a <= b`, but this does not hold
     ConcreteFailure(SubregionOrigin<'tcx>, Region<'tcx>, Region<'tcx>),
 
-    /// `GenericBoundFailure(p, s, a)
+    /// `GenericBoundFailure(p, s, a)`:
     ///
     /// The parameter/associated-type `p` must be known to outlive the lifetime
     /// `a` (but none of the known bounds are sufficient).
@@ -98,6 +88,7 @@ pub enum RegionResolutionError<'tcx> {
         Region<'tcx>,
         SubregionOrigin<'tcx>,
         Region<'tcx>,
+        Vec<Span>, // All the influences on a given value that didn't meet its constraints.
     ),
 
     /// Indicates a `'b: 'a` constraint where `'a` is in a universe that
@@ -109,11 +100,6 @@ pub enum RegionResolutionError<'tcx> {
         SubregionOrigin<'tcx>, // cause of the constraint
         Region<'tcx>,          // the placeholder `'b`
     ),
-
-    /// Indicates a failure of a `MemberConstraint`. These arise during
-    /// impl trait processing explicitly -- basically, the impl trait's hidden type
-    /// included some region that it was not supposed to.
-    MemberConstraintFailure { span: Span, hidden_ty: Ty<'tcx>, member_region: Region<'tcx> },
 }
 
 struct RegionAndOrigin<'tcx> {
@@ -124,6 +110,7 @@ struct RegionAndOrigin<'tcx> {
 type RegionGraph<'tcx> = Graph<(), Constraint<'tcx>>;
 
 struct LexicalResolver<'cx, 'tcx> {
+    param_env: ty::ParamEnv<'tcx>,
     region_rels: &'cx RegionRelations<'cx, 'tcx>,
     var_infos: VarInfos,
     data: RegionConstraintData<'tcx>,
@@ -138,24 +125,14 @@ impl<'cx, 'tcx> LexicalResolver<'cx, 'tcx> {
         &mut self,
         errors: &mut Vec<RegionResolutionError<'tcx>>,
     ) -> LexicalRegionResolutions<'tcx> {
-        let mut var_data = self.construct_var_data(self.tcx());
+        let mut var_data = self.construct_var_data();
 
-        // Dorky hack to cause `dump_constraints` to only get called
-        // if debug mode is enabled:
-        debug!(
-            "----() End constraint listing (context={:?}) {:?}---",
-            self.region_rels.context,
-            self.dump_constraints(self.region_rels)
-        );
+        if cfg!(debug_assertions) {
+            self.dump_constraints();
+        }
 
         let graph = self.construct_graph();
-        self.expand_givens(&graph);
-        loop {
-            self.expansion(&mut var_data);
-            if !self.enforce_member_constraints(&graph, &mut var_data) {
-                break;
-            }
-        }
+        self.expansion(&mut var_data);
         self.collect_errors(&mut var_data, errors);
         self.collect_var_errors(&var_data, &graph, errors);
         var_data
@@ -167,200 +144,152 @@ impl<'cx, 'tcx> LexicalResolver<'cx, 'tcx> {
 
     /// Initially, the value for all variables is set to `'empty`, the
     /// empty region. The `expansion` phase will grow this larger.
-    fn construct_var_data(&self, tcx: TyCtxt<'tcx>) -> LexicalRegionResolutions<'tcx> {
+    fn construct_var_data(&self) -> LexicalRegionResolutions<'tcx> {
         LexicalRegionResolutions {
-            error_region: tcx.lifetimes.re_static,
             values: IndexVec::from_fn_n(
                 |vid| {
                     let vid_universe = self.var_infos[vid].universe;
-                    let re_empty = tcx.mk_region(ty::ReEmpty(vid_universe));
-                    VarValue::Value(re_empty)
+                    VarValue::Empty(vid_universe)
                 },
                 self.num_vars(),
             ),
         }
     }
 
-    /// An erased version of the lexical region resolutions. Used when we're
-    /// erasing regions and suppressing errors: in item bodies with
-    /// `-Zborrowck=mir`.
-    fn erased_data(&self, tcx: TyCtxt<'tcx>) -> LexicalRegionResolutions<'tcx> {
-        LexicalRegionResolutions {
-            error_region: tcx.lifetimes.re_static,
-            values: IndexVec::from_elem_n(
-                VarValue::Value(tcx.lifetimes.re_erased),
-                self.num_vars(),
-            ),
-        }
-    }
-
-    fn dump_constraints(&self, free_regions: &RegionRelations<'_, 'tcx>) {
-        debug!("----() Start constraint listing (context={:?}) ()----", free_regions.context);
+    #[instrument(level = "debug", skip(self))]
+    fn dump_constraints(&self) {
         for (idx, (constraint, _)) in self.data.constraints.iter().enumerate() {
             debug!("Constraint {} => {:?}", idx, constraint);
         }
     }
 
-    fn expand_givens(&mut self, graph: &RegionGraph<'_>) {
-        // Givens are a kind of horrible hack to account for
-        // constraints like 'c <= '0 that are known to hold due to
-        // closure signatures (see the comment above on the `givens`
-        // field). They should go away. But until they do, the role
-        // of this fn is to account for the transitive nature:
-        //
-        //     Given 'c <= '0
-        //     and   '0 <= '1
-        //     then  'c <= '1
-
-        let seeds: Vec<_> = self.data.givens.iter().cloned().collect();
-        for (r, vid) in seeds {
-            // While all things transitively reachable in the graph
-            // from the variable (`'0` in the example above).
-            let seed_index = NodeIndex(vid.index() as usize);
-            for succ_index in graph.depth_traverse(seed_index, OUTGOING) {
-                let succ_index = succ_index.0;
-
-                // The first N nodes correspond to the region
-                // variables. Other nodes correspond to constant
-                // regions.
-                if succ_index < self.num_vars() {
-                    let succ_vid = RegionVid::new(succ_index);
-
-                    // Add `'c <= '1`.
-                    self.data.givens.insert((r, succ_vid));
-                }
+    /// Gets the LUb of a given region and the empty region
+    fn lub_empty(&self, a_region: Region<'tcx>) -> Result<Region<'tcx>, PlaceholderRegion> {
+        match *a_region {
+            ReLateBound(..) | ReErased => {
+                bug!("cannot relate region: {:?}", a_region);
             }
-        }
-    }
 
-    /// Enforce all member constraints and return true if anything
-    /// changed. See `enforce_member_constraint` for more details.
-    fn enforce_member_constraints(
-        &self,
-        graph: &RegionGraph<'tcx>,
-        var_values: &mut LexicalRegionResolutions<'tcx>,
-    ) -> bool {
-        // Note: we don't use the `any` combinator because we don't
-        // want to stop at the first constraint that makes a change.
-        let mut any_changed = false;
-        for member_constraint in &self.data.member_constraints {
-            any_changed |= self.enforce_member_constraint(graph, member_constraint, var_values);
-        }
-        any_changed
-    }
-
-    /// Enforce a constraint like
-    ///
-    /// ```
-    /// 'r member of ['c...]
-    /// ```
-    ///
-    /// We look for all choice regions from the list `'c...` that:
-    ///
-    /// (a) are greater than the current value of `'r` (which is a lower bound)
-    ///
-    /// and
-    ///
-    /// (b) are compatible with the upper bounds of `'r` that we can
-    /// find by traversing the graph.
-    ///
-    /// From that list, we look for a *minimal* option `'c_min`. If we
-    /// find one, then we can enforce that `'r: 'c_min`.
-    fn enforce_member_constraint(
-        &self,
-        graph: &RegionGraph<'tcx>,
-        member_constraint: &MemberConstraint<'tcx>,
-        var_values: &mut LexicalRegionResolutions<'tcx>,
-    ) -> bool {
-        debug!("enforce_member_constraint(member_constraint={:#?})", member_constraint);
-
-        // The constraint is some inference variable (`vid`) which
-        // must be equal to one of the options.
-        let member_vid = match member_constraint.member_region {
-            ty::ReVar(vid) => *vid,
-            _ => return false,
-        };
-
-        // The current value of `vid` is a lower bound LB -- i.e., we
-        // know that `LB <= vid` must be true.
-        let member_lower_bound: ty::Region<'tcx> = match var_values.value(member_vid) {
-            VarValue::ErrorValue => return false,
-            VarValue::Value(r) => r,
-        };
-
-        // Find all the "upper bounds" -- that is, each region `b` such that
-        // `r0 <= b` must hold.
-        let (member_upper_bounds, ..) =
-            self.collect_bounding_regions(graph, member_vid, OUTGOING, None);
-
-        // Get an iterator over the *available choice* -- that is,
-        // each choice region `c` where `lb <= c` and `c <= ub` for all the
-        // upper bounds `ub`.
-        debug!("enforce_member_constraint: upper_bounds={:#?}", member_upper_bounds);
-        let mut options = member_constraint.choice_regions.iter().filter(|option| {
-            self.sub_concrete_regions(member_lower_bound, option)
-                && member_upper_bounds
-                    .iter()
-                    .all(|upper_bound| self.sub_concrete_regions(option, upper_bound.region))
-        });
-
-        // If there is more than one option, we only make a choice if
-        // there is a single *least* choice -- i.e., some available
-        // region that is `<=` all the others.
-        let mut least_choice: ty::Region<'tcx> = match options.next() {
-            Some(&r) => r,
-            None => return false,
-        };
-        debug!("enforce_member_constraint: least_choice={:?}", least_choice);
-        for &option in options {
-            debug!("enforce_member_constraint: option={:?}", option);
-            if !self.sub_concrete_regions(least_choice, option) {
-                if self.sub_concrete_regions(option, least_choice) {
-                    debug!("enforce_member_constraint: new least choice");
-                    least_choice = option;
-                } else {
-                    debug!("enforce_member_constraint: no least choice");
-                    return false;
-                }
+            ReVar(v_id) => {
+                span_bug!(
+                    self.var_infos[v_id].origin.span(),
+                    "lub invoked with non-concrete regions: {:?}",
+                    a_region,
+                );
             }
-        }
 
-        // (#72087) Different `ty::Regions` can be known to be equal, for
-        // example, we know that `'a` and `'static` are equal in a function
-        // with a parameter of type `&'static &'a ()`.
-        //
-        // When we have two equal regions like this `expansion` will use
-        // `lub_concrete_regions` to pick a canonical representative. The same
-        // choice is needed here so that we don't end up in a cycle of
-        // `expansion` changing the region one way and the code here changing
-        // it back.
-        let lub = self.lub_concrete_regions(least_choice, member_lower_bound);
-        debug!(
-            "enforce_member_constraint: final least choice = {:?}\nlub = {:?}",
-            least_choice, lub
-        );
-        if lub != member_lower_bound {
-            *var_values.value_mut(member_vid) = VarValue::Value(least_choice);
-            true
-        } else {
-            false
+            ReStatic => {
+                // nothing lives longer than `'static`
+                Ok(self.tcx().lifetimes.re_static)
+            }
+
+            ReError(_) => Ok(a_region),
+
+            ReEarlyBound(_) | ReFree(_) => {
+                // All empty regions are less than early-bound, free,
+                // and scope regions.
+                Ok(a_region)
+            }
+
+            RePlaceholder(placeholder) => Err(placeholder),
         }
     }
 
     fn expansion(&self, var_values: &mut LexicalRegionResolutions<'tcx>) {
+        // In the first pass, we expand region vids according to constraints we
+        // have previously found. In the second pass, we loop through the region
+        // vids we expanded and expand *across* region vids (effectively
+        // "expanding" new `RegSubVar` constraints).
+
+        // Tracks the `VarSubVar` constraints generated for each region vid. We
+        // later use this to expand across vids.
         let mut constraints = IndexVec::from_elem_n(Vec::new(), var_values.values.len());
+        // Tracks the changed region vids.
         let mut changes = Vec::new();
         for constraint in self.data.constraints.keys() {
-            let (a_vid, a_region, b_vid, b_data) = match *constraint {
+            match *constraint {
                 Constraint::RegSubVar(a_region, b_vid) => {
                     let b_data = var_values.value_mut(b_vid);
-                    (None, a_region, b_vid, b_data)
+
+                    if self.expand_node(a_region, b_vid, b_data) {
+                        changes.push(b_vid);
+                    }
                 }
                 Constraint::VarSubVar(a_vid, b_vid) => match *var_values.value(a_vid) {
                     VarValue::ErrorValue => continue,
+                    VarValue::Empty(a_universe) => {
+                        let b_data = var_values.value_mut(b_vid);
+
+                        let changed = match *b_data {
+                            VarValue::Empty(b_universe) => {
+                                // Empty regions are ordered according to the universe
+                                // they are associated with.
+                                let ui = a_universe.min(b_universe);
+
+                                debug!(
+                                    "Expanding value of {:?} \
+                                    from empty lifetime with universe {:?} \
+                                    to empty lifetime with universe {:?}",
+                                    b_vid, b_universe, ui
+                                );
+
+                                *b_data = VarValue::Empty(ui);
+                                true
+                            }
+                            VarValue::Value(cur_region) => {
+                                let lub = match self.lub_empty(cur_region) {
+                                    Ok(r) => r,
+                                    // If the empty and placeholder regions are in the same universe,
+                                    // then the LUB is the Placeholder region (which is the cur_region).
+                                    // If they are not in the same universe, the LUB is the Static lifetime.
+                                    Err(placeholder) if a_universe == placeholder.universe => {
+                                        cur_region
+                                    }
+                                    Err(_) => self.tcx().lifetimes.re_static,
+                                };
+
+                                if lub == cur_region {
+                                    false
+                                } else {
+                                    debug!(
+                                        "Expanding value of {:?} from {:?} to {:?}",
+                                        b_vid, cur_region, lub
+                                    );
+
+                                    *b_data = VarValue::Value(lub);
+                                    true
+                                }
+                            }
+
+                            VarValue::ErrorValue => false,
+                        };
+
+                        if changed {
+                            changes.push(b_vid);
+                        }
+                        match b_data {
+                            VarValue::Value(Region(Interned(ReStatic, _)))
+                            | VarValue::ErrorValue => (),
+                            _ => {
+                                constraints[a_vid].push((a_vid, b_vid));
+                                constraints[b_vid].push((a_vid, b_vid));
+                            }
+                        }
+                    }
                     VarValue::Value(a_region) => {
                         let b_data = var_values.value_mut(b_vid);
-                        (Some(a_vid), a_region, b_vid, b_data)
+
+                        if self.expand_node(a_region, b_vid, b_data) {
+                            changes.push(b_vid);
+                        }
+                        match b_data {
+                            VarValue::Value(Region(Interned(ReStatic, _)))
+                            | VarValue::ErrorValue => (),
+                            _ => {
+                                constraints[a_vid].push((a_vid, b_vid));
+                                constraints[b_vid].push((a_vid, b_vid));
+                            }
+                        }
                     }
                 },
                 Constraint::RegSubReg(..) | Constraint::VarSubReg(..) => {
@@ -368,36 +297,30 @@ impl<'cx, 'tcx> LexicalResolver<'cx, 'tcx> {
                     // is done, in `collect_errors`.
                     continue;
                 }
-            };
-            if self.expand_node(a_region, b_vid, b_data) {
-                changes.push(b_vid);
-            }
-            if let Some(a_vid) = a_vid {
-                match *b_data {
-                    VarValue::Value(ReStatic) | VarValue::ErrorValue => (),
-                    _ => {
-                        constraints[a_vid].push((a_vid, b_vid));
-                        constraints[b_vid].push((a_vid, b_vid));
-                    }
-                }
             }
         }
 
         while let Some(vid) = changes.pop() {
             constraints[vid].retain(|&(a_vid, b_vid)| {
-                let a_region = match *var_values.value(a_vid) {
-                    VarValue::ErrorValue => return false,
-                    VarValue::Value(a_region) => a_region,
+                let VarValue::Value(a_region) = *var_values.value(a_vid) else {
+                    return false;
                 };
                 let b_data = var_values.value_mut(b_vid);
                 if self.expand_node(a_region, b_vid, b_data) {
                     changes.push(b_vid);
                 }
-                !matches!(b_data, VarValue::Value(ReStatic) | VarValue::ErrorValue)
+                !matches!(
+                    b_data,
+                    VarValue::Value(Region(Interned(ReStatic, _))) | VarValue::ErrorValue
+                )
             });
         }
     }
 
+    /// Expands the value of the region represented with `b_vid` with current
+    /// value `b_data` to the lub of `b_data` and `a_region`. The corresponds
+    /// with the constraint `'?b: 'a` (`'a <: '?b`), where `'a` is some known
+    /// region and `'?b` is some region variable.
     fn expand_node(
         &self,
         a_region: Region<'tcx>,
@@ -406,29 +329,29 @@ impl<'cx, 'tcx> LexicalResolver<'cx, 'tcx> {
     ) -> bool {
         debug!("expand_node({:?}, {:?} == {:?})", a_region, b_vid, b_data);
 
-        match *a_region {
-            // Check if this relationship is implied by a given.
-            ty::ReEarlyBound(_) | ty::ReFree(_) => {
-                if self.data.givens.contains(&(a_region, b_vid)) {
-                    debug!("given");
-                    return false;
-                }
-            }
-
-            _ => {}
-        }
-
         match *b_data {
+            VarValue::Empty(empty_ui) => {
+                let lub = match self.lub_empty(a_region) {
+                    Ok(r) => r,
+                    // If this empty region is from a universe that can
+                    // name the placeholder, then the placeholder is
+                    // larger; otherwise, the only ancestor is `'static`.
+                    Err(placeholder) if empty_ui.can_name(placeholder.universe) => {
+                        self.tcx().mk_re_placeholder(placeholder)
+                    }
+                    Err(_) => self.tcx().lifetimes.re_static,
+                };
+
+                debug!("Expanding value of {:?} from empty lifetime to {:?}", b_vid, lub);
+
+                *b_data = VarValue::Value(lub);
+                true
+            }
             VarValue::Value(cur_region) => {
                 // This is a specialized version of the `lub_concrete_regions`
                 // check below for a common case, here purely as an
                 // optimization.
                 let b_universe = self.var_infos[b_vid].universe;
-                if let ReEmpty(a_universe) = a_region {
-                    if *a_universe == b_universe {
-                        return false;
-                    }
-                }
 
                 let mut lub = self.lub_concrete_regions(a_region, cur_region);
                 if lub == cur_region {
@@ -444,10 +367,8 @@ impl<'cx, 'tcx> LexicalResolver<'cx, 'tcx> {
                 // tighter bound than `'static`.
                 //
                 // (This might e.g. arise from being asked to prove `for<'a> { 'b: 'a }`.)
-                if let ty::RePlaceholder(p) = lub {
-                    if b_universe.cannot_name(p.universe) {
-                        lub = self.tcx().lifetimes.re_static;
-                    }
+                if let ty::RePlaceholder(p) = *lub && b_universe.cannot_name(p.universe) {
+                    lub = self.tcx().lifetimes.re_static;
                 }
 
                 debug!("Expanding value of {:?} from {:?} to {:?}", b_vid, cur_region, lub);
@@ -460,24 +381,105 @@ impl<'cx, 'tcx> LexicalResolver<'cx, 'tcx> {
         }
     }
 
+    /// True if `a <= b`.
+    fn sub_region_values(&self, a: VarValue<'tcx>, b: VarValue<'tcx>) -> bool {
+        match (a, b) {
+            // Error region is `'static`
+            (VarValue::ErrorValue, _) | (_, VarValue::ErrorValue) => return true,
+            (VarValue::Empty(a_ui), VarValue::Empty(b_ui)) => {
+                // Empty regions are ordered according to the universe
+                // they are associated with.
+                a_ui.min(b_ui) == b_ui
+            }
+            (VarValue::Value(a), VarValue::Empty(_)) => {
+                match *a {
+                    // this is always on an error path,
+                    // so it doesn't really matter if it's shorter or longer than an empty region
+                    ReError(_) => false,
+
+                    ReLateBound(..) | ReErased => {
+                        bug!("cannot relate region: {:?}", a);
+                    }
+
+                    ReVar(v_id) => {
+                        span_bug!(
+                            self.var_infos[v_id].origin.span(),
+                            "lub_concrete_regions invoked with non-concrete region: {:?}",
+                            a
+                        );
+                    }
+
+                    ReStatic | ReEarlyBound(_) | ReFree(_) => {
+                        // nothing lives longer than `'static`
+
+                        // All empty regions are less than early-bound, free,
+                        // and scope regions.
+
+                        false
+                    }
+
+                    RePlaceholder(_) => {
+                        // The LUB is either `a` or `'static`
+                        false
+                    }
+                }
+            }
+            (VarValue::Empty(a_ui), VarValue::Value(b)) => {
+                match *b {
+                    // this is always on an error path,
+                    // so it doesn't really matter if it's shorter or longer than an empty region
+                    ReError(_) => false,
+
+                    ReLateBound(..) | ReErased => {
+                        bug!("cannot relate region: {:?}", b);
+                    }
+
+                    ReVar(v_id) => {
+                        span_bug!(
+                            self.var_infos[v_id].origin.span(),
+                            "lub_concrete_regions invoked with non-concrete regions: {:?}",
+                            b
+                        );
+                    }
+
+                    ReStatic | ReEarlyBound(_) | ReFree(_) => {
+                        // nothing lives longer than `'static`
+                        // All empty regions are less than early-bound, free,
+                        // and scope regions.
+                        true
+                    }
+
+                    RePlaceholder(placeholder) => {
+                        // If this empty region is from a universe that can
+                        // name the placeholder, then the placeholder is
+                        // larger; otherwise, the only ancestor is `'static`.
+                        return a_ui.can_name(placeholder.universe);
+                    }
+                }
+            }
+            (VarValue::Value(a), VarValue::Value(b)) => self.sub_concrete_regions(a, b),
+        }
+    }
+
     /// True if `a <= b`, but not defined over inference variables.
+    #[instrument(level = "trace", skip(self))]
     fn sub_concrete_regions(&self, a: Region<'tcx>, b: Region<'tcx>) -> bool {
         let tcx = self.tcx();
         let sub_free_regions = |r1, r2| self.region_rels.free_regions.sub_free_regions(tcx, r1, r2);
 
         // Check for the case where we know that `'b: 'static` -- in that case,
         // `a <= b` for all `a`.
-        let b_free_or_static = self.region_rels.free_regions.is_free_or_static(b);
+        let b_free_or_static = b.is_free_or_static();
         if b_free_or_static && sub_free_regions(tcx.lifetimes.re_static, b) {
             return true;
         }
 
         // If both `a` and `b` are free, consult the declared
-        // relationships.  Note that this can be more precise than the
+        // relationships. Note that this can be more precise than the
         // `lub` relationship defined below, since sometimes the "lub"
         // is actually the `postdom_upper_bound` (see
         // `TransitiveRelation` for more details).
-        let a_free_or_static = self.region_rels.free_regions.is_free_or_static(a);
+        let a_free_or_static = a.is_free_or_static();
         if a_free_or_static && b_free_or_static {
             return sub_free_regions(a, b);
         }
@@ -492,13 +494,14 @@ impl<'cx, 'tcx> LexicalResolver<'cx, 'tcx> {
     ///
     /// Neither `a` nor `b` may be an inference variable (hence the
     /// term "concrete regions").
+    #[instrument(level = "trace", skip(self), ret)]
     fn lub_concrete_regions(&self, a: Region<'tcx>, b: Region<'tcx>) -> Region<'tcx> {
-        let r = match (a, b) {
-            (&ReLateBound(..), _) | (_, &ReLateBound(..)) | (&ReErased, _) | (_, &ReErased) => {
+        match (*a, *b) {
+            (ReLateBound(..), _) | (_, ReLateBound(..)) | (ReErased, _) | (_, ReErased) => {
                 bug!("cannot relate region: LUB({:?}, {:?})", a, b);
             }
 
-            (&ReVar(v_id), _) | (_, &ReVar(v_id)) => {
+            (ReVar(v_id), _) | (_, ReVar(v_id)) => {
                 span_bug!(
                     self.var_infos[v_id].origin.span(),
                     "lub_concrete_regions invoked with non-concrete \
@@ -508,67 +511,42 @@ impl<'cx, 'tcx> LexicalResolver<'cx, 'tcx> {
                 );
             }
 
-            (&ReStatic, _) | (_, &ReStatic) => {
+            (ReError(_), _) => a,
+
+            (_, ReError(_)) => b,
+
+            (ReStatic, _) | (_, ReStatic) => {
                 // nothing lives longer than `'static`
                 self.tcx().lifetimes.re_static
             }
 
-            (&ReEmpty(_), r @ (ReEarlyBound(_) | ReFree(_)))
-            | (r @ (ReEarlyBound(_) | ReFree(_)), &ReEmpty(_)) => {
-                // All empty regions are less than early-bound, free,
-                // and scope regions.
-                r
-            }
-
-            (&ReEmpty(a_ui), &ReEmpty(b_ui)) => {
-                // Empty regions are ordered according to the universe
-                // they are associated with.
-                let ui = a_ui.min(b_ui);
-                self.tcx().mk_region(ReEmpty(ui))
-            }
-
-            (&ReEmpty(empty_ui), &RePlaceholder(placeholder))
-            | (&RePlaceholder(placeholder), &ReEmpty(empty_ui)) => {
-                // If this empty region is from a universe that can
-                // name the placeholder, then the placeholder is
-                // larger; otherwise, the only ancestor is `'static`.
-                if empty_ui.can_name(placeholder.universe) {
-                    self.tcx().mk_region(RePlaceholder(placeholder))
-                } else {
-                    self.tcx().lifetimes.re_static
-                }
-            }
-
-            (&ReEarlyBound(_) | &ReFree(_), &ReEarlyBound(_) | &ReFree(_)) => {
+            (ReEarlyBound(_) | ReFree(_), ReEarlyBound(_) | ReFree(_)) => {
                 self.region_rels.lub_free_regions(a, b)
             }
 
             // For these types, we cannot define any additional
             // relationship:
-            (&RePlaceholder(..), _) | (_, &RePlaceholder(..)) => {
+            (RePlaceholder(..), _) | (_, RePlaceholder(..)) => {
                 if a == b {
                     a
                 } else {
                     self.tcx().lifetimes.re_static
                 }
             }
-        };
-
-        debug!("lub_concrete_regions({:?}, {:?}) = {:?}", a, b, r);
-
-        r
+        }
     }
 
     /// After expansion is complete, go and check upper bounds (i.e.,
     /// cases where the region cannot grow larger than a fixed point)
     /// and check that they are satisfied.
+    #[instrument(skip(self, var_data, errors))]
     fn collect_errors(
         &self,
         var_data: &mut LexicalRegionResolutions<'tcx>,
         errors: &mut Vec<RegionResolutionError<'tcx>>,
     ) {
         for (constraint, origin) in &self.data.constraints {
-            debug!("collect_errors: constraint={:?} origin={:?}", constraint, origin);
+            debug!(?constraint, ?origin);
             match *constraint {
                 Constraint::RegSubVar(..) | Constraint::VarSubVar(..) => {
                     // Expansion will ensure that these constraints hold. Ignore.
@@ -580,7 +558,7 @@ impl<'cx, 'tcx> LexicalResolver<'cx, 'tcx> {
                     }
 
                     debug!(
-                        "collect_errors: region error at {:?}: \
+                        "region error at {:?}: \
                          cannot verify that {:?} <= {:?}",
                         origin, sub, sup
                     );
@@ -596,9 +574,8 @@ impl<'cx, 'tcx> LexicalResolver<'cx, 'tcx> {
                     let a_data = var_data.value_mut(a_vid);
                     debug!("contraction: {:?} == {:?}, {:?}", a_vid, a_data, b_region);
 
-                    let a_region = match *a_data {
-                        VarValue::ErrorValue => continue,
-                        VarValue::Value(a_region) => a_region,
+                    let VarValue::Value(a_region) = *a_data else {
+                        continue;
                     };
 
                     // Do not report these errors immediately:
@@ -606,7 +583,7 @@ impl<'cx, 'tcx> LexicalResolver<'cx, 'tcx> {
                     // collect them later.
                     if !self.sub_concrete_regions(a_region, b_region) {
                         debug!(
-                            "collect_errors: region error at {:?}: \
+                            "region error at {:?}: \
                             cannot verify that {:?}={:?} <= {:?}",
                             origin, a_vid, a_region, b_region
                         );
@@ -616,28 +593,12 @@ impl<'cx, 'tcx> LexicalResolver<'cx, 'tcx> {
             }
         }
 
-        // Check that all member constraints are satisfied.
-        for member_constraint in &self.data.member_constraints {
-            let member_region = var_data.normalize(self.tcx(), member_constraint.member_region);
-            let choice_regions = member_constraint
-                .choice_regions
-                .iter()
-                .map(|&choice_region| var_data.normalize(self.tcx(), choice_region));
-            if !choice_regions.clone().any(|choice_region| member_region == choice_region) {
-                let span = self.tcx().def_span(member_constraint.opaque_type_def_id);
-                errors.push(RegionResolutionError::MemberConstraintFailure {
-                    span,
-                    hidden_ty: member_constraint.hidden_ty,
-                    member_region,
-                });
-            }
-        }
-
         for verify in &self.data.verifys {
             debug!("collect_errors: verify={:?}", verify);
             let sub = var_data.normalize(self.tcx(), verify.region);
 
             let verify_kind_ty = verify.kind.to_ty(self.tcx());
+            let verify_kind_ty = var_data.normalize(self.tcx(), verify_kind_ty);
             if self.bound_is_met(&verify.bound, var_data, verify_kind_ty, sub) {
                 continue;
             }
@@ -673,7 +634,7 @@ impl<'cx, 'tcx> LexicalResolver<'cx, 'tcx> {
         // conflicting regions to report to the user. As we walk, we
         // trip the flags from false to true, and if we find that
         // we've already reported an error involving any particular
-        // node we just stop and don't report the current error.  The
+        // node we just stop and don't report the current error. The
         // idea is to report errors that derive from independent
         // regions of the graph, but not those that derive from
         // overlapping locations.
@@ -681,7 +642,7 @@ impl<'cx, 'tcx> LexicalResolver<'cx, 'tcx> {
 
         for (node_vid, value) in var_data.values.iter_enumerated() {
             match *value {
-                VarValue::Value(_) => { /* Inference successful */ }
+                VarValue::Empty(_) | VarValue::Value(_) => { /* Inference successful */ }
                 VarValue::ErrorValue => {
                     // Inference impossible: this value contains
                     // inconsistent constraints.
@@ -706,6 +667,11 @@ impl<'cx, 'tcx> LexicalResolver<'cx, 'tcx> {
                     // if this rule starts to create problems we'll
                     // have to revisit this portion of the code and
                     // think hard about it. =) -- nikomatsakis
+
+                    // Obtain the spans for all the places that can
+                    // influence the constraints on this value for
+                    // richer diagnostics in `static_impl_trait`.
+
                     self.collect_error_for_expanding_node(graph, &mut dup_vec, node_vid, errors);
                 }
             }
@@ -788,7 +754,7 @@ impl<'cx, 'tcx> LexicalResolver<'cx, 'tcx> {
         let node_universe = self.var_infos[node_idx].universe;
 
         for lower_bound in &lower_bounds {
-            let effective_lower_bound = if let ty::RePlaceholder(p) = lower_bound.region {
+            let effective_lower_bound = if let ty::RePlaceholder(p) = *lower_bound.region {
                 if node_universe.cannot_name(p.universe) {
                     self.tcx().lifetimes.re_static
                 } else {
@@ -806,6 +772,7 @@ impl<'cx, 'tcx> LexicalResolver<'cx, 'tcx> {
                          sup: {:?}",
                         origin, node_idx, lower_bound.region, upper_bound.region
                     );
+
                     errors.push(RegionResolutionError::SubSupConflict(
                         node_idx,
                         origin,
@@ -813,6 +780,7 @@ impl<'cx, 'tcx> LexicalResolver<'cx, 'tcx> {
                         lower_bound.region,
                         upper_bound.origin.clone(),
                         upper_bound.region,
+                        vec![],
                     ));
                     return;
                 }
@@ -824,6 +792,9 @@ impl<'cx, 'tcx> LexicalResolver<'cx, 'tcx> {
         // are placeholders as upper bounds, but the universe of the
         // variable `'a`, or some variable that `'a` has to outlive, doesn't
         // permit those placeholders.
+        //
+        // We only iterate to find the min, which means it doesn't cause reproducibility issues
+        #[allow(rustc::potential_query_instability)]
         let min_universe = lower_vid_bounds
             .into_iter()
             .map(|vid| self.var_infos[vid].universe)
@@ -831,7 +802,7 @@ impl<'cx, 'tcx> LexicalResolver<'cx, 'tcx> {
             .expect("lower_vid_bounds should at least include `node_idx`");
 
         for upper_bound in &upper_bounds {
-            if let ty::RePlaceholder(p) = upper_bound.region {
+            if let ty::RePlaceholder(p) = *upper_bound.region {
                 if min_universe.cannot_name(p.universe) {
                     let origin = self.var_infos[node_idx].origin;
                     errors.push(RegionResolutionError::UpperBoundUniverseConflict(
@@ -959,18 +930,42 @@ impl<'cx, 'tcx> LexicalResolver<'cx, 'tcx> {
         min: ty::Region<'tcx>,
     ) -> bool {
         match bound {
-            VerifyBound::IfEq(k, b) => {
-                (var_values.normalize(self.region_rels.tcx, *k) == generic_ty)
-                    && self.bound_is_met(b, var_values, generic_ty, min)
+            VerifyBound::IfEq(verify_if_eq_b) => {
+                let verify_if_eq_b = var_values.normalize(self.region_rels.tcx, *verify_if_eq_b);
+                match test_type_match::extract_verify_if_eq(
+                    self.tcx(),
+                    self.param_env,
+                    &verify_if_eq_b,
+                    generic_ty,
+                ) {
+                    Some(r) => {
+                        self.bound_is_met(&VerifyBound::OutlivedBy(r), var_values, generic_ty, min)
+                    }
+
+                    None => false,
+                }
             }
 
             VerifyBound::OutlivedBy(r) => {
-                self.sub_concrete_regions(min, var_values.normalize(self.tcx(), r))
+                let a = match *min {
+                    ty::ReVar(rid) => var_values.values[rid],
+                    _ => VarValue::Value(min),
+                };
+                let b = match **r {
+                    ty::ReVar(rid) => var_values.values[rid],
+                    _ => VarValue::Value(*r),
+                };
+                self.sub_region_values(a, b)
             }
 
-            VerifyBound::IsEmpty => {
-                matches!(min, ty::ReEmpty(_))
-            }
+            VerifyBound::IsEmpty => match *min {
+                ty::ReVar(rid) => match var_values.values[rid] {
+                    VarValue::ErrorValue => false,
+                    VarValue::Empty(_) => true,
+                    VarValue::Value(_) => false,
+                },
+                _ => false,
+            },
 
             VerifyBound::AnyBound(bs) => {
                 bs.iter().any(|b| self.bound_is_met(b, var_values, generic_ty, min))
@@ -992,12 +987,9 @@ impl<'tcx> fmt::Debug for RegionAndOrigin<'tcx> {
 impl<'tcx> LexicalRegionResolutions<'tcx> {
     fn normalize<T>(&self, tcx: TyCtxt<'tcx>, value: T) -> T
     where
-        T: TypeFoldable<'tcx>,
+        T: TypeFoldable<TyCtxt<'tcx>>,
     {
-        tcx.fold_regions(value, &mut false, |r, _db| match r {
-            ty::ReVar(rid) => self.resolve_var(*rid),
-            _ => r,
-        })
+        tcx.fold_regions(value, |r, _db| self.resolve_region(tcx, r))
     }
 
     fn value(&self, rid: RegionVid) -> &VarValue<'tcx> {
@@ -1008,12 +1000,20 @@ impl<'tcx> LexicalRegionResolutions<'tcx> {
         &mut self.values[rid]
     }
 
-    pub fn resolve_var(&self, rid: RegionVid) -> ty::Region<'tcx> {
-        let result = match self.values[rid] {
-            VarValue::Value(r) => r,
-            VarValue::ErrorValue => self.error_region,
+    pub(crate) fn resolve_region(
+        &self,
+        tcx: TyCtxt<'tcx>,
+        r: ty::Region<'tcx>,
+    ) -> ty::Region<'tcx> {
+        let result = match *r {
+            ty::ReVar(rid) => match self.values[rid] {
+                VarValue::Empty(_) => r,
+                VarValue::Value(r) => r,
+                VarValue::ErrorValue => tcx.lifetimes.re_static,
+            },
+            _ => r,
         };
-        debug!("resolve_var({:?}) = {:?}", rid, result);
+        debug!("resolve_region({:?}) = {:?}", r, result);
         result
     }
 }

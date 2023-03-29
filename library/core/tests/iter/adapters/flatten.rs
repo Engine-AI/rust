@@ -1,5 +1,7 @@
+use core::assert_eq;
 use super::*;
 use core::iter::*;
+use core::num::NonZeroUsize;
 
 #[test]
 fn test_iterator_flatten() {
@@ -58,6 +60,26 @@ fn test_flatten_try_folds() {
 }
 
 #[test]
+fn test_flatten_advance_by() {
+    let mut it = once(0..10).chain(once(10..30)).chain(once(30..40)).flatten();
+
+    assert_eq!(it.advance_by(5), Ok(()));
+    assert_eq!(it.next(), Some(5));
+    assert_eq!(it.advance_by(9), Ok(()));
+    assert_eq!(it.next(), Some(15));
+    assert_eq!(it.advance_back_by(4), Ok(()));
+    assert_eq!(it.next_back(), Some(35));
+    assert_eq!(it.advance_back_by(9), Ok(()));
+    assert_eq!(it.next_back(), Some(25));
+
+    assert_eq!(it.advance_by(usize::MAX), Err(NonZeroUsize::new(usize::MAX - 9).unwrap()));
+    assert_eq!(it.advance_back_by(usize::MAX), Err(NonZeroUsize::new(usize::MAX).unwrap()));
+    assert_eq!(it.advance_by(0), Ok(()));
+    assert_eq!(it.advance_back_by(0), Ok(()));
+    assert_eq!(it.size_hint(), (0, Some(0)));
+}
+
+#[test]
 fn test_flatten_non_fused_outer() {
     let mut iter = NonFused::new(once(0..2)).flatten();
 
@@ -108,4 +130,85 @@ fn test_double_ended_flatten() {
     assert_eq!(it.next_back(), None);
     assert_eq!(it.next(), None);
     assert_eq!(it.next_back(), None);
+}
+
+#[test]
+fn test_trusted_len_flatten() {
+    fn assert_trusted_len<T: TrustedLen>(_: &T) {}
+    let mut iter = IntoIterator::into_iter([[0; 3]; 4]).flatten();
+    assert_trusted_len(&iter);
+
+    assert_eq!(iter.size_hint(), (12, Some(12)));
+    iter.next();
+    assert_eq!(iter.size_hint(), (11, Some(11)));
+    iter.next_back();
+    assert_eq!(iter.size_hint(), (10, Some(10)));
+
+    let iter = IntoIterator::into_iter([[(); usize::MAX]; 1]).flatten();
+    assert_eq!(iter.size_hint(), (usize::MAX, Some(usize::MAX)));
+
+    let iter = IntoIterator::into_iter([[(); usize::MAX]; 2]).flatten();
+    assert_eq!(iter.size_hint(), (usize::MAX, None));
+
+    let mut a = [(); 10];
+    let mut b = [(); 10];
+
+    let iter = IntoIterator::into_iter([&mut a, &mut b]).flatten();
+    assert_trusted_len(&iter);
+    assert_eq!(iter.size_hint(), (20, Some(20)));
+    core::mem::drop(iter);
+
+    let iter = IntoIterator::into_iter([&a, &b]).flatten();
+    assert_trusted_len(&iter);
+    assert_eq!(iter.size_hint(), (20, Some(20)));
+
+    let iter = [(), (), ()].iter().flat_map(|_| [(); 1000]);
+    assert_trusted_len(&iter);
+    assert_eq!(iter.size_hint(), (3000, Some(3000)));
+
+    let iter = [(), ()].iter().flat_map(|_| &a);
+    assert_trusted_len(&iter);
+    assert_eq!(iter.size_hint(), (20, Some(20)));
+}
+
+#[test]
+fn test_flatten_count() {
+    let mut it = once(0..10).chain(once(10..30)).chain(once(30..40)).flatten();
+
+    assert_eq!(it.clone().count(), 40);
+    assert_eq!(it.advance_by(5), Ok(()));
+    assert_eq!(it.clone().count(), 35);
+    assert_eq!(it.advance_back_by(5), Ok(()));
+    assert_eq!(it.clone().count(), 30);
+    assert_eq!(it.advance_by(10), Ok(()));
+    assert_eq!(it.clone().count(), 20);
+    assert_eq!(it.advance_back_by(8), Ok(()));
+    assert_eq!(it.clone().count(), 12);
+    assert_eq!(it.advance_by(4), Ok(()));
+    assert_eq!(it.clone().count(), 8);
+    assert_eq!(it.advance_back_by(5), Ok(()));
+    assert_eq!(it.clone().count(), 3);
+    assert_eq!(it.advance_by(3), Ok(()));
+    assert_eq!(it.clone().count(), 0);
+}
+
+#[test]
+fn test_flatten_last() {
+    let mut it = once(0..10).chain(once(10..30)).chain(once(30..40)).flatten();
+
+    assert_eq!(it.clone().last(), Some(39));
+    assert_eq!(it.advance_by(5), Ok(())); // 5..40
+    assert_eq!(it.clone().last(), Some(39));
+    assert_eq!(it.advance_back_by(5), Ok(())); // 5..35
+    assert_eq!(it.clone().last(), Some(34));
+    assert_eq!(it.advance_by(10), Ok(())); // 15..35
+    assert_eq!(it.clone().last(), Some(34));
+    assert_eq!(it.advance_back_by(8), Ok(())); // 15..27
+    assert_eq!(it.clone().last(), Some(26));
+    assert_eq!(it.advance_by(4), Ok(())); // 19..27
+    assert_eq!(it.clone().last(), Some(26));
+    assert_eq!(it.advance_back_by(5), Ok(())); // 19..22
+    assert_eq!(it.clone().last(), Some(21));
+    assert_eq!(it.advance_by(3), Ok(())); // 22..22
+    assert_eq!(it.clone().last(), None);
 }

@@ -1,5 +1,8 @@
 use crate::io::prelude::*;
-use crate::io::{self, BufReader, BufWriter, ErrorKind, IoSlice, LineWriter, SeekFrom};
+use crate::io::{
+    self, BorrowedBuf, BufReader, BufWriter, ErrorKind, IoSlice, LineWriter, SeekFrom,
+};
+use crate::mem::MaybeUninit;
 use crate::panic;
 use crate::sync::atomic::{AtomicUsize, Ordering};
 use crate::thread;
@@ -53,6 +56,55 @@ fn test_buffered_reader() {
     assert_eq!(reader.buffer(), []);
 
     assert_eq!(reader.read(&mut buf).unwrap(), 0);
+}
+
+#[test]
+fn test_buffered_reader_read_buf() {
+    let inner: &[u8] = &[5, 6, 7, 0, 1, 2, 3, 4];
+    let mut reader = BufReader::with_capacity(2, inner);
+
+    let buf: &mut [_] = &mut [MaybeUninit::uninit(); 3];
+    let mut buf: BorrowedBuf<'_> = buf.into();
+
+    reader.read_buf(buf.unfilled()).unwrap();
+
+    assert_eq!(buf.filled(), [5, 6, 7]);
+    assert_eq!(reader.buffer(), []);
+
+    let buf: &mut [_] = &mut [MaybeUninit::uninit(); 2];
+    let mut buf: BorrowedBuf<'_> = buf.into();
+
+    reader.read_buf(buf.unfilled()).unwrap();
+
+    assert_eq!(buf.filled(), [0, 1]);
+    assert_eq!(reader.buffer(), []);
+
+    let buf: &mut [_] = &mut [MaybeUninit::uninit(); 1];
+    let mut buf: BorrowedBuf<'_> = buf.into();
+
+    reader.read_buf(buf.unfilled()).unwrap();
+
+    assert_eq!(buf.filled(), [2]);
+    assert_eq!(reader.buffer(), [3]);
+
+    let buf: &mut [_] = &mut [MaybeUninit::uninit(); 3];
+    let mut buf: BorrowedBuf<'_> = buf.into();
+
+    reader.read_buf(buf.unfilled()).unwrap();
+
+    assert_eq!(buf.filled(), [3]);
+    assert_eq!(reader.buffer(), []);
+
+    reader.read_buf(buf.unfilled()).unwrap();
+
+    assert_eq!(buf.filled(), [3, 4]);
+    assert_eq!(reader.buffer(), []);
+
+    buf.clear();
+
+    reader.read_buf(buf.unfilled()).unwrap();
+
+    assert!(buf.filled().is_empty());
 }
 
 #[test]
@@ -236,11 +288,33 @@ fn test_buffered_reader_seek_underflow_discard_buffer_between_seeks() {
     let mut reader = BufReader::with_capacity(5, ErrAfterFirstSeekReader { first_seek: true });
     assert_eq!(reader.fill_buf().ok(), Some(&[0, 0, 0, 0, 0][..]));
 
-    // The following seek will require two underlying seeks.  The first will
-    // succeed but the second will fail.  This should still invalidate the
+    // The following seek will require two underlying seeks. The first will
+    // succeed but the second will fail. This should still invalidate the
     // buffer.
     assert!(reader.seek(SeekFrom::Current(i64::MIN)).is_err());
     assert_eq!(reader.buffer().len(), 0);
+}
+
+#[test]
+fn test_buffered_reader_read_to_end_consumes_buffer() {
+    let data: &[u8] = &[0, 1, 2, 3, 4, 5, 6, 7];
+    let mut reader = BufReader::with_capacity(3, data);
+    let mut buf = Vec::new();
+    assert_eq!(reader.fill_buf().ok(), Some(&[0, 1, 2][..]));
+    assert_eq!(reader.read_to_end(&mut buf).ok(), Some(8));
+    assert_eq!(&buf, &[0, 1, 2, 3, 4, 5, 6, 7]);
+    assert!(reader.buffer().is_empty());
+}
+
+#[test]
+fn test_buffered_reader_read_to_string_consumes_buffer() {
+    let data: &[u8] = "deadbeef".as_bytes();
+    let mut reader = BufReader::with_capacity(3, data);
+    let mut buf = String::new();
+    assert_eq!(reader.fill_buf().ok(), Some("dea".as_bytes()));
+    assert_eq!(reader.read_to_string(&mut buf).ok(), Some(8));
+    assert_eq!(&buf, "deadbeef");
+    assert!(reader.buffer().is_empty());
 }
 
 #[test]
@@ -451,6 +525,7 @@ fn bench_buffered_reader_small_reads(b: &mut test::Bencher) {
         let mut buf = [0u8; 4];
         for _ in 0..1024 {
             reader.read_exact(&mut buf).unwrap();
+            core::hint::black_box(&buf);
         }
     });
 }
@@ -467,9 +542,6 @@ fn bench_buffered_writer(b: &mut test::Bencher) {
 struct ProgrammableSink {
     // Writes append to this slice
     pub buffer: Vec<u8>,
-
-    // Flush sets this flag
-    pub flushed: bool,
 
     // If true, writes will always be an error
     pub always_write_error: bool,
@@ -520,7 +592,6 @@ impl Write for ProgrammableSink {
         if self.always_flush_error {
             Err(io::Error::new(io::ErrorKind::Other, "test - always_flush_error"))
         } else {
-            self.flushed = true;
             Ok(())
         }
     }
@@ -967,4 +1038,28 @@ fn single_formatted_write() {
     // have this limitation.
     writeln!(&mut writer, "{}, {}!", "hello", "world").unwrap();
     assert_eq!(writer.get_ref().events, [RecordedEvent::Write("hello, world!\n".to_string())]);
+}
+
+#[test]
+fn bufreader_full_initialize() {
+    struct OneByteReader;
+    impl Read for OneByteReader {
+        fn read(&mut self, buf: &mut [u8]) -> crate::io::Result<usize> {
+            if buf.len() > 0 {
+                buf[0] = 0;
+                Ok(1)
+            } else {
+                Ok(0)
+            }
+        }
+    }
+    let mut reader = BufReader::new(OneByteReader);
+    // Nothing is initialized yet.
+    assert_eq!(reader.initialized(), 0);
+
+    let buf = reader.fill_buf().unwrap();
+    // We read one byte...
+    assert_eq!(buf.len(), 1);
+    // But we initialized the whole buffer!
+    assert_eq!(reader.initialized(), reader.capacity());
 }

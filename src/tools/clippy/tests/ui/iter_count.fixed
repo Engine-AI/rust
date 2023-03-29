@@ -33,6 +33,7 @@ impl HasIter {
     }
 }
 
+#[allow(unused_must_use)]
 fn main() {
     let mut vec = vec![0, 1, 2, 3];
     let mut boxed_slice: Box<[u8]> = Box::new([0, 1, 2, 3]);

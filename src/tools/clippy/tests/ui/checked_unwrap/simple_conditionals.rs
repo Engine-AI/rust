@@ -1,3 +1,4 @@
+#![feature(lint_reasons)]
 #![deny(clippy::panicking_unwrap, clippy::unnecessary_unwrap)]
 #![allow(clippy::if_same_then_else, clippy::branches_sharing_code)]
 
@@ -37,8 +38,10 @@ fn main() {
     let x = Some(());
     if x.is_some() {
         x.unwrap(); // unnecessary
+        x.expect("an error message"); // unnecessary
     } else {
         x.unwrap(); // will panic
+        x.expect("an error message"); // will panic
     }
     if x.is_none() {
         x.unwrap(); // will panic
@@ -52,9 +55,11 @@ fn main() {
     let mut x: Result<(), ()> = Ok(());
     if x.is_ok() {
         x.unwrap(); // unnecessary
+        x.expect("an error message"); // unnecessary
         x.unwrap_err(); // will panic
     } else {
         x.unwrap(); // will panic
+        x.expect("an error message"); // will panic
         x.unwrap_err(); // unnecessary
     }
     if x.is_err() {
@@ -79,4 +84,19 @@ fn main() {
     }
 
     assert!(x.is_ok(), "{:?}", x.unwrap_err()); // ok, it's a common test pattern
+}
+
+fn check_expect() {
+    let x = Some(());
+    if x.is_some() {
+        #[expect(clippy::unnecessary_unwrap)]
+        x.unwrap(); // unnecessary
+        #[expect(clippy::unnecessary_unwrap)]
+        x.expect("an error message"); // unnecessary
+    } else {
+        #[expect(clippy::panicking_unwrap)]
+        x.unwrap(); // will panic
+        #[expect(clippy::panicking_unwrap)]
+        x.expect("an error message"); // will panic
+    }
 }

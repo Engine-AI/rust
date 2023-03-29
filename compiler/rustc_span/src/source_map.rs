@@ -16,14 +16,12 @@ use rustc_data_structures::fx::FxHashMap;
 use rustc_data_structures::stable_hasher::StableHasher;
 use rustc_data_structures::sync::{AtomicU32, Lrc, MappedReadGuard, ReadGuard, RwLock};
 use std::cmp;
-use std::convert::TryFrom;
 use std::hash::Hash;
-use std::path::{Path, PathBuf};
+use std::path::{self, Path, PathBuf};
 use std::sync::atomic::Ordering;
 
 use std::fs;
 use std::io;
-use tracing::debug;
 
 #[cfg(test)]
 mod tests;
@@ -100,8 +98,11 @@ pub trait FileLoader {
     /// Query the existence of a file.
     fn file_exists(&self, path: &Path) -> bool;
 
-    /// Read the contents of an UTF-8 file into memory.
+    /// Read the contents of a UTF-8 file into memory.
     fn read_file(&self, path: &Path) -> io::Result<String>;
+
+    /// Read the contents of a potentially non-UTF-8 file into memory.
+    fn read_binary_file(&self, path: &Path) -> io::Result<Vec<u8>>;
 }
 
 /// A FileLoader that uses std::fs to load real files.
@@ -109,50 +110,54 @@ pub struct RealFileLoader;
 
 impl FileLoader for RealFileLoader {
     fn file_exists(&self, path: &Path) -> bool {
-        fs::metadata(path).is_ok()
+        path.exists()
     }
 
     fn read_file(&self, path: &Path) -> io::Result<String> {
         fs::read_to_string(path)
     }
+
+    fn read_binary_file(&self, path: &Path) -> io::Result<Vec<u8>> {
+        fs::read(path)
+    }
 }
 
-// This is a `SourceFile` identifier that is used to correlate `SourceFile`s between
-// subsequent compilation sessions (which is something we need to do during
-// incremental compilation).
+/// This is a [SourceFile] identifier that is used to correlate source files between
+/// subsequent compilation sessions (which is something we need to do during
+/// incremental compilation).
+///
+/// The [StableSourceFileId] also contains the CrateNum of the crate the source
+/// file was originally parsed for. This way we get two separate entries in
+/// the [SourceMap] if the same file is part of both the local and an upstream
+/// crate. Trying to only have one entry for both cases is problematic because
+/// at the point where we discover that there's a local use of the file in
+/// addition to the upstream one, we might already have made decisions based on
+/// the assumption that it's an upstream file. Treating the two files as
+/// different has no real downsides.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Encodable, Decodable, Debug)]
-pub struct StableSourceFileId(u128);
+pub struct StableSourceFileId {
+    /// A hash of the source file's [`FileName`]. This is hash so that it's size
+    /// is more predictable than if we included the actual [`FileName`] value.
+    pub file_name_hash: u64,
+
+    /// The [`CrateNum`] of the crate this source file was originally parsed for.
+    /// We cannot include this information in the hash because at the time
+    /// of hashing we don't have the context to map from the [`CrateNum`]'s numeric
+    /// value to a `StableCrateId`.
+    pub cnum: CrateNum,
+}
 
 // FIXME: we need a more globally consistent approach to the problem solved by
 // StableSourceFileId, perhaps built atop source_file.name_hash.
 impl StableSourceFileId {
     pub fn new(source_file: &SourceFile) -> StableSourceFileId {
-        StableSourceFileId::new_from_pieces(
-            &source_file.name,
-            source_file.name_was_remapped,
-            source_file.unmapped_path.as_ref(),
-        )
+        StableSourceFileId::new_from_name(&source_file.name, source_file.cnum)
     }
 
-    fn new_from_pieces(
-        name: &FileName,
-        name_was_remapped: bool,
-        unmapped_path: Option<&FileName>,
-    ) -> StableSourceFileId {
+    fn new_from_name(name: &FileName, cnum: CrateNum) -> StableSourceFileId {
         let mut hasher = StableHasher::new();
-
-        if let FileName::Real(real_name) = name {
-            // rust-lang/rust#70924: Use the stable (virtualized) name when
-            // available. (We do not want artifacts from transient file system
-            // paths for libstd to leak into our build artifacts.)
-            real_name.stable_name().hash(&mut hasher)
-        } else {
-            name.hash(&mut hasher);
-        }
-        name_was_remapped.hash(&mut hasher);
-        unmapped_path.hash(&mut hasher);
-
-        StableSourceFileId(hasher.finish())
+        name.hash(&mut hasher);
+        StableSourceFileId { file_name_hash: hasher.finish(), cnum }
     }
 }
 
@@ -222,9 +227,7 @@ impl SourceMap {
     /// Unlike `load_file`, guarantees that no normalization like BOM-removal
     /// takes place.
     pub fn load_binary_file(&self, path: &Path) -> io::Result<Vec<u8>> {
-        // Ideally, this should use `self.file_loader`, but it can't
-        // deal with binary files yet.
-        let bytes = fs::read(path)?;
+        let bytes = self.file_loader.read_binary_file(path)?;
 
         // We need to add file to the `SourceMap`, so that it is present
         // in dep-info. There's also an edge case that file might be both
@@ -283,35 +286,15 @@ impl SourceMap {
 
     fn try_new_source_file(
         &self,
-        mut filename: FileName,
+        filename: FileName,
         src: String,
     ) -> Result<Lrc<SourceFile>, OffsetOverflowError> {
-        // The path is used to determine the directory for loading submodules and
-        // include files, so it must be before remapping.
         // Note that filename may not be a valid path, eg it may be `<anon>` etc,
         // but this is okay because the directory determined by `path.pop()` will
         // be empty, so the working directory will be used.
-        let unmapped_path = filename.clone();
+        let (filename, _) = self.path_mapping.map_filename_prefix(&filename);
 
-        let was_remapped;
-        if let FileName::Real(real_filename) = &mut filename {
-            match real_filename {
-                RealFileName::Named(path_to_be_remapped)
-                | RealFileName::Devirtualized {
-                    local_path: path_to_be_remapped,
-                    virtual_name: _,
-                } => {
-                    let mapped = self.path_mapping.map_prefix(path_to_be_remapped.clone());
-                    was_remapped = mapped.1;
-                    *path_to_be_remapped = mapped.0;
-                }
-            }
-        } else {
-            was_remapped = false;
-        }
-
-        let file_id =
-            StableSourceFileId::new_from_pieces(&filename, was_remapped, Some(&unmapped_path));
+        let file_id = StableSourceFileId::new_from_name(&filename, LOCAL_CRATE);
 
         let lrc_sf = match self.source_file_by_stable_id(file_id) {
             Some(lrc_sf) => lrc_sf,
@@ -320,12 +303,14 @@ impl SourceMap {
 
                 let source_file = Lrc::new(SourceFile::new(
                     filename,
-                    was_remapped,
-                    unmapped_path,
                     src,
                     Pos::from_usize(start_pos),
                     self.hash_kind,
                 ));
+
+                // Let's make sure the file_id we generated above actually matches
+                // the ID we generate for the SourceFile we just created.
+                debug_assert_eq!(StableSourceFileId::new(&source_file), file_id);
 
                 let mut files = self.files.borrow_mut();
 
@@ -345,17 +330,16 @@ impl SourceMap {
     pub fn new_imported_source_file(
         &self,
         filename: FileName,
-        name_was_remapped: bool,
         src_hash: SourceFileHash,
         name_hash: u128,
         source_len: usize,
         cnum: CrateNum,
-        mut file_local_lines: Vec<BytePos>,
+        file_local_lines: Lock<SourceFileLines>,
         mut file_local_multibyte_chars: Vec<MultiByteChar>,
         mut file_local_non_narrow_chars: Vec<NonNarrowChar>,
         mut file_local_normalized_pos: Vec<NormalizedPos>,
         original_start_pos: BytePos,
-        original_end_pos: BytePos,
+        metadata_index: u32,
     ) -> Lrc<SourceFile> {
         let start_pos = self
             .allocate_address_space(source_len)
@@ -364,32 +348,43 @@ impl SourceMap {
         let end_pos = Pos::from_usize(start_pos + source_len);
         let start_pos = Pos::from_usize(start_pos);
 
-        for pos in &mut file_local_lines {
-            *pos = *pos + start_pos;
+        // Translate these positions into the new global frame of reference,
+        // now that the offset of the SourceFile is known.
+        //
+        // These are all unsigned values. `original_start_pos` may be larger or
+        // smaller than `start_pos`, but `pos` is always larger than both.
+        // Therefore, `(pos - original_start_pos) + start_pos` won't overflow
+        // but `start_pos - original_start_pos` might. So we use the former
+        // form rather than pre-computing the offset into a local variable. The
+        // compiler backend can optimize away the repeated computations in a
+        // way that won't trigger overflow checks.
+        match &mut *file_local_lines.borrow_mut() {
+            SourceFileLines::Lines(lines) => {
+                for pos in lines {
+                    *pos = (*pos - original_start_pos) + start_pos;
+                }
+            }
+            SourceFileLines::Diffs(SourceFileDiffs { line_start, .. }) => {
+                *line_start = (*line_start - original_start_pos) + start_pos;
+            }
         }
-
         for mbc in &mut file_local_multibyte_chars {
-            mbc.pos = mbc.pos + start_pos;
+            mbc.pos = (mbc.pos - original_start_pos) + start_pos;
         }
-
         for swc in &mut file_local_non_narrow_chars {
-            *swc = *swc + start_pos;
+            *swc = (*swc - original_start_pos) + start_pos;
         }
-
         for nc in &mut file_local_normalized_pos {
-            nc.pos = nc.pos + start_pos;
+            nc.pos = (nc.pos - original_start_pos) + start_pos;
         }
 
         let source_file = Lrc::new(SourceFile {
             name: filename,
-            name_was_remapped,
-            unmapped_path: None,
             src: None,
             src_hash,
             external_src: Lock::new(ExternalSource::Foreign {
                 kind: ExternalSourceKind::AbsentOk,
-                original_start_pos,
-                original_end_pos,
+                metadata_index,
             }),
             start_pos,
             end_pos,
@@ -411,12 +406,7 @@ impl SourceMap {
         source_file
     }
 
-    pub fn mk_substr_filename(&self, sp: Span) -> String {
-        let pos = self.lookup_char_pos(sp.lo());
-        format!("<{}:{}:{}>", pos.file.name, pos.line, pos.col.to_usize() + 1)
-    }
-
-    // If there is a doctest offset, applies it to the line.
+    /// If there is a doctest offset, applies it to the line.
     pub fn doctest_offset_line(&self, file: &FileName, orig: usize) -> usize {
         match file {
             FileName::DocTest(_, offset) => {
@@ -443,7 +433,7 @@ impl SourceMap {
         Loc { file: sf, line, col, col_display }
     }
 
-    // If the corresponding `SourceFile` is empty, does not return a line number.
+    /// If the corresponding `SourceFile` is empty, does not return a line number.
     pub fn lookup_line(&self, pos: BytePos) -> Result<SourceFileAndLine, Lrc<SourceFile>> {
         let f = self.lookup_source_file(pos);
 
@@ -453,46 +443,104 @@ impl SourceMap {
         }
     }
 
-    pub fn span_to_string(&self, sp: Span) -> String {
-        if self.files.borrow().source_files.is_empty() && sp.is_dummy() {
+    pub fn span_to_string(
+        &self,
+        sp: Span,
+        filename_display_pref: FileNameDisplayPreference,
+    ) -> String {
+        let (source_file, lo_line, lo_col, hi_line, hi_col) = self.span_to_location_info(sp);
+
+        let file_name = match source_file {
+            Some(sf) => sf.name.display(filename_display_pref).to_string(),
+            None => return "no-location".to_string(),
+        };
+
+        format!(
+            "{file_name}:{lo_line}:{lo_col}{}",
+            if let FileNameDisplayPreference::Short = filename_display_pref {
+                String::new()
+            } else {
+                format!(": {hi_line}:{hi_col}")
+            }
+        )
+    }
+
+    pub fn span_to_location_info(
+        &self,
+        sp: Span,
+    ) -> (Option<Lrc<SourceFile>>, usize, usize, usize, usize) {
+        if self.files.borrow().source_files.is_empty() || sp.is_dummy() {
+            return (None, 0, 0, 0, 0);
+        }
+
+        let lo = self.lookup_char_pos(sp.lo());
+        let hi = self.lookup_char_pos(sp.hi());
+        (Some(lo.file), lo.line, lo.col.to_usize() + 1, hi.line, hi.col.to_usize() + 1)
+    }
+
+    /// Format the span location suitable for embedding in build artifacts
+    pub fn span_to_embeddable_string(&self, sp: Span) -> String {
+        self.span_to_string(sp, FileNameDisplayPreference::Remapped)
+    }
+
+    /// Format the span location suitable for pretty printing anotations with relative line numbers
+    pub fn span_to_relative_line_string(&self, sp: Span, relative_to: Span) -> String {
+        if self.files.borrow().source_files.is_empty() || sp.is_dummy() || relative_to.is_dummy() {
             return "no-location".to_string();
         }
 
         let lo = self.lookup_char_pos(sp.lo());
         let hi = self.lookup_char_pos(sp.hi());
+        let offset = self.lookup_char_pos(relative_to.lo());
+
+        if lo.file.name != offset.file.name || !relative_to.contains(sp) {
+            return self.span_to_embeddable_string(sp);
+        }
+
+        let lo_line = lo.line.saturating_sub(offset.line);
+        let hi_line = hi.line.saturating_sub(offset.line);
+
         format!(
-            "{}:{}:{}: {}:{}",
-            lo.file.name,
-            lo.line,
+            "{}:+{}:{}: +{}:{}",
+            lo.file.name.display(FileNameDisplayPreference::Remapped),
+            lo_line,
             lo.col.to_usize() + 1,
-            hi.line,
+            hi_line,
             hi.col.to_usize() + 1,
         )
+    }
+
+    /// Format the span location to be printed in diagnostics. Must not be emitted
+    /// to build artifacts as this may leak local file paths. Use span_to_embeddable_string
+    /// for string suitable for embedding.
+    pub fn span_to_diagnostic_string(&self, sp: Span) -> String {
+        self.span_to_string(sp, self.path_mapping.filename_display_for_diagnostics)
     }
 
     pub fn span_to_filename(&self, sp: Span) -> FileName {
         self.lookup_char_pos(sp.lo()).file.name.clone()
     }
 
-    pub fn span_to_unmapped_path(&self, sp: Span) -> FileName {
-        self.lookup_char_pos(sp.lo())
-            .file
-            .unmapped_path
-            .clone()
-            .expect("`SourceMap::span_to_unmapped_path` called for imported `SourceFile`?")
+    pub fn filename_for_diagnostics<'a>(&self, filename: &'a FileName) -> FileNameDisplay<'a> {
+        filename.display(self.path_mapping.filename_display_for_diagnostics)
     }
 
     pub fn is_multiline(&self, sp: Span) -> bool {
-        let lo = self.lookup_char_pos(sp.lo());
-        let hi = self.lookup_char_pos(sp.hi());
-        lo.line != hi.line
+        let lo = self.lookup_source_file_idx(sp.lo());
+        let hi = self.lookup_source_file_idx(sp.hi());
+        if lo != hi {
+            return true;
+        }
+        let f = (*self.files.borrow().source_files)[lo].clone();
+        f.lookup_line(sp.lo()) != f.lookup_line(sp.hi())
     }
 
+    #[instrument(skip(self), level = "trace")]
     pub fn is_valid_span(&self, sp: Span) -> Result<(Loc, Loc), SpanLinesError> {
         let lo = self.lookup_char_pos(sp.lo());
-        debug!("span_to_lines: lo={:?}", lo);
+        trace!(?lo);
         let hi = self.lookup_char_pos(sp.hi());
-        debug!("span_to_lines: hi={:?}", hi);
+        trace!(?hi);
         if lo.file.start_pos != hi.file.start_pos {
             return Err(SpanLinesError::DistinctSources(DistinctSources {
                 begin: (lo.file.name.clone(), lo.file.start_pos),
@@ -585,6 +633,13 @@ impl SourceMap {
         }
     }
 
+    pub fn is_span_accessible(&self, sp: Span) -> bool {
+        self.span_to_source(sp, |src, start_index, end_index| {
+            Ok(src.get(start_index..end_index).is_some())
+        })
+        .map_or(false, |is_accessible| is_accessible)
+    }
+
     /// Returns the source snippet as `String` corresponding to the given `Span`.
     pub fn span_to_snippet(&self, sp: Span) -> Result<String, SpanSnippetError> {
         self.span_to_source(sp, |src, start_index, end_index| {
@@ -595,14 +650,19 @@ impl SourceMap {
     }
 
     pub fn span_to_margin(&self, sp: Span) -> Option<usize> {
-        match self.span_to_prev_source(sp) {
-            Err(_) => None,
-            Ok(source) => {
-                let last_line = source.rsplit_once('\n').unwrap_or(("", &source)).1;
+        Some(self.indentation_before(sp)?.len())
+    }
 
-                Some(last_line.len() - last_line.trim_start().len())
-            }
-        }
+    pub fn indentation_before(&self, sp: Span) -> Option<String> {
+        self.span_to_source(sp, |src, start_index, _| {
+            let before = &src[..start_index];
+            let last_line = before.rsplit_once('\n').map_or(before, |(_, last)| last);
+            Ok(last_line
+                .split_once(|c: char| !c.is_whitespace())
+                .map_or(last_line, |(indent, _)| indent)
+                .to_string())
+        })
+        .ok()
     }
 
     /// Returns the source snippet as `String` before the given `Span`.
@@ -626,26 +686,41 @@ impl SourceMap {
     }
 
     /// Extends the given `Span` to just after the previous occurrence of `pat` when surrounded by
-    /// whitespace. Returns the same span if no character could be found or if an error occurred
-    /// while retrieving the code snippet.
-    pub fn span_extend_to_prev_str(&self, sp: Span, pat: &str, accept_newlines: bool) -> Span {
+    /// whitespace. Returns None if the pattern could not be found or if an error occurred while
+    /// retrieving the code snippet.
+    pub fn span_extend_to_prev_str(
+        &self,
+        sp: Span,
+        pat: &str,
+        accept_newlines: bool,
+        include_whitespace: bool,
+    ) -> Option<Span> {
         // assure that the pattern is delimited, to avoid the following
         //     fn my_fn()
         //           ^^^^ returned span without the check
         //     ---------- correct span
+        let prev_source = self.span_to_prev_source(sp).ok()?;
         for ws in &[" ", "\t", "\n"] {
             let pat = pat.to_owned() + ws;
-            if let Ok(prev_source) = self.span_to_prev_source(sp) {
-                let prev_source = prev_source.rsplit(&pat).next().unwrap_or("").trim_start();
-                if prev_source.is_empty() && sp.lo().0 != 0 {
-                    return sp.with_lo(BytePos(sp.lo().0 - 1));
-                } else if accept_newlines || !prev_source.contains('\n') {
-                    return sp.with_lo(BytePos(sp.lo().0 - prev_source.len() as u32));
+            if let Some(pat_pos) = prev_source.rfind(&pat) {
+                let just_after_pat_pos = pat_pos + pat.len() - 1;
+                let just_after_pat_plus_ws = if include_whitespace {
+                    just_after_pat_pos
+                        + prev_source[just_after_pat_pos..]
+                            .find(|c: char| !c.is_whitespace())
+                            .unwrap_or(0)
+                } else {
+                    just_after_pat_pos
+                };
+                let len = prev_source.len() - just_after_pat_plus_ws;
+                let prev_source = &prev_source[just_after_pat_plus_ws..];
+                if accept_newlines || !prev_source.trim_start().contains('\n') {
+                    return Some(sp.with_lo(BytePos(sp.lo().0 - len as u32)));
                 }
             }
         }
 
-        sp
+        None
     }
 
     /// Returns the source snippet as `String` after the given `Span`.
@@ -655,7 +730,19 @@ impl SourceMap {
         })
     }
 
-    /// Extends the given `Span` to just after the next occurrence of `c`.
+    /// Extends the given `Span` while the next character matches the predicate
+    pub fn span_extend_while(
+        &self,
+        span: Span,
+        f: impl Fn(char) -> bool,
+    ) -> Result<Span, SpanSnippetError> {
+        self.span_to_source(span, |s, _start, end| {
+            let n = s[end..].char_indices().find(|&(_, c)| !f(c)).map_or(s.len() - end, |(i, _)| i);
+            Ok(span.with_hi(span.hi() + BytePos(n as u32)))
+        })
+    }
+
+    /// Extends the given `Span` to just before the next occurrence of `c`.
     pub fn span_extend_to_next_char(&self, sp: Span, c: char, accept_newlines: bool) -> Span {
         if let Ok(next_source) = self.span_to_next_source(sp) {
             let next_source = next_source.split(c).next().unwrap_or("");
@@ -665,6 +752,11 @@ impl SourceMap {
         }
 
         sp
+    }
+
+    /// Extends the given `Span` to contain the entire line it is on.
+    pub fn span_extend_to_line(&self, sp: Span) -> Span {
+        self.span_extend_to_prev_char(self.span_extend_to_next_char(sp, '\n', true), '\n', true)
     }
 
     /// Given a `Span`, tries to get a shorter span ending before the first occurrence of `char`
@@ -681,6 +773,67 @@ impl SourceMap {
             }
             _ => sp,
         }
+    }
+
+    /// Given a 'Span', tries to tell if it's wrapped by "<>" or "()"
+    /// the algorithm searches if the next character is '>' or ')' after skipping white space
+    /// then searches the previous charactoer to match '<' or '(' after skipping white space
+    /// return true if wrapped by '<>' or '()'
+    pub fn span_wrapped_by_angle_or_parentheses(&self, span: Span) -> bool {
+        self.span_to_source(span, |src, start_index, end_index| {
+            if src.get(start_index..end_index).is_none() {
+                return Ok(false);
+            }
+            // test the right side to match '>' after skipping white space
+            let end_src = &src[end_index..];
+            let mut i = 0;
+            let mut found_right_parentheses = false;
+            let mut found_right_angle = false;
+            while let Some(cc) = end_src.chars().nth(i) {
+                if cc == ' ' {
+                    i = i + 1;
+                } else if cc == '>' {
+                    // found > in the right;
+                    found_right_angle = true;
+                    break;
+                } else if cc == ')' {
+                    found_right_parentheses = true;
+                    break;
+                } else {
+                    // failed to find '>' return false immediately
+                    return Ok(false);
+                }
+            }
+            // test the left side to match '<' after skipping white space
+            i = start_index;
+            let start_src = &src[0..start_index];
+            while let Some(cc) = start_src.chars().nth(i) {
+                if cc == ' ' {
+                    if i == 0 {
+                        return Ok(false);
+                    }
+                    i = i - 1;
+                } else if cc == '<' {
+                    // found < in the left
+                    if !found_right_angle {
+                        // skip something like "(< )>"
+                        return Ok(false);
+                    }
+                    break;
+                } else if cc == '(' {
+                    if !found_right_parentheses {
+                        // skip something like "<(>)"
+                        return Ok(false);
+                    }
+                    break;
+                } else {
+                    // failed to find '<' return false immediately
+                    return Ok(false);
+                }
+            }
+            return Ok(true);
+        })
+        .map_or(false, |is_accessible| is_accessible)
     }
 
     /// Given a `Span`, tries to get a shorter span ending just after the first occurrence of `char`
@@ -783,63 +936,84 @@ impl SourceMap {
     }
 
     /// Returns a new span representing the next character after the end-point of this span.
+    /// Special cases:
+    /// - if span is a dummy one, returns the same span
+    /// - if next_point reached the end of source, return a span exceeding the end of source,
+    ///   which means sm.span_to_snippet(next_point) will get `Err`
+    /// - respect multi-byte characters
     pub fn next_point(&self, sp: Span) -> Span {
         if sp.is_dummy() {
             return sp;
         }
         let start_of_next_point = sp.hi().0;
 
-        let width = self.find_width_of_character_at_span(sp.shrink_to_hi(), true);
-        // If the width is 1, then the next span should point to the same `lo` and `hi`. However,
-        // in the case of a multibyte character, where the width != 1, the next span should
+        let width = self.find_width_of_character_at_span(sp, true);
+        // If the width is 1, then the next span should only contain the next char besides current ending.
+        // However, in the case of a multibyte character, where the width != 1, the next span should
         // span multiple bytes to include the whole character.
         let end_of_next_point =
-            start_of_next_point.checked_add(width - 1).unwrap_or(start_of_next_point);
+            start_of_next_point.checked_add(width).unwrap_or(start_of_next_point);
 
-        let end_of_next_point = BytePos(cmp::max(sp.lo().0 + 1, end_of_next_point));
-        Span::new(BytePos(start_of_next_point), end_of_next_point, sp.ctxt())
+        let end_of_next_point = BytePos(cmp::max(start_of_next_point + 1, end_of_next_point));
+        Span::new(BytePos(start_of_next_point), end_of_next_point, sp.ctxt(), None)
+    }
+
+    /// Returns a new span to check next none-whitespace character or some specified expected character
+    /// If `expect` is none, the first span of non-whitespace character is returned.
+    /// If `expect` presented, the first span of the character `expect` is returned
+    /// Otherwise, the span reached to limit is returned.
+    pub fn span_look_ahead(&self, span: Span, expect: Option<&str>, limit: Option<usize>) -> Span {
+        let mut sp = span;
+        for _ in 0..limit.unwrap_or(100_usize) {
+            sp = self.next_point(sp);
+            if let Ok(ref snippet) = self.span_to_snippet(sp) {
+                if expect.map_or(false, |es| snippet == es) {
+                    break;
+                }
+                if expect.is_none() && snippet.chars().any(|c| !c.is_whitespace()) {
+                    break;
+                }
+            }
+        }
+        sp
     }
 
     /// Finds the width of the character, either before or after the end of provided span,
     /// depending on the `forwards` parameter.
+    #[instrument(skip(self, sp))]
     fn find_width_of_character_at_span(&self, sp: Span, forwards: bool) -> u32 {
         let sp = sp.data();
-        if sp.lo == sp.hi {
-            debug!("find_width_of_character_at_span: early return empty span");
+
+        if sp.lo == sp.hi && !forwards {
+            debug!("early return empty span");
             return 1;
         }
 
         let local_begin = self.lookup_byte_offset(sp.lo);
         let local_end = self.lookup_byte_offset(sp.hi);
-        debug!(
-            "find_width_of_character_at_span: local_begin=`{:?}`, local_end=`{:?}`",
-            local_begin, local_end
-        );
+        debug!("local_begin=`{:?}`, local_end=`{:?}`", local_begin, local_end);
 
         if local_begin.sf.start_pos != local_end.sf.start_pos {
-            debug!("find_width_of_character_at_span: begin and end are in different files");
+            debug!("begin and end are in different files");
             return 1;
         }
 
         let start_index = local_begin.pos.to_usize();
         let end_index = local_end.pos.to_usize();
-        debug!(
-            "find_width_of_character_at_span: start_index=`{:?}`, end_index=`{:?}`",
-            start_index, end_index
-        );
+        debug!("start_index=`{:?}`, end_index=`{:?}`", start_index, end_index);
 
         // Disregard indexes that are at the start or end of their spans, they can't fit bigger
         // characters.
         if (!forwards && end_index == usize::MIN) || (forwards && start_index == usize::MAX) {
-            debug!("find_width_of_character_at_span: start or end of span, cannot be multibyte");
+            debug!("start or end of span, cannot be multibyte");
             return 1;
         }
 
         let source_len = (local_begin.sf.end_pos - local_begin.sf.start_pos).to_usize();
-        debug!("find_width_of_character_at_span: source_len=`{:?}`", source_len);
+        debug!("source_len=`{:?}`", source_len);
         // Ensure indexes are also not malformed.
-        if start_index > end_index || end_index > source_len {
-            debug!("find_width_of_character_at_span: source indexes are malformed");
+        if start_index > end_index || end_index > source_len - 1 {
+            debug!("source indexes are malformed");
             return 1;
         }
 
@@ -854,10 +1028,10 @@ impl SourceMap {
         } else {
             return 1;
         };
-        debug!("find_width_of_character_at_span: snippet=`{:?}`", snippet);
+        debug!("snippet=`{:?}`", snippet);
 
         let mut target = if forwards { end_index + 1 } else { end_index - 1 };
-        debug!("find_width_of_character_at_span: initial target=`{:?}`", target);
+        debug!("initial target=`{:?}`", target);
 
         while !snippet.is_char_boundary(target - start_index) && target < source_len {
             target = if forwards {
@@ -870,9 +1044,9 @@ impl SourceMap {
                     }
                 }
             };
-            debug!("find_width_of_character_at_span: target=`{:?}`", target);
+            debug!("target=`{:?}`", target);
         }
-        debug!("find_width_of_character_at_span: final target=`{:?}`", target);
+        debug!("final target=`{:?}`", target);
 
         if forwards { (target - end_index) as u32 } else { (end_index - target) as u32 }
     }
@@ -896,9 +1070,9 @@ impl SourceMap {
         SourceFileAndBytePos { sf, pos: offset }
     }
 
-    // Returns the index of the `SourceFile` (in `self.files`) that contains `pos`.
-    // This index is guaranteed to be valid for the lifetime of this `SourceMap`,
-    // since `source_files` is a `MonotonicVec`
+    /// Returns the index of the [`SourceFile`] (in `self.files`) that contains `pos`.
+    /// This index is guaranteed to be valid for the lifetime of this `SourceMap`,
+    /// since `source_files` is a `MonotonicVec`
     pub fn lookup_source_file_idx(&self, pos: BytePos) -> usize {
         self.files
             .borrow()
@@ -911,98 +1085,26 @@ impl SourceMap {
         self.files().iter().fold(0, |a, f| a + f.count_lines())
     }
 
-    pub fn generate_fn_name_span(&self, span: Span) -> Option<Span> {
-        let prev_span = self.span_extend_to_prev_str(span, "fn", true);
-        if let Ok(snippet) = self.span_to_snippet(prev_span) {
-            debug!(
-                "generate_fn_name_span: span={:?}, prev_span={:?}, snippet={:?}",
-                span, prev_span, snippet
-            );
-
-            if snippet.is_empty() {
+    pub fn ensure_source_file_source_present(&self, source_file: Lrc<SourceFile>) -> bool {
+        source_file.add_external_src(|| {
+            let FileName::Real(ref name) = source_file.name else {
                 return None;
             };
 
-            let len = snippet
-                .find(|c: char| !c.is_alphanumeric() && c != '_')
-                .expect("no label after fn");
-            Some(prev_span.with_hi(BytePos(prev_span.lo().0 + len as u32)))
-        } else {
-            None
-        }
-    }
-
-    /// Takes the span of a type parameter in a function signature and try to generate a span for
-    /// the function name (with generics) and a new snippet for this span with the pointed type
-    /// parameter as a new local type parameter.
-    ///
-    /// For instance:
-    /// ```rust,ignore (pseudo-Rust)
-    /// // Given span
-    /// fn my_function(param: T)
-    /// //                    ^ Original span
-    ///
-    /// // Result
-    /// fn my_function(param: T)
-    /// // ^^^^^^^^^^^ Generated span with snippet `my_function<T>`
-    /// ```
-    ///
-    /// Attention: The method used is very fragile since it essentially duplicates the work of the
-    /// parser. If you need to use this function or something similar, please consider updating the
-    /// `SourceMap` functions and this function to something more robust.
-    pub fn generate_local_type_param_snippet(&self, span: Span) -> Option<(Span, String)> {
-        // Try to extend the span to the previous "fn" keyword to retrieve the function
-        // signature.
-        let sugg_span = self.span_extend_to_prev_str(span, "fn", false);
-        if sugg_span != span {
-            if let Ok(snippet) = self.span_to_snippet(sugg_span) {
-                // Consume the function name.
-                let mut offset = snippet
-                    .find(|c: char| !c.is_alphanumeric() && c != '_')
-                    .expect("no label after fn");
-
-                // Consume the generics part of the function signature.
-                let mut bracket_counter = 0;
-                let mut last_char = None;
-                for c in snippet[offset..].chars() {
-                    match c {
-                        '<' => bracket_counter += 1,
-                        '>' => bracket_counter -= 1,
-                        '(' => {
-                            if bracket_counter == 0 {
-                                break;
-                            }
-                        }
-                        _ => {}
-                    }
-                    offset += c.len_utf8();
-                    last_char = Some(c);
+            let local_path: Cow<'_, Path> = match name {
+                RealFileName::LocalPath(local_path) => local_path.into(),
+                RealFileName::Remapped { local_path: Some(local_path), .. } => local_path.into(),
+                RealFileName::Remapped { local_path: None, virtual_name } => {
+                    // The compiler produces better error messages if the sources of dependencies
+                    // are available. Attempt to undo any path mapping so we can find remapped
+                    // dependencies.
+                    // We can only use the heuristic because `add_external_src` checks the file
+                    // content hash.
+                    self.path_mapping.reverse_map_prefix_heuristically(virtual_name)?.into()
                 }
+            };
 
-                // Adjust the suggestion span to encompass the function name with its generics.
-                let sugg_span = sugg_span.with_hi(BytePos(sugg_span.lo().0 + offset as u32));
-
-                // Prepare the new suggested snippet to append the type parameter that triggered
-                // the error in the generics of the function signature.
-                let mut new_snippet = if last_char == Some('>') {
-                    format!("{}, ", &snippet[..(offset - '>'.len_utf8())])
-                } else {
-                    format!("{}<", &snippet[..offset])
-                };
-                new_snippet
-                    .push_str(&self.span_to_snippet(span).unwrap_or_else(|_| "T".to_string()));
-                new_snippet.push('>');
-
-                return Some((sugg_span, new_snippet));
-            }
-        }
-
-        None
-    }
-    pub fn ensure_source_file_source_present(&self, source_file: Lrc<SourceFile>) -> bool {
-        source_file.add_external_src(|| match source_file.name {
-            FileName::Real(ref name) => self.file_loader.read_file(name.local_path()).ok(),
-            _ => None,
+            self.file_loader.read_file(&local_path).ok()
         })
     }
 
@@ -1011,46 +1113,242 @@ impl SourceMap {
         let source_file = &self.files()[source_file_index];
         source_file.is_imported()
     }
+
+    /// Gets the span of a statement. If the statement is a macro expansion, the
+    /// span in the context of the block span is found. The trailing semicolon is included
+    /// on a best-effort basis.
+    pub fn stmt_span(&self, stmt_span: Span, block_span: Span) -> Span {
+        if !stmt_span.from_expansion() {
+            return stmt_span;
+        }
+        let mac_call = original_sp(stmt_span, block_span);
+        self.mac_call_stmt_semi_span(mac_call).map_or(mac_call, |s| mac_call.with_hi(s.hi()))
+    }
+
+    /// Tries to find the span of the semicolon of a macro call statement.
+    /// The input must be the *call site* span of a statement from macro expansion.
+    /// ```ignore (illustrative)
+    /// //       v output
+    ///    mac!();
+    /// // ^^^^^^ input
+    /// ```
+    pub fn mac_call_stmt_semi_span(&self, mac_call: Span) -> Option<Span> {
+        let span = self.span_extend_while(mac_call, char::is_whitespace).ok()?;
+        let span = span.shrink_to_hi().with_hi(BytePos(span.hi().0.checked_add(1)?));
+        if self.span_to_snippet(span).as_deref() != Ok(";") {
+            return None;
+        }
+        Some(span)
+    }
 }
 
 #[derive(Clone)]
 pub struct FilePathMapping {
     mapping: Vec<(PathBuf, PathBuf)>,
+    filename_display_for_diagnostics: FileNameDisplayPreference,
 }
 
 impl FilePathMapping {
     pub fn empty() -> FilePathMapping {
-        FilePathMapping { mapping: vec![] }
+        FilePathMapping::new(Vec::new())
     }
 
     pub fn new(mapping: Vec<(PathBuf, PathBuf)>) -> FilePathMapping {
-        FilePathMapping { mapping }
+        let filename_display_for_diagnostics = if mapping.is_empty() {
+            FileNameDisplayPreference::Local
+        } else {
+            FileNameDisplayPreference::Remapped
+        };
+
+        FilePathMapping { mapping, filename_display_for_diagnostics }
     }
 
     /// Applies any path prefix substitution as defined by the mapping.
     /// The return value is the remapped path and a boolean indicating whether
     /// the path was affected by the mapping.
-    pub fn map_prefix(&self, path: PathBuf) -> (PathBuf, bool) {
-        // NOTE: We are iterating over the mapping entries from last to first
-        //       because entries specified later on the command line should
-        //       take precedence.
-        for &(ref from, ref to) in self.mapping.iter().rev() {
-            if let Ok(rest) = path.strip_prefix(from) {
-                return (to.join(rest), true);
-            }
+    pub fn map_prefix<'a>(&'a self, path: impl Into<Cow<'a, Path>>) -> (Cow<'a, Path>, bool) {
+        let path = path.into();
+        if path.as_os_str().is_empty() {
+            // Exit early if the path is empty and therefore there's nothing to remap.
+            // This is mostly to reduce spam for `RUSTC_LOG=[remap_path_prefix]`.
+            return (path, false);
         }
 
-        (path, false)
+        return remap_path_prefix(&self.mapping, path);
+
+        #[instrument(level = "debug", skip(mapping), ret)]
+        fn remap_path_prefix<'a>(
+            mapping: &'a [(PathBuf, PathBuf)],
+            path: Cow<'a, Path>,
+        ) -> (Cow<'a, Path>, bool) {
+            // NOTE: We are iterating over the mapping entries from last to first
+            //       because entries specified later on the command line should
+            //       take precedence.
+            for (from, to) in mapping.iter().rev() {
+                debug!("Trying to apply {from:?} => {to:?}");
+
+                if let Ok(rest) = path.strip_prefix(from) {
+                    let remapped = if rest.as_os_str().is_empty() {
+                        // This is subtle, joining an empty path onto e.g. `foo/bar` will
+                        // result in `foo/bar/`, that is, there'll be an additional directory
+                        // separator at the end. This can lead to duplicated directory separators
+                        // in remapped paths down the line.
+                        // So, if we have an exact match, we just return that without a call
+                        // to `Path::join()`.
+                        to.into()
+                    } else {
+                        to.join(rest).into()
+                    };
+                    debug!("Match - remapped");
+
+                    return (remapped, true);
+                } else {
+                    debug!("No match - prefix {from:?} does not match");
+                }
+            }
+
+            debug!("not remapped");
+            (path, false)
+        }
     }
 
     fn map_filename_prefix(&self, file: &FileName) -> (FileName, bool) {
         match file {
-            FileName::Real(realfile) => {
-                let path = realfile.local_path();
-                let (path, mapped) = self.map_prefix(path.to_path_buf());
-                (FileName::Real(RealFileName::Named(path)), mapped)
+            FileName::Real(realfile) if let RealFileName::LocalPath(local_path) = realfile => {
+                let (mapped_path, mapped) = self.map_prefix(local_path);
+                let realfile = if mapped {
+                    RealFileName::Remapped {
+                        local_path: Some(local_path.clone()),
+                        virtual_name: mapped_path.into_owned(),
+                    }
+                } else {
+                    realfile.clone()
+                };
+                (FileName::Real(realfile), mapped)
             }
+            FileName::Real(_) => unreachable!("attempted to remap an already remapped filename"),
             other => (other.clone(), false),
         }
+    }
+
+    /// Expand a relative path to an absolute path with remapping taken into account.
+    /// Use this when absolute paths are required (e.g. debuginfo or crate metadata).
+    ///
+    /// The resulting `RealFileName` will have its `local_path` portion erased if
+    /// possible (i.e. if there's also a remapped path).
+    pub fn to_embeddable_absolute_path(
+        &self,
+        file_path: RealFileName,
+        working_directory: &RealFileName,
+    ) -> RealFileName {
+        match file_path {
+            // Anything that's already remapped we don't modify, except for erasing
+            // the `local_path` portion.
+            RealFileName::Remapped { local_path: _, virtual_name } => {
+                RealFileName::Remapped {
+                    // We do not want any local path to be exported into metadata
+                    local_path: None,
+                    // We use the remapped name verbatim, even if it looks like a relative
+                    // path. The assumption is that the user doesn't want us to further
+                    // process paths that have gone through remapping.
+                    virtual_name,
+                }
+            }
+
+            RealFileName::LocalPath(unmapped_file_path) => {
+                // If no remapping has been applied yet, try to do so
+                let (new_path, was_remapped) = self.map_prefix(unmapped_file_path);
+                if was_remapped {
+                    // It was remapped, so don't modify further
+                    return RealFileName::Remapped {
+                        local_path: None,
+                        virtual_name: new_path.into_owned(),
+                    };
+                }
+
+                if new_path.is_absolute() {
+                    // No remapping has applied to this path and it is absolute,
+                    // so the working directory cannot influence it either, so
+                    // we are done.
+                    return RealFileName::LocalPath(new_path.into_owned());
+                }
+
+                debug_assert!(new_path.is_relative());
+                let unmapped_file_path_rel = new_path;
+
+                match working_directory {
+                    RealFileName::LocalPath(unmapped_working_dir_abs) => {
+                        let file_path_abs = unmapped_working_dir_abs.join(unmapped_file_path_rel);
+
+                        // Although neither `working_directory` nor the file name were subject
+                        // to path remapping, the concatenation between the two may be. Hence
+                        // we need to do a remapping here.
+                        let (file_path_abs, was_remapped) = self.map_prefix(file_path_abs);
+                        if was_remapped {
+                            RealFileName::Remapped {
+                                // Erase the actual path
+                                local_path: None,
+                                virtual_name: file_path_abs.into_owned(),
+                            }
+                        } else {
+                            // No kind of remapping applied to this path, so
+                            // we leave it as it is.
+                            RealFileName::LocalPath(file_path_abs.into_owned())
+                        }
+                    }
+                    RealFileName::Remapped {
+                        local_path: _,
+                        virtual_name: remapped_working_dir_abs,
+                    } => {
+                        // If working_directory has been remapped, then we emit
+                        // Remapped variant as the expanded path won't be valid
+                        RealFileName::Remapped {
+                            local_path: None,
+                            virtual_name: Path::new(remapped_working_dir_abs)
+                                .join(unmapped_file_path_rel),
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Attempts to (heuristically) reverse a prefix mapping.
+    ///
+    /// Returns [`Some`] if there is exactly one mapping where the "to" part is
+    /// a prefix of `path` and has at least one non-empty
+    /// [`Normal`](path::Component::Normal) component. The component
+    /// restriction exists to avoid reverse mapping overly generic paths like
+    /// `/` or `.`).
+    ///
+    /// This is a heuristic and not guaranteed to return the actual original
+    /// path! Do not rely on the result unless you have other means to verify
+    /// that the mapping is correct (e.g. by checking the file content hash).
+    #[instrument(level = "debug", skip(self), ret)]
+    fn reverse_map_prefix_heuristically(&self, path: &Path) -> Option<PathBuf> {
+        let mut found = None;
+
+        for (from, to) in self.mapping.iter() {
+            let has_normal_component = to.components().any(|c| match c {
+                path::Component::Normal(s) => !s.is_empty(),
+                _ => false,
+            });
+
+            if !has_normal_component {
+                continue;
+            }
+
+            let Ok(rest) = path.strip_prefix(to) else {
+                continue;
+            };
+
+            if found.is_some() {
+                return None;
+            }
+
+            found = Some(from.join(rest));
+        }
+
+        found
     }
 }

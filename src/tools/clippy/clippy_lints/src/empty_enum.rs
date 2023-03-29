@@ -6,13 +6,15 @@ use rustc_lint::{LateContext, LateLintPass};
 use rustc_session::{declare_lint_pass, declare_tool_lint};
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for `enum`s with no variants.
+    /// ### What it does
+    /// Checks for `enum`s with no variants.
     ///
     /// As of this writing, the `never_type` is still a
     /// nightly-only experimental API. Therefore, this lint is only triggered
     /// if the `never_type` is enabled.
     ///
-    /// **Why is this bad?** If you want to introduce a type which
+    /// ### Why is this bad?
+    /// If you want to introduce a type which
     /// can't be instantiated, you should use `!` (the primitive type "never"),
     /// or a wrapper around it, because `!` has more extensive
     /// compiler support (type inference, etc...) and wrappers
@@ -20,21 +22,18 @@ declare_clippy_lint! {
     /// For further information visit [never type documentation](https://doc.rust-lang.org/std/primitive.never.html)
     ///
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
-    ///
-    /// Bad:
+    /// ### Example
     /// ```rust
     /// enum Test {}
     /// ```
     ///
-    /// Good:
+    /// Use instead:
     /// ```rust
     /// #![feature(never_type)]
     ///
     /// struct Test(!);
     /// ```
+    #[clippy::version = "pre 1.29.0"]
     pub EMPTY_ENUM,
     pedantic,
     "enum with no variants"
@@ -50,9 +49,9 @@ impl<'tcx> LateLintPass<'tcx> for EmptyEnum {
         }
 
         if let ItemKind::Enum(..) = item.kind {
-            let ty = cx.tcx.type_of(item.def_id);
+            let ty = cx.tcx.type_of(item.owner_id).subst_identity();
             let adt = ty.ty_adt_def().expect("already checked whether this is an enum");
-            if adt.variants.is_empty() {
+            if adt.variants().is_empty() {
                 span_lint_and_help(
                     cx,
                     EMPTY_ENUM,

@@ -23,6 +23,14 @@ struct ArtifactNotification {
     artifact: PathBuf,
 }
 
+#[derive(Deserialize)]
+struct UnusedExternNotification {
+    #[allow(dead_code)]
+    lint_level: String,
+    #[allow(dead_code)]
+    unused_extern_names: Vec<String>,
+}
+
 #[derive(Deserialize, Clone)]
 struct DiagnosticSpan {
     file_name: String,
@@ -43,7 +51,6 @@ struct FutureIncompatReport {
 
 #[derive(Deserialize)]
 struct FutureBreakageItem {
-    future_breakage_date: Option<String>,
     diagnostic: Diagnostic,
 }
 
@@ -75,8 +82,6 @@ struct DiagnosticSpanMacroExpansion {
 struct DiagnosticCode {
     /// The code itself.
     code: String,
-    /// An explanation for the code.
-    explanation: Option<String>,
 }
 
 pub fn rustfix_diagnostics_only(output: &str) -> String {
@@ -104,9 +109,7 @@ pub fn extract_rendered(output: &str) -> String {
                                 .into_iter()
                                 .map(|item| {
                                     format!(
-                                        "Future breakage date: {}, diagnostic:\n{}",
-                                        item.future_breakage_date
-                                            .unwrap_or_else(|| "None".to_string()),
+                                        "Future breakage diagnostic:\n{}",
                                         item.diagnostic
                                             .rendered
                                             .unwrap_or_else(|| "Not rendered".to_string())
@@ -116,6 +119,9 @@ pub fn extract_rendered(output: &str) -> String {
                         ))
                     }
                 } else if serde_json::from_str::<ArtifactNotification>(line).is_ok() {
+                    // Ignore the notification.
+                    None
+                } else if serde_json::from_str::<UnusedExternNotification>(line).is_ok() {
                     // Ignore the notification.
                     None
                 } else {

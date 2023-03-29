@@ -3,7 +3,8 @@ use std::marker::PhantomData;
 use rustc_data_structures::snapshot_vec as sv;
 use rustc_data_structures::undo_log::{Rollback, UndoLogs};
 use rustc_data_structures::unify as ut;
-use rustc_middle::ty;
+use rustc_middle::infer::unify_key::RegionVidKey;
+use rustc_middle::ty::{self, OpaqueHiddenType, OpaqueTypeKey};
 
 use crate::{
     infer::{region_constraints, type_variable, InferCtxtInner},
@@ -16,13 +17,15 @@ pub struct Snapshot<'tcx> {
 }
 
 /// Records the "undo" data for a single operation that affects some form of inference variable.
+#[derive(Clone)]
 pub(crate) enum UndoLog<'tcx> {
+    OpaqueTypes(OpaqueTypeKey<'tcx>, Option<OpaqueHiddenType<'tcx>>),
     TypeVariables(type_variable::UndoLog<'tcx>),
     ConstUnificationTable(sv::UndoLog<ut::Delegate<ty::ConstVid<'tcx>>>),
     IntUnificationTable(sv::UndoLog<ut::Delegate<ty::IntVid>>),
     FloatUnificationTable(sv::UndoLog<ut::Delegate<ty::FloatVid>>),
     RegionConstraintCollector(region_constraints::UndoLog<'tcx>),
-    RegionUnificationTable(sv::UndoLog<ut::Delegate<ty::RegionVid>>),
+    RegionUnificationTable(sv::UndoLog<ut::Delegate<RegionVidKey<'tcx>>>),
     ProjectionCache(traits::UndoLog<'tcx>),
     PushRegionObligation,
 }
@@ -55,7 +58,7 @@ impl_from! {
 
     ConstUnificationTable(sv::UndoLog<ut::Delegate<ty::ConstVid<'tcx>>>),
 
-    RegionUnificationTable(sv::UndoLog<ut::Delegate<ty::RegionVid>>),
+    RegionUnificationTable(sv::UndoLog<ut::Delegate<RegionVidKey<'tcx>>>),
     ProjectionCache(traits::UndoLog<'tcx>),
 }
 
@@ -63,6 +66,7 @@ impl_from! {
 impl<'tcx> Rollback<UndoLog<'tcx>> for InferCtxtInner<'tcx> {
     fn reverse(&mut self, undo: UndoLog<'tcx>) {
         match undo {
+            UndoLog::OpaqueTypes(key, idx) => self.opaque_type_storage.remove(key, idx),
             UndoLog::TypeVariables(undo) => self.type_variable_storage.reverse(undo),
             UndoLog::ConstUnificationTable(undo) => self.const_unification_storage.reverse(undo),
             UndoLog::IntUnificationTable(undo) => self.int_unification_storage.reverse(undo),
@@ -83,19 +87,14 @@ impl<'tcx> Rollback<UndoLog<'tcx>> for InferCtxtInner<'tcx> {
 
 /// The combined undo log for all the various unification tables. For each change to the storage
 /// for any kind of inference variable, we record an UndoLog entry in the vector here.
+#[derive(Clone, Default)]
 pub(crate) struct InferCtxtUndoLogs<'tcx> {
     logs: Vec<UndoLog<'tcx>>,
     num_open_snapshots: usize,
 }
 
-impl Default for InferCtxtUndoLogs<'_> {
-    fn default() -> Self {
-        Self { logs: Default::default(), num_open_snapshots: Default::default() }
-    }
-}
-
 /// The UndoLogs trait defines how we undo a particular kind of action (of type T). We can undo any
-/// action that is convertable into a UndoLog (per the From impls above).
+/// action that is convertible into an UndoLog (per the From impls above).
 impl<'tcx, T> UndoLogs<T> for InferCtxtUndoLogs<'tcx>
 where
     UndoLog<'tcx>: From<T>,
@@ -178,6 +177,10 @@ impl<'tcx> InferCtxtUndoLogs<'tcx> {
             UndoLog::RegionConstraintCollector(log) => Some(log),
             _ => None,
         })
+    }
+
+    pub(crate) fn opaque_types_in_snapshot(&self, s: &Snapshot<'tcx>) -> bool {
+        self.logs[s.undo_len..].iter().any(|log| matches!(log, UndoLog::OpaqueTypes(..)))
     }
 
     pub(crate) fn region_constraints(

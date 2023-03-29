@@ -5,7 +5,6 @@ use crate::common::TypeKind;
 use crate::mir::place::PlaceRef;
 use rustc_middle::ty::layout::TyAndLayout;
 use rustc_middle::ty::{self, Ty};
-use rustc_span::DUMMY_SP;
 use rustc_target::abi::call::{ArgAbi, CastTarget, FnAbi, Reg};
 use rustc_target::abi::{AddressSpace, Integer};
 
@@ -23,6 +22,7 @@ pub trait BaseTypeMethods<'tcx>: Backend<'tcx> {
     fn type_f32(&self) -> Self::Type;
     fn type_f64(&self) -> Self::Type;
 
+    fn type_array(&self, ty: Self::Type, len: u64) -> Self::Type;
     fn type_func(&self, args: &[Self::Type], ret: Self::Type) -> Self::Type;
     fn type_struct(&self, els: &[Self::Type], packed: bool) -> Self::Type;
     fn type_kind(&self, ty: Self::Type) -> TypeKind;
@@ -75,16 +75,16 @@ pub trait DerivedTypeMethods<'tcx>: BaseTypeMethods<'tcx> + MiscMethods<'tcx> {
     }
 
     fn type_is_sized(&self, ty: Ty<'tcx>) -> bool {
-        ty.is_sized(self.tcx().at(DUMMY_SP), ty::ParamEnv::reveal_all())
+        ty.is_sized(self.tcx(), ty::ParamEnv::reveal_all())
     }
 
     fn type_is_freeze(&self, ty: Ty<'tcx>) -> bool {
-        ty.is_freeze(self.tcx().at(DUMMY_SP), ty::ParamEnv::reveal_all())
+        ty.is_freeze(self.tcx(), ty::ParamEnv::reveal_all())
     }
 
     fn type_has_metadata(&self, ty: Ty<'tcx>) -> bool {
         let param_env = ty::ParamEnv::reveal_all();
-        if ty.is_sized(self.tcx().at(DUMMY_SP), param_env) {
+        if ty.is_sized(self.tcx(), param_env) {
             return false;
         }
 
@@ -97,11 +97,12 @@ pub trait DerivedTypeMethods<'tcx>: BaseTypeMethods<'tcx> + MiscMethods<'tcx> {
     }
 }
 
-impl<T> DerivedTypeMethods<'tcx> for T where Self: BaseTypeMethods<'tcx> + MiscMethods<'tcx> {}
+impl<'tcx, T> DerivedTypeMethods<'tcx> for T where Self: BaseTypeMethods<'tcx> + MiscMethods<'tcx> {}
 
 pub trait LayoutTypeMethods<'tcx>: Backend<'tcx> {
     fn backend_type(&self, layout: TyAndLayout<'tcx>) -> Self::Type;
     fn cast_backend_type(&self, ty: &CastTarget) -> Self::Type;
+    fn fn_decl_backend_type(&self, fn_abi: &FnAbi<'tcx, Ty<'tcx>>) -> Self::Type;
     fn fn_ptr_backend_type(&self, fn_abi: &FnAbi<'tcx, Ty<'tcx>>) -> Self::Type;
     fn reg_backend_type(&self, ty: &Reg) -> Self::Type;
     fn immediate_backend_type(&self, layout: TyAndLayout<'tcx>) -> Self::Type;
@@ -114,6 +115,14 @@ pub trait LayoutTypeMethods<'tcx>: Backend<'tcx> {
         index: usize,
         immediate: bool,
     ) -> Self::Type;
+}
+
+// For backends that support CFI using type membership (i.e., testing whether a given  pointer is
+// associated with a type identifier).
+pub trait TypeMembershipMethods<'tcx>: Backend<'tcx> {
+    fn set_type_metadata(&self, function: Self::Function, typeid: String);
+    fn typeid_metadata(&self, typeid: String) -> Self::Value;
+    fn set_kcfi_type_metadata(&self, function: Self::Function, typeid: u32);
 }
 
 pub trait ArgAbiMethods<'tcx>: HasCodegen<'tcx> {
@@ -132,6 +141,12 @@ pub trait ArgAbiMethods<'tcx>: HasCodegen<'tcx> {
     fn arg_memory_ty(&self, arg_abi: &ArgAbi<'tcx, Ty<'tcx>>) -> Self::Type;
 }
 
-pub trait TypeMethods<'tcx>: DerivedTypeMethods<'tcx> + LayoutTypeMethods<'tcx> {}
+pub trait TypeMethods<'tcx>:
+    DerivedTypeMethods<'tcx> + LayoutTypeMethods<'tcx> + TypeMembershipMethods<'tcx>
+{
+}
 
-impl<T> TypeMethods<'tcx> for T where Self: DerivedTypeMethods<'tcx> + LayoutTypeMethods<'tcx> {}
+impl<'tcx, T> TypeMethods<'tcx> for T where
+    Self: DerivedTypeMethods<'tcx> + LayoutTypeMethods<'tcx> + TypeMembershipMethods<'tcx>
+{
+}

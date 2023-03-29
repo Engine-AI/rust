@@ -3,18 +3,17 @@
 use self::CombineMapType::*;
 use self::UndoLog::*;
 
-use super::unify_key;
 use super::{
     InferCtxtUndoLogs, MiscVariable, RegionVariableOrigin, Rollback, Snapshot, SubregionOrigin,
 };
 
-use rustc_data_structures::fx::{FxHashMap, FxHashSet};
+use rustc_data_structures::fx::FxHashMap;
+use rustc_data_structures::intern::Interned;
 use rustc_data_structures::sync::Lrc;
 use rustc_data_structures::undo_log::UndoLogs;
 use rustc_data_structures::unify as ut;
-use rustc_data_structures::unify::UnifyKey;
-use rustc_hir::def_id::DefId;
 use rustc_index::vec::IndexVec;
+use rustc_middle::infer::unify_key::{RegionVidKey, UnifiedRegion};
 use rustc_middle::ty::ReStatic;
 use rustc_middle::ty::{self, Ty, TyCtxt};
 use rustc_middle::ty::{ReLateBound, ReVar};
@@ -29,7 +28,7 @@ mod leak_check;
 
 pub use rustc_middle::infer::MemberConstraint;
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct RegionConstraintStorage<'tcx> {
     /// For each `RegionVid`, the corresponding `RegionVariableOrigin`.
     var_infos: IndexVec<RegionVid, RegionVariableInfo>,
@@ -46,7 +45,7 @@ pub struct RegionConstraintStorage<'tcx> {
     /// exist). This prevents us from making many such regions.
     glbs: CombineMap<'tcx>,
 
-    /// When we add a R1 == R2 constriant, we currently add (a) edges
+    /// When we add a R1 == R2 constraint, we currently add (a) edges
     /// R1 <= R2 and R2 <= R1 and (b) we unify the two regions in this
     /// table. You can then call `opportunistic_resolve_var` early
     /// which will map R1 and R2 to some common region (i.e., either
@@ -54,7 +53,7 @@ pub struct RegionConstraintStorage<'tcx> {
     /// code is iterating to a fixed point, because otherwise we sometimes
     /// would wind up with a fresh stream of region variables that have been
     /// equated but appear distinct.
-    pub(super) unification_table: ut::UnificationTableStorage<ty::RegionVid>,
+    pub(super) unification_table: ut::UnificationTableStorage<RegionVidKey<'tcx>>,
 
     /// a flag set to true when we perform any unifications; this is used
     /// to micro-optimize `take_and_reset_data`
@@ -66,7 +65,7 @@ pub struct RegionConstraintCollector<'a, 'tcx> {
     undo_log: &'a mut InferCtxtUndoLogs<'tcx>,
 }
 
-impl std::ops::Deref for RegionConstraintCollector<'_, 'tcx> {
+impl<'tcx> std::ops::Deref for RegionConstraintCollector<'_, 'tcx> {
     type Target = RegionConstraintStorage<'tcx>;
     #[inline]
     fn deref(&self) -> &RegionConstraintStorage<'tcx> {
@@ -74,7 +73,7 @@ impl std::ops::Deref for RegionConstraintCollector<'_, 'tcx> {
     }
 }
 
-impl std::ops::DerefMut for RegionConstraintCollector<'_, 'tcx> {
+impl<'tcx> std::ops::DerefMut for RegionConstraintCollector<'_, 'tcx> {
     #[inline]
     fn deref_mut(&mut self) -> &mut RegionConstraintStorage<'tcx> {
         self.storage
@@ -105,26 +104,6 @@ pub struct RegionConstraintData<'tcx> {
     /// An example is a `A <= B` where neither `A` nor `B` are
     /// inference variables.
     pub verifys: Vec<Verify<'tcx>>,
-
-    /// A "given" is a relationship that is known to hold. In
-    /// particular, we often know from closure fn signatures that a
-    /// particular free region must be a subregion of a region
-    /// variable:
-    ///
-    ///    foo.iter().filter(<'a> |x: &'a &'b T| ...)
-    ///
-    /// In situations like this, `'b` is in fact a region variable
-    /// introduced by the call to `iter()`, and `'a` is a bound region
-    /// on the closure (as indicated by the `<'a>` prefix). If we are
-    /// naive, we wind up inferring that `'b` must be `'static`,
-    /// because we require that it be greater than `'a` and we do not
-    /// know what `'a` is precisely.
-    ///
-    /// This hashmap is used to avoid that naive scenario. Basically
-    /// we record the fact that `'a <= 'b` is implied by the fn
-    /// signature, and then ignore the constraint when solving
-    /// equations. This is a bit of a hack but seems to work.
-    pub givens: FxHashSet<(Region<'tcx>, ty::RegionVid)>,
 }
 
 /// Represents a constraint that influences the inference process.
@@ -165,70 +144,37 @@ pub struct Verify<'tcx> {
     pub bound: VerifyBound<'tcx>,
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, Hash, TypeFoldable)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, TypeFoldable, TypeVisitable)]
 pub enum GenericKind<'tcx> {
     Param(ty::ParamTy),
-    Projection(ty::ProjectionTy<'tcx>),
+    Alias(ty::AliasTy<'tcx>),
 }
 
 /// Describes the things that some `GenericKind` value `G` is known to
 /// outlive. Each variant of `VerifyBound` can be thought of as a
 /// function:
-///
-///     fn(min: Region) -> bool { .. }
-///
+/// ```ignore (pseudo-rust)
+/// fn(min: Region) -> bool { .. }
+/// ```
 /// where `true` means that the region `min` meets that `G: min`.
 /// (False means nothing.)
 ///
 /// So, for example, if we have the type `T` and we have in scope that
 /// `T: 'a` and `T: 'b`, then the verify bound might be:
-///
-///     fn(min: Region) -> bool {
-///        ('a: min) || ('b: min)
-///     }
-///
-/// This is described with a `AnyRegion('a, 'b)` node.
-#[derive(Debug, Clone)]
+/// ```ignore (pseudo-rust)
+/// fn(min: Region) -> bool {
+///    ('a: min) || ('b: min)
+/// }
+/// ```
+/// This is described with an `AnyRegion('a, 'b)` node.
+#[derive(Debug, Clone, TypeFoldable, TypeVisitable)]
 pub enum VerifyBound<'tcx> {
-    /// Given a kind K and a bound B, expands to a function like the
-    /// following, where `G` is the generic for which this verify
-    /// bound was created:
-    ///
-    /// ```rust
-    /// fn(min) -> bool {
-    ///     if G == K {
-    ///         B(min)
-    ///     } else {
-    ///         false
-    ///     }
-    /// }
-    /// ```
-    ///
-    /// In other words, if the generic `G` that we are checking is
-    /// equal to `K`, then check the associated verify bound
-    /// (otherwise, false).
-    ///
-    /// This is used when we have something in the environment that
-    /// may or may not be relevant, depending on the region inference
-    /// results. For example, we may have `where <T as
-    /// Trait<'a>>::Item: 'b` in our where-clauses. If we are
-    /// generating the verify-bound for `<T as Trait<'0>>::Item`, then
-    /// this where-clause is only relevant if `'0` winds up inferred
-    /// to `'a`.
-    ///
-    /// So we would compile to a verify-bound like
-    ///
-    /// ```
-    /// IfEq(<T as Trait<'a>>::Item, AnyRegion('a))
-    /// ```
-    ///
-    /// meaning, if the subject G is equal to `<T as Trait<'a>>::Item`
-    /// (after inference), and `'a: min`, then `G: min`.
-    IfEq(Ty<'tcx>, Box<VerifyBound<'tcx>>),
+    /// See [`VerifyIfEq`] docs
+    IfEq(ty::Binder<'tcx, VerifyIfEq<'tcx>>),
 
     /// Given a region `R`, expands to the function:
     ///
-    /// ```
+    /// ```ignore (pseudo-rust)
     /// fn(min) -> bool {
     ///     R: min
     /// }
@@ -243,7 +189,7 @@ pub enum VerifyBound<'tcx> {
 
     /// Given a set of bounds `B`, expands to the function:
     ///
-    /// ```rust
+    /// ```ignore (pseudo-rust)
     /// fn(min) -> bool {
     ///     exists (b in B) { b(min) }
     /// }
@@ -255,7 +201,7 @@ pub enum VerifyBound<'tcx> {
 
     /// Given a set of bounds `B`, expands to the function:
     ///
-    /// ```rust
+    /// ```ignore (pseudo-rust)
     /// fn(min) -> bool {
     ///     forall (b in B) { b(min) }
     /// }
@@ -265,6 +211,53 @@ pub enum VerifyBound<'tcx> {
     /// This is used when *some* bound in `B` is known to suffice, but
     /// we don't know which.
     AllBounds(Vec<VerifyBound<'tcx>>),
+}
+
+/// This is a "conditional bound" that checks the result of inference
+/// and supplies a bound if it ended up being relevant. It's used in situations
+/// like this:
+///
+/// ```rust
+/// fn foo<'a, 'b, T: SomeTrait<'a>>
+/// where
+///    <T as SomeTrait<'a>>::Item: 'b
+/// ```
+///
+/// If we have an obligation like `<T as SomeTrait<'?x>>::Item: 'c`, then
+/// we don't know yet whether it suffices to show that `'b: 'c`. If `'?x` winds
+/// up being equal to `'a`, then the where-clauses on function applies, and
+/// in that case we can show `'b: 'c`. But if `'?x` winds up being something
+/// else, the bound isn't relevant.
+///
+/// In the [`VerifyBound`], this struct is enclosed in `Binder` to account
+/// for cases like
+///
+/// ```rust
+/// where for<'a> <T as SomeTrait<'a>::Item: 'a
+/// ```
+///
+/// The idea is that we have to find some instantiation of `'a` that can
+/// make `<T as SomeTrait<'a>>::Item` equal to the final value of `G`,
+/// the generic we are checking.
+///
+/// ```ignore (pseudo-rust)
+/// fn(min) -> bool {
+///     exists<'a> {
+///         if G == K {
+///             B(min)
+///         } else {
+///             false
+///         }
+///     }
+/// }
+/// ```
+#[derive(Debug, Copy, Clone, TypeFoldable, TypeVisitable)]
+pub struct VerifyIfEq<'tcx> {
+    /// Type which must match the generic `G`
+    pub ty: Ty<'tcx>,
+
+    /// Bound that applies if `ty` is equal.
+    pub bound: Region<'tcx>,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
@@ -283,9 +276,6 @@ pub(crate) enum UndoLog<'tcx> {
 
     /// We added the given `verify`.
     AddVerify(usize),
-
-    /// We added the given `given`.
-    AddGiven(Region<'tcx>, ty::RegionVid),
 
     /// We added a GLB/LUB "combination variable".
     AddCombination(CombineMapType, TwoRegions<'tcx>),
@@ -334,9 +324,6 @@ impl<'tcx> RegionConstraintStorage<'tcx> {
             AddVerify(index) => {
                 self.data.verifys.pop();
                 assert_eq!(self.data.verifys.len(), index);
-            }
-            AddGiven(sub, sup) => {
-                self.data.givens.remove(&(sub, sup));
             }
             AddCombination(Glb, ref regions) => {
                 self.glbs.remove(regions);
@@ -407,44 +394,48 @@ impl<'tcx> RegionConstraintCollector<'_, 'tcx> {
         // `RegionConstraintData` contains the relationship here.
         if *any_unifications {
             *any_unifications = false;
-            self.unification_table()
-                .reset_unifications(|vid| unify_key::RegionVidKey { min_vid: vid });
+            self.unification_table_mut().reset_unifications(|_| UnifiedRegion::new(None));
         }
 
         data
     }
 
-    pub fn data(&self) -> &RegionConstraintData<'tcx> {
+    pub(super) fn data(&self) -> &RegionConstraintData<'tcx> {
         &self.data
     }
 
-    pub fn start_snapshot(&mut self) -> RegionSnapshot {
+    pub(super) fn start_snapshot(&mut self) -> RegionSnapshot {
         debug!("RegionConstraintCollector: start_snapshot");
         RegionSnapshot { any_unifications: self.any_unifications }
     }
 
-    pub fn rollback_to(&mut self, snapshot: RegionSnapshot) {
+    pub(super) fn rollback_to(&mut self, snapshot: RegionSnapshot) {
         debug!("RegionConstraintCollector: rollback_to({:?})", snapshot);
         self.any_unifications = snapshot.any_unifications;
     }
 
-    pub fn new_region_var(
+    pub(super) fn new_region_var(
         &mut self,
         universe: ty::UniverseIndex,
         origin: RegionVariableOrigin,
     ) -> RegionVid {
         let vid = self.var_infos.push(RegionVariableInfo { origin, universe });
 
-        let u_vid = self.unification_table().new_key(unify_key::RegionVidKey { min_vid: vid });
-        assert_eq!(vid, u_vid);
+        let u_vid = self.unification_table_mut().new_key(UnifiedRegion::new(None));
+        assert_eq!(vid, u_vid.vid);
         self.undo_log.push(AddVar(vid));
         debug!("created new region variable {:?} in {:?} with origin {:?}", vid, universe, origin);
         vid
     }
 
     /// Returns the universe for the given variable.
-    pub fn var_universe(&self, vid: RegionVid) -> ty::UniverseIndex {
+    pub(super) fn var_universe(&self, vid: RegionVid) -> ty::UniverseIndex {
         self.var_infos[vid].universe
+    }
+
+    /// Returns the origin for the given variable.
+    pub(super) fn var_origin(&self, vid: RegionVid) -> RegionVariableOrigin {
+        self.var_infos[vid].origin
     }
 
     fn add_constraint(&mut self, constraint: Constraint<'tcx>, origin: SubregionOrigin<'tcx>) {
@@ -466,10 +457,8 @@ impl<'tcx> RegionConstraintCollector<'_, 'tcx> {
         debug!("RegionConstraintCollector: add_verify({:?})", verify);
 
         // skip no-op cases known to be satisfied
-        if let VerifyBound::AllBounds(ref bs) = verify.bound {
-            if bs.is_empty() {
-                return;
-            }
+        if let VerifyBound::AllBounds(ref bs) = verify.bound && bs.is_empty() {
+            return;
         }
 
         let index = self.data.verifys.len();
@@ -477,16 +466,7 @@ impl<'tcx> RegionConstraintCollector<'_, 'tcx> {
         self.undo_log.push(AddVerify(index));
     }
 
-    pub fn add_given(&mut self, sub: Region<'tcx>, sup: ty::RegionVid) {
-        // cannot add givens once regions are resolved
-        if self.data.givens.insert((sub, sup)) {
-            debug!("add_given({:?} <= {:?})", sub, sup);
-
-            self.undo_log.push(AddGiven(sub, sup));
-        }
-    }
-
-    pub fn make_eqregion(
+    pub(super) fn make_eqregion(
         &mut self,
         origin: SubregionOrigin<'tcx>,
         sub: Region<'tcx>,
@@ -498,17 +478,26 @@ impl<'tcx> RegionConstraintCollector<'_, 'tcx> {
             self.make_subregion(origin.clone(), sub, sup);
             self.make_subregion(origin, sup, sub);
 
-            if let (ty::ReVar(sub), ty::ReVar(sup)) = (*sub, *sup) {
-                debug!("make_eqregion: uniying {:?} with {:?}", sub, sup);
-                self.unification_table().union(sub, sup);
-                self.any_unifications = true;
+            match (sub, sup) {
+                (Region(Interned(ReVar(sub), _)), Region(Interned(ReVar(sup), _))) => {
+                    debug!("make_eqregion: unifying {:?} with {:?}", sub, sup);
+                    self.unification_table_mut().union(*sub, *sup);
+                    self.any_unifications = true;
+                }
+                (Region(Interned(ReVar(vid), _)), value)
+                | (value, Region(Interned(ReVar(vid), _))) => {
+                    debug!("make_eqregion: unifying {:?} with {:?}", vid, value);
+                    self.unification_table_mut().union_value(*vid, UnifiedRegion::new(Some(value)));
+                    self.any_unifications = true;
+                }
+                (_, _) => {}
             }
         }
     }
 
-    pub fn member_constraint(
+    pub(super) fn member_constraint(
         &mut self,
-        opaque_type_def_id: DefId,
+        key: ty::OpaqueTypeKey<'tcx>,
         definition_span: Span,
         hidden_ty: Ty<'tcx>,
         member_region: ty::Region<'tcx>,
@@ -521,7 +510,7 @@ impl<'tcx> RegionConstraintCollector<'_, 'tcx> {
         }
 
         self.data.member_constraints.push(MemberConstraint {
-            opaque_type_def_id,
+            key,
             definition_span,
             hidden_ty,
             member_region,
@@ -529,32 +518,30 @@ impl<'tcx> RegionConstraintCollector<'_, 'tcx> {
         });
     }
 
-    pub fn make_subregion(
+    #[instrument(skip(self, origin), level = "debug")]
+    pub(super) fn make_subregion(
         &mut self,
         origin: SubregionOrigin<'tcx>,
         sub: Region<'tcx>,
         sup: Region<'tcx>,
     ) {
         // cannot add constraints once regions are resolved
-        debug!(
-            "RegionConstraintCollector: make_subregion({:?}, {:?}) due to {:?}",
-            sub, sup, origin
-        );
+        debug!("origin = {:#?}", origin);
 
-        match (sub, sup) {
-            (&ReLateBound(..), _) | (_, &ReLateBound(..)) => {
+        match (*sub, *sup) {
+            (ReLateBound(..), _) | (_, ReLateBound(..)) => {
                 span_bug!(origin.span(), "cannot relate bound region: {:?} <= {:?}", sub, sup);
             }
-            (_, &ReStatic) => {
+            (_, ReStatic) => {
                 // all regions are subregions of static, so we can ignore this
             }
-            (&ReVar(sub_id), &ReVar(sup_id)) => {
+            (ReVar(sub_id), ReVar(sup_id)) => {
                 self.add_constraint(Constraint::VarSubVar(sub_id, sup_id), origin);
             }
-            (_, &ReVar(sup_id)) => {
+            (_, ReVar(sup_id)) => {
                 self.add_constraint(Constraint::RegSubVar(sub, sup_id), origin);
             }
-            (&ReVar(sub_id), _) => {
+            (ReVar(sub_id), _) => {
                 self.add_constraint(Constraint::VarSubReg(sub_id, sup), origin);
             }
             _ => {
@@ -563,7 +550,7 @@ impl<'tcx> RegionConstraintCollector<'_, 'tcx> {
         }
     }
 
-    pub fn verify_generic_bound(
+    pub(super) fn verify_generic_bound(
         &mut self,
         origin: SubregionOrigin<'tcx>,
         kind: GenericKind<'tcx>,
@@ -573,7 +560,7 @@ impl<'tcx> RegionConstraintCollector<'_, 'tcx> {
         self.add_verify(Verify { kind, origin, region: sub, bound });
     }
 
-    pub fn lub_regions(
+    pub(super) fn lub_regions(
         &mut self,
         tcx: TyCtxt<'tcx>,
         origin: SubregionOrigin<'tcx>,
@@ -582,20 +569,16 @@ impl<'tcx> RegionConstraintCollector<'_, 'tcx> {
     ) -> Region<'tcx> {
         // cannot add constraints once regions are resolved
         debug!("RegionConstraintCollector: lub_regions({:?}, {:?})", a, b);
-        match (a, b) {
-            (r @ &ReStatic, _) | (_, r @ &ReStatic) => {
-                r // nothing lives longer than static
-            }
-
-            _ if a == b => {
-                a // LUB(a,a) = a
-            }
-
-            _ => self.combine_vars(tcx, Lub, a, b, origin),
+        if a.is_static() || b.is_static() {
+            a // nothing lives longer than static
+        } else if a == b {
+            a // LUB(a,a) = a
+        } else {
+            self.combine_vars(tcx, Lub, a, b, origin)
         }
     }
 
-    pub fn glb_regions(
+    pub(super) fn glb_regions(
         &mut self,
         tcx: TyCtxt<'tcx>,
         origin: SubregionOrigin<'tcx>,
@@ -604,21 +587,37 @@ impl<'tcx> RegionConstraintCollector<'_, 'tcx> {
     ) -> Region<'tcx> {
         // cannot add constraints once regions are resolved
         debug!("RegionConstraintCollector: glb_regions({:?}, {:?})", a, b);
-        match (a, b) {
-            (&ReStatic, r) | (r, &ReStatic) => {
-                r // static lives longer than everything else
-            }
-
-            _ if a == b => {
-                a // GLB(a,a) = a
-            }
-
-            _ => self.combine_vars(tcx, Glb, a, b, origin),
+        if a.is_static() {
+            b // static lives longer than everything else
+        } else if b.is_static() {
+            a // static lives longer than everything else
+        } else if a == b {
+            a // GLB(a,a) = a
+        } else {
+            self.combine_vars(tcx, Glb, a, b, origin)
         }
     }
 
-    pub fn opportunistic_resolve_var(&mut self, rid: RegionVid) -> ty::RegionVid {
-        self.unification_table().probe_value(rid).min_vid
+    /// Resolves a region var to its value in the unification table, if it exists.
+    /// Otherwise, it is resolved to the root `ReVar` in the table.
+    pub fn opportunistic_resolve_var(
+        &mut self,
+        tcx: TyCtxt<'tcx>,
+        vid: ty::RegionVid,
+    ) -> ty::Region<'tcx> {
+        let mut ut = self.unification_table_mut(); // FIXME(rust-lang/ena#42): unnecessary mut
+        let root_vid = ut.find(vid).vid;
+        let resolved = ut
+            .probe_value(root_vid)
+            .get_value_ignoring_universes()
+            .unwrap_or_else(|| tcx.mk_re_var(root_vid));
+
+        // Don't resolve a variable to a region that it cannot name.
+        if self.var_universe(vid).can_name(self.universe(resolved)) {
+            resolved
+        } else {
+            tcx.mk_re_var(vid)
+        }
     }
 
     fn combine_map(&mut self, t: CombineMapType) -> &mut CombineMap<'tcx> {
@@ -638,7 +637,7 @@ impl<'tcx> RegionConstraintCollector<'_, 'tcx> {
     ) -> Region<'tcx> {
         let vars = TwoRegions { a, b };
         if let Some(&c) = self.combine_map(t).get(&vars) {
-            return tcx.mk_region(ReVar(c));
+            return tcx.mk_re_var(c);
         }
         let a_universe = self.universe(a);
         let b_universe = self.universe(b);
@@ -646,8 +645,8 @@ impl<'tcx> RegionConstraintCollector<'_, 'tcx> {
         let c = self.new_region_var(c_universe, MiscVariable(origin.span()));
         self.combine_map(t).insert(vars, c);
         self.undo_log.push(AddCombination(t, vars));
-        let new_r = tcx.mk_region(ReVar(c));
-        for &old_r in &[a, b] {
+        let new_r = tcx.mk_re_var(c);
+        for old_r in [a, b] {
             match t {
                 Glb => self.make_subregion(origin.clone(), new_r, old_r),
                 Lub => self.make_subregion(origin.clone(), old_r, new_r),
@@ -659,10 +658,11 @@ impl<'tcx> RegionConstraintCollector<'_, 'tcx> {
 
     pub fn universe(&self, region: Region<'tcx>) -> ty::UniverseIndex {
         match *region {
-            ty::ReStatic | ty::ReErased | ty::ReFree(..) | ty::ReEarlyBound(..) => {
-                ty::UniverseIndex::ROOT
-            }
-            ty::ReEmpty(ui) => ui,
+            ty::ReStatic
+            | ty::ReErased
+            | ty::ReFree(..)
+            | ty::ReEarlyBound(..)
+            | ty::ReError(_) => ty::UniverseIndex::ROOT,
             ty::RePlaceholder(placeholder) => placeholder.universe,
             ty::ReVar(vid) => self.var_universe(vid),
             ty::ReLateBound(..) => bug!("universe(): encountered bound region {:?}", region),
@@ -673,8 +673,7 @@ impl<'tcx> RegionConstraintCollector<'_, 'tcx> {
         &self,
         value_count: usize,
     ) -> (Range<RegionVid>, Vec<RegionVariableOrigin>) {
-        let range = RegionVid::from_index(value_count as u32)
-            ..RegionVid::from_index(self.unification_table.len() as u32);
+        let range = RegionVid::from(value_count)..RegionVid::from(self.unification_table.len());
         (
             range.clone(),
             (range.start.index()..range.end.index())
@@ -696,7 +695,7 @@ impl<'tcx> RegionConstraintCollector<'_, 'tcx> {
     }
 
     #[inline]
-    fn unification_table(&mut self) -> super::UnificationTable<'_, 'tcx, ty::RegionVid> {
+    fn unification_table_mut(&mut self) -> super::UnificationTable<'_, 'tcx, RegionVidKey<'tcx>> {
         ut::UnificationTable::with_log(&mut self.storage.unification_table, self.undo_log)
     }
 }
@@ -711,7 +710,7 @@ impl<'tcx> fmt::Debug for GenericKind<'tcx> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
             GenericKind::Param(ref p) => write!(f, "{:?}", p),
-            GenericKind::Projection(ref p) => write!(f, "{:?}", p),
+            GenericKind::Alias(ref p) => write!(f, "{:?}", p),
         }
     }
 }
@@ -720,7 +719,7 @@ impl<'tcx> fmt::Display for GenericKind<'tcx> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
             GenericKind::Param(ref p) => write!(f, "{}", p),
-            GenericKind::Projection(ref p) => write!(f, "{}", p),
+            GenericKind::Alias(ref p) => write!(f, "{}", p),
         }
     }
 }
@@ -729,7 +728,7 @@ impl<'tcx> GenericKind<'tcx> {
     pub fn to_ty(&self, tcx: TyCtxt<'tcx>) -> Ty<'tcx> {
         match *self {
             GenericKind::Param(ref p) => p.to_ty(tcx),
-            GenericKind::Projection(ref p) => tcx.mk_projection(p.item_def_id, p.substs),
+            GenericKind::Alias(ref p) => p.to_ty(tcx),
         }
     }
 }
@@ -738,8 +737,7 @@ impl<'tcx> VerifyBound<'tcx> {
     pub fn must_hold(&self) -> bool {
         match self {
             VerifyBound::IfEq(..) => false,
-            VerifyBound::OutlivedBy(ty::ReStatic) => true,
-            VerifyBound::OutlivedBy(_) => false,
+            VerifyBound::OutlivedBy(re) => re.is_static(),
             VerifyBound::IsEmpty => false,
             VerifyBound::AnyBound(bs) => bs.iter().any(|b| b.must_hold()),
             VerifyBound::AllBounds(bs) => bs.iter().all(|b| b.must_hold()),
@@ -748,7 +746,7 @@ impl<'tcx> VerifyBound<'tcx> {
 
     pub fn cannot_hold(&self) -> bool {
         match self {
-            VerifyBound::IfEq(_, b) => b.cannot_hold(),
+            VerifyBound::IfEq(..) => false,
             VerifyBound::IsEmpty => false,
             VerifyBound::OutlivedBy(_) => false,
             VerifyBound::AnyBound(bs) => bs.iter().all(|b| b.cannot_hold()),
@@ -771,11 +769,8 @@ impl<'tcx> RegionConstraintData<'tcx> {
     /// Returns `true` if this region constraint data contains no constraints, and `false`
     /// otherwise.
     pub fn is_empty(&self) -> bool {
-        let RegionConstraintData { constraints, member_constraints, verifys, givens } = self;
-        constraints.is_empty()
-            && member_constraints.is_empty()
-            && verifys.is_empty()
-            && givens.is_empty()
+        let RegionConstraintData { constraints, member_constraints, verifys } = self;
+        constraints.is_empty() && member_constraints.is_empty() && verifys.is_empty()
     }
 }
 

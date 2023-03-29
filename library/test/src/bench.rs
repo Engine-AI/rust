@@ -1,8 +1,10 @@
 //! Benchmarking module.
-pub use std::hint::black_box;
-
 use super::{
-    event::CompletedTest, options::BenchMode, test_result::TestResult, types::TestDesc, Sender,
+    event::CompletedTest,
+    options::BenchMode,
+    test_result::TestResult,
+    types::{TestDesc, TestId},
+    Sender,
 };
 
 use crate::stats;
@@ -11,6 +13,15 @@ use std::io;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+/// An identity function that *__hints__* to the compiler to be maximally pessimistic about what
+/// `black_box` could do.
+///
+/// See [`std::hint::black_box`] for details.
+#[inline(always)]
+pub fn black_box<T>(dummy: T) -> T {
+    std::hint::black_box(dummy)
+}
 
 /// Manager of the benchmarking runs.
 ///
@@ -38,12 +49,12 @@ impl Bencher {
         self.summary = Some(iter(&mut inner));
     }
 
-    pub fn bench<F>(&mut self, mut f: F) -> Option<stats::Summary>
+    pub fn bench<F>(&mut self, mut f: F) -> Result<Option<stats::Summary>, String>
     where
-        F: FnMut(&mut Bencher),
+        F: FnMut(&mut Bencher) -> Result<(), String>,
     {
-        f(self);
-        self.summary
+        let result = f(self);
+        result.map(|_| self.summary)
     }
 }
 
@@ -177,9 +188,14 @@ where
     }
 }
 
-pub fn benchmark<F>(desc: TestDesc, monitor_ch: Sender<CompletedTest>, nocapture: bool, f: F)
-where
-    F: FnMut(&mut Bencher),
+pub fn benchmark<F>(
+    id: TestId,
+    desc: TestDesc,
+    monitor_ch: Sender<CompletedTest>,
+    nocapture: bool,
+    f: F,
+) where
+    F: FnMut(&mut Bencher) -> Result<(), String>,
 {
     let mut bs = Bencher { mode: BenchMode::Auto, summary: None, bytes: 0 };
 
@@ -195,14 +211,14 @@ where
 
     let test_result = match result {
         //bs.bench(f) {
-        Ok(Some(ns_iter_summ)) => {
+        Ok(Ok(Some(ns_iter_summ))) => {
             let ns_iter = cmp::max(ns_iter_summ.median as u64, 1);
             let mb_s = bs.bytes * 1000 / ns_iter;
 
             let bs = BenchSamples { ns_iter_summ, mb_s: mb_s as usize };
             TestResult::TrBench(bs)
         }
-        Ok(None) => {
+        Ok(Ok(None)) => {
             // iter not called, so no data.
             // FIXME: error in this case?
             let samples: &mut [f64] = &mut [0.0_f64; 1];
@@ -210,17 +226,18 @@ where
             TestResult::TrBench(bs)
         }
         Err(_) => TestResult::TrFailed,
+        Ok(Err(_)) => TestResult::TrFailed,
     };
 
     let stdout = data.lock().unwrap().to_vec();
-    let message = CompletedTest::new(desc, test_result, None, stdout);
+    let message = CompletedTest::new(id, desc, test_result, None, stdout);
     monitor_ch.send(message).unwrap();
 }
 
-pub fn run_once<F>(f: F)
+pub fn run_once<F>(f: F) -> Result<(), String>
 where
-    F: FnMut(&mut Bencher),
+    F: FnMut(&mut Bencher) -> Result<(), String>,
 {
     let mut bs = Bencher { mode: BenchMode::Single, summary: None, bytes: 0 };
-    bs.bench(f);
+    bs.bench(f).map(|_| ())
 }

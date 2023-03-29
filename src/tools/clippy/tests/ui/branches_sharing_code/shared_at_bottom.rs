@@ -1,5 +1,6 @@
-#![allow(dead_code)]
 #![deny(clippy::if_same_then_else, clippy::branches_sharing_code)]
+#![allow(dead_code)]
+#![allow(clippy::equatable_if_let, clippy::uninlined_format_args)]
 
 // This tests the branches_sharing_code lint at the end of blocks
 
@@ -204,6 +205,20 @@ fn fp_test() {
             println!("Trigger")
         }
     }
+}
+
+fn fp_if_let_issue7054() {
+    // This shouldn't trigger the lint
+    let string;
+    let _x = if let true = true {
+        ""
+    } else if true {
+        string = "x".to_owned();
+        &string
+    } else {
+        string = "y".to_owned();
+        &string
+    };
 }
 
 fn main() {}

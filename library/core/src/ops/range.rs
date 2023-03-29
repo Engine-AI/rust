@@ -96,7 +96,7 @@ impl<Idx: fmt::Debug> fmt::Debug for Range<Idx> {
     }
 }
 
-impl<Idx: PartialOrd<Idx>> Range<Idx> {
+impl<Idx: ~const PartialOrd<Idx>> Range<Idx> {
     /// Returns `true` if `item` is contained in the range.
     ///
     /// # Examples
@@ -116,10 +116,11 @@ impl<Idx: PartialOrd<Idx>> Range<Idx> {
     /// assert!(!(f32::NAN..1.0).contains(&0.5));
     /// ```
     #[stable(feature = "range_contains", since = "1.35.0")]
-    pub fn contains<U>(&self, item: &U) -> bool
+    #[rustc_const_unstable(feature = "const_range_bounds", issue = "108082")]
+    pub const fn contains<U>(&self, item: &U) -> bool
     where
-        Idx: PartialOrd<U>,
-        U: ?Sized + PartialOrd<Idx>,
+        Idx: ~const PartialOrd<U>,
+        U: ?Sized + ~const PartialOrd<Idx>,
     {
         <Self as RangeBounds<Idx>>::contains(self, item)
     }
@@ -142,7 +143,8 @@ impl<Idx: PartialOrd<Idx>> Range<Idx> {
     /// assert!( (f32::NAN..5.0).is_empty());
     /// ```
     #[stable(feature = "range_is_empty", since = "1.47.0")]
-    pub fn is_empty(&self) -> bool {
+    #[rustc_const_unstable(feature = "const_range_bounds", issue = "108082")]
+    pub const fn is_empty(&self) -> bool {
         !(self.start < self.end)
     }
 }
@@ -199,7 +201,7 @@ impl<Idx: fmt::Debug> fmt::Debug for RangeFrom<Idx> {
     }
 }
 
-impl<Idx: PartialOrd<Idx>> RangeFrom<Idx> {
+impl<Idx: ~const PartialOrd<Idx>> RangeFrom<Idx> {
     /// Returns `true` if `item` is contained in the range.
     ///
     /// # Examples
@@ -214,10 +216,11 @@ impl<Idx: PartialOrd<Idx>> RangeFrom<Idx> {
     /// assert!(!(f32::NAN..).contains(&0.5));
     /// ```
     #[stable(feature = "range_contains", since = "1.35.0")]
-    pub fn contains<U>(&self, item: &U) -> bool
+    #[rustc_const_unstable(feature = "const_range_bounds", issue = "108082")]
+    pub const fn contains<U>(&self, item: &U) -> bool
     where
-        Idx: PartialOrd<U>,
-        U: ?Sized + PartialOrd<Idx>,
+        Idx: ~const PartialOrd<U>,
+        U: ?Sized + ~const PartialOrd<Idx>,
     {
         <Self as RangeBounds<Idx>>::contains(self, item)
     }
@@ -280,7 +283,7 @@ impl<Idx: fmt::Debug> fmt::Debug for RangeTo<Idx> {
     }
 }
 
-impl<Idx: PartialOrd<Idx>> RangeTo<Idx> {
+impl<Idx: ~const PartialOrd<Idx>> RangeTo<Idx> {
     /// Returns `true` if `item` is contained in the range.
     ///
     /// # Examples
@@ -295,10 +298,11 @@ impl<Idx: PartialOrd<Idx>> RangeTo<Idx> {
     /// assert!(!(..f32::NAN).contains(&0.5));
     /// ```
     #[stable(feature = "range_contains", since = "1.35.0")]
-    pub fn contains<U>(&self, item: &U) -> bool
+    #[rustc_const_unstable(feature = "const_range_bounds", issue = "108082")]
+    pub const fn contains<U>(&self, item: &U) -> bool
     where
-        Idx: PartialOrd<U>,
-        U: ?Sized + PartialOrd<Idx>,
+        Idx: ~const PartialOrd<U>,
+        U: ?Sized + ~const PartialOrd<Idx>,
     {
         <Self as RangeBounds<Idx>>::contains(self, item)
     }
@@ -437,7 +441,8 @@ impl<Idx> RangeInclusive<Idx> {
     /// ```
     #[stable(feature = "inclusive_range_methods", since = "1.27.0")]
     #[inline]
-    pub fn into_inner(self) -> (Idx, Idx) {
+    #[rustc_const_unstable(feature = "const_range_bounds", issue = "108082")]
+    pub const fn into_inner(self) -> (Idx, Idx) {
         (self.start, self.end)
     }
 }
@@ -446,7 +451,7 @@ impl RangeInclusive<usize> {
     /// Converts to an exclusive `Range` for `SliceIndex` implementations.
     /// The caller is responsible for dealing with `end == usize::MAX`.
     #[inline]
-    pub(crate) fn into_slice_range(self) -> Range<usize> {
+    pub(crate) const fn into_slice_range(self) -> Range<usize> {
         // If we're not exhausted, we want to simply slice `start..end + 1`.
         // If we are exhausted, then slicing with `end + 1..end + 1` gives us an
         // empty range that is still subject to bounds-checks for that endpoint.
@@ -469,7 +474,7 @@ impl<Idx: fmt::Debug> fmt::Debug for RangeInclusive<Idx> {
     }
 }
 
-impl<Idx: PartialOrd<Idx>> RangeInclusive<Idx> {
+impl<Idx: ~const PartialOrd<Idx>> RangeInclusive<Idx> {
     /// Returns `true` if `item` is contained in the range.
     ///
     /// # Examples
@@ -500,10 +505,11 @@ impl<Idx: PartialOrd<Idx>> RangeInclusive<Idx> {
     /// assert!(!r.contains(&3) && !r.contains(&5));
     /// ```
     #[stable(feature = "range_contains", since = "1.35.0")]
-    pub fn contains<U>(&self, item: &U) -> bool
+    #[rustc_const_unstable(feature = "const_range_bounds", issue = "108082")]
+    pub const fn contains<U>(&self, item: &U) -> bool
     where
-        Idx: PartialOrd<U>,
-        U: ?Sized + PartialOrd<Idx>,
+        Idx: ~const PartialOrd<U>,
+        U: ?Sized + ~const PartialOrd<Idx>,
     {
         <Self as RangeBounds<Idx>>::contains(self, item)
     }
@@ -535,8 +541,9 @@ impl<Idx: PartialOrd<Idx>> RangeInclusive<Idx> {
     /// assert!(r.is_empty());
     /// ```
     #[stable(feature = "range_is_empty", since = "1.47.0")]
+    #[rustc_const_unstable(feature = "const_range_bounds", issue = "108082")]
     #[inline]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.exhausted || !(self.start <= self.end)
     }
 }
@@ -598,7 +605,7 @@ impl<Idx: fmt::Debug> fmt::Debug for RangeToInclusive<Idx> {
     }
 }
 
-impl<Idx: PartialOrd<Idx>> RangeToInclusive<Idx> {
+impl<Idx: ~const PartialOrd<Idx>> RangeToInclusive<Idx> {
     /// Returns `true` if `item` is contained in the range.
     ///
     /// # Examples
@@ -613,10 +620,11 @@ impl<Idx: PartialOrd<Idx>> RangeToInclusive<Idx> {
     /// assert!(!(..=f32::NAN).contains(&0.5));
     /// ```
     #[stable(feature = "range_contains", since = "1.35.0")]
-    pub fn contains<U>(&self, item: &U) -> bool
+    #[rustc_const_unstable(feature = "const_range_bounds", issue = "108082")]
+    pub const fn contains<U>(&self, item: &U) -> bool
     where
-        Idx: PartialOrd<U>,
-        U: ?Sized + PartialOrd<Idx>,
+        Idx: ~const PartialOrd<U>,
+        U: ?Sized + ~const PartialOrd<Idx>,
     {
         <Self as RangeBounds<Idx>>::contains(self, item)
     }
@@ -653,7 +661,7 @@ impl<Idx: PartialOrd<Idx>> RangeToInclusive<Idx> {
 /// map.insert(8, "c");
 ///
 /// for (key, value) in map.range((Excluded(3), Included(8))) {
-///     println!("{}: {}", key, value);
+///     println!("{key}: {value}");
 /// }
 ///
 /// assert_eq!(Some((&3, &"a")), map.range((Unbounded, Included(5))).next());
@@ -674,10 +682,10 @@ pub enum Bound<T> {
     Unbounded,
 }
 
-#[unstable(feature = "bound_as_ref", issue = "80996")]
 impl<T> Bound<T> {
     /// Converts from `&Bound<T>` to `Bound<&T>`.
     #[inline]
+    #[stable(feature = "bound_as_ref_shared", since = "1.65.0")]
     pub fn as_ref(&self) -> Bound<&T> {
         match *self {
             Included(ref x) => Included(x),
@@ -686,13 +694,47 @@ impl<T> Bound<T> {
         }
     }
 
-    /// Converts from `&mut Bound<T>` to `Bound<&T>`.
+    /// Converts from `&mut Bound<T>` to `Bound<&mut T>`.
     #[inline]
+    #[unstable(feature = "bound_as_ref", issue = "80996")]
     pub fn as_mut(&mut self) -> Bound<&mut T> {
         match *self {
             Included(ref mut x) => Included(x),
             Excluded(ref mut x) => Excluded(x),
             Unbounded => Unbounded,
+        }
+    }
+
+    /// Maps a `Bound<T>` to a `Bound<U>` by applying a function to the contained value (including
+    /// both `Included` and `Excluded`), returning a `Bound` of the same kind.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(bound_map)]
+    /// use std::ops::Bound::*;
+    ///
+    /// let bound_string = Included("Hello, World!");
+    ///
+    /// assert_eq!(bound_string.map(|s| s.len()), Included(13));
+    /// ```
+    ///
+    /// ```
+    /// #![feature(bound_map)]
+    /// use std::ops::Bound;
+    /// use Bound::*;
+    ///
+    /// let unbounded_string: Bound<String> = Unbounded;
+    ///
+    /// assert_eq!(unbounded_string.map(|s| s.len()), Unbounded);
+    /// ```
+    #[inline]
+    #[unstable(feature = "bound_map", issue = "86026")]
+    pub fn map<U, F: FnOnce(T) -> U>(self, f: F) -> Bound<U> {
+        match self {
+            Unbounded => Unbounded,
+            Included(x) => Included(f(x)),
+            Excluded(x) => Excluded(f(x)),
         }
     }
 }
@@ -703,14 +745,14 @@ impl<T: Clone> Bound<&T> {
     /// # Examples
     ///
     /// ```
-    /// #![feature(bound_cloned)]
     /// use std::ops::Bound::*;
     /// use std::ops::RangeBounds;
     ///
     /// assert_eq!((1..12).start_bound(), Included(&1));
     /// assert_eq!((1..12).start_bound().cloned(), Included(1));
     /// ```
-    #[unstable(feature = "bound_cloned", issue = "61356")]
+    #[must_use = "`self` will be dropped if the result is not used"]
+    #[stable(feature = "bound_cloned", since = "1.55.0")]
     pub fn cloned(self) -> Bound<T> {
         match self {
             Bound::Unbounded => Bound::Unbounded,
@@ -723,6 +765,7 @@ impl<T: Clone> Bound<&T> {
 /// `RangeBounds` is implemented by Rust's built-in range types, produced
 /// by range syntax like `..`, `a..`, `..b`, `..=c`, `d..e`, or `f..=g`.
 #[stable(feature = "collections_range", since = "1.28.0")]
+#[const_trait]
 pub trait RangeBounds<T: ?Sized> {
     /// Start index bound.
     ///
@@ -775,16 +818,16 @@ pub trait RangeBounds<T: ?Sized> {
     #[stable(feature = "range_contains", since = "1.35.0")]
     fn contains<U>(&self, item: &U) -> bool
     where
-        T: PartialOrd<U>,
-        U: ?Sized + PartialOrd<T>,
+        T: ~const PartialOrd<U>,
+        U: ?Sized + ~const PartialOrd<T>,
     {
         (match self.start_bound() {
-            Included(ref start) => *start <= item,
-            Excluded(ref start) => *start < item,
+            Included(start) => start <= item,
+            Excluded(start) => start < item,
             Unbounded => true,
         }) && (match self.end_bound() {
-            Included(ref end) => item <= *end,
-            Excluded(ref end) => item < *end,
+            Included(end) => item <= end,
+            Excluded(end) => item < end,
             Unbounded => true,
         })
     }
@@ -793,7 +836,8 @@ pub trait RangeBounds<T: ?Sized> {
 use self::Bound::{Excluded, Included, Unbounded};
 
 #[stable(feature = "collections_range", since = "1.28.0")]
-impl<T: ?Sized> RangeBounds<T> for RangeFull {
+#[rustc_const_unstable(feature = "const_range_bounds", issue = "108082")]
+impl<T: ?Sized> const RangeBounds<T> for RangeFull {
     fn start_bound(&self) -> Bound<&T> {
         Unbounded
     }
@@ -803,7 +847,8 @@ impl<T: ?Sized> RangeBounds<T> for RangeFull {
 }
 
 #[stable(feature = "collections_range", since = "1.28.0")]
-impl<T> RangeBounds<T> for RangeFrom<T> {
+#[rustc_const_unstable(feature = "const_range_bounds", issue = "108082")]
+impl<T> const RangeBounds<T> for RangeFrom<T> {
     fn start_bound(&self) -> Bound<&T> {
         Included(&self.start)
     }
@@ -813,7 +858,8 @@ impl<T> RangeBounds<T> for RangeFrom<T> {
 }
 
 #[stable(feature = "collections_range", since = "1.28.0")]
-impl<T> RangeBounds<T> for RangeTo<T> {
+#[rustc_const_unstable(feature = "const_range_bounds", issue = "108082")]
+impl<T> const RangeBounds<T> for RangeTo<T> {
     fn start_bound(&self) -> Bound<&T> {
         Unbounded
     }
@@ -823,7 +869,8 @@ impl<T> RangeBounds<T> for RangeTo<T> {
 }
 
 #[stable(feature = "collections_range", since = "1.28.0")]
-impl<T> RangeBounds<T> for Range<T> {
+#[rustc_const_unstable(feature = "const_range_bounds", issue = "108082")]
+impl<T> const RangeBounds<T> for Range<T> {
     fn start_bound(&self) -> Bound<&T> {
         Included(&self.start)
     }
@@ -833,7 +880,8 @@ impl<T> RangeBounds<T> for Range<T> {
 }
 
 #[stable(feature = "collections_range", since = "1.28.0")]
-impl<T> RangeBounds<T> for RangeInclusive<T> {
+#[rustc_const_unstable(feature = "const_range_bounds", issue = "108082")]
+impl<T> const RangeBounds<T> for RangeInclusive<T> {
     fn start_bound(&self) -> Bound<&T> {
         Included(&self.start)
     }
@@ -849,7 +897,8 @@ impl<T> RangeBounds<T> for RangeInclusive<T> {
 }
 
 #[stable(feature = "collections_range", since = "1.28.0")]
-impl<T> RangeBounds<T> for RangeToInclusive<T> {
+#[rustc_const_unstable(feature = "const_range_bounds", issue = "108082")]
+impl<T> const RangeBounds<T> for RangeToInclusive<T> {
     fn start_bound(&self) -> Bound<&T> {
         Unbounded
     }
@@ -859,7 +908,8 @@ impl<T> RangeBounds<T> for RangeToInclusive<T> {
 }
 
 #[stable(feature = "collections_range", since = "1.28.0")]
-impl<T> RangeBounds<T> for (Bound<T>, Bound<T>) {
+#[rustc_const_unstable(feature = "const_range_bounds", issue = "108082")]
+impl<T> const RangeBounds<T> for (Bound<T>, Bound<T>) {
     fn start_bound(&self) -> Bound<&T> {
         match *self {
             (Included(ref start), _) => Included(start),
@@ -878,7 +928,8 @@ impl<T> RangeBounds<T> for (Bound<T>, Bound<T>) {
 }
 
 #[stable(feature = "collections_range", since = "1.28.0")]
-impl<'a, T: ?Sized + 'a> RangeBounds<T> for (Bound<&'a T>, Bound<&'a T>) {
+#[rustc_const_unstable(feature = "const_range_bounds", issue = "108082")]
+impl<'a, T: ?Sized + 'a> const RangeBounds<T> for (Bound<&'a T>, Bound<&'a T>) {
     fn start_bound(&self) -> Bound<&T> {
         self.0
     }
@@ -889,7 +940,8 @@ impl<'a, T: ?Sized + 'a> RangeBounds<T> for (Bound<&'a T>, Bound<&'a T>) {
 }
 
 #[stable(feature = "collections_range", since = "1.28.0")]
-impl<T> RangeBounds<T> for RangeFrom<&T> {
+#[rustc_const_unstable(feature = "const_range_bounds", issue = "108082")]
+impl<T> const RangeBounds<T> for RangeFrom<&T> {
     fn start_bound(&self) -> Bound<&T> {
         Included(self.start)
     }
@@ -899,7 +951,8 @@ impl<T> RangeBounds<T> for RangeFrom<&T> {
 }
 
 #[stable(feature = "collections_range", since = "1.28.0")]
-impl<T> RangeBounds<T> for RangeTo<&T> {
+#[rustc_const_unstable(feature = "const_range_bounds", issue = "108082")]
+impl<T> const RangeBounds<T> for RangeTo<&T> {
     fn start_bound(&self) -> Bound<&T> {
         Unbounded
     }
@@ -909,7 +962,8 @@ impl<T> RangeBounds<T> for RangeTo<&T> {
 }
 
 #[stable(feature = "collections_range", since = "1.28.0")]
-impl<T> RangeBounds<T> for Range<&T> {
+#[rustc_const_unstable(feature = "const_range_bounds", issue = "108082")]
+impl<T> const RangeBounds<T> for Range<&T> {
     fn start_bound(&self) -> Bound<&T> {
         Included(self.start)
     }
@@ -919,7 +973,8 @@ impl<T> RangeBounds<T> for Range<&T> {
 }
 
 #[stable(feature = "collections_range", since = "1.28.0")]
-impl<T> RangeBounds<T> for RangeInclusive<&T> {
+#[rustc_const_unstable(feature = "const_range_bounds", issue = "108082")]
+impl<T> const RangeBounds<T> for RangeInclusive<&T> {
     fn start_bound(&self) -> Bound<&T> {
         Included(self.start)
     }
@@ -929,7 +984,8 @@ impl<T> RangeBounds<T> for RangeInclusive<&T> {
 }
 
 #[stable(feature = "collections_range", since = "1.28.0")]
-impl<T> RangeBounds<T> for RangeToInclusive<&T> {
+#[rustc_const_unstable(feature = "const_range_bounds", issue = "108082")]
+impl<T> const RangeBounds<T> for RangeToInclusive<&T> {
     fn start_bound(&self) -> Bound<&T> {
         Unbounded
     }
@@ -937,3 +993,21 @@ impl<T> RangeBounds<T> for RangeToInclusive<&T> {
         Included(self.end)
     }
 }
+
+/// `OneSidedRange` is implemented for built-in range types that are unbounded
+/// on one side. For example, `a..`, `..b` and `..=c` implement `OneSidedRange`,
+/// but `..`, `d..e`, and `f..=g` do not.
+///
+/// Types that implement `OneSidedRange<T>` must return `Bound::Unbounded`
+/// from one of `RangeBounds::start_bound` or `RangeBounds::end_bound`.
+#[unstable(feature = "one_sided_range", issue = "69780")]
+pub trait OneSidedRange<T: ?Sized>: RangeBounds<T> {}
+
+#[unstable(feature = "one_sided_range", issue = "69780")]
+impl<T> OneSidedRange<T> for RangeTo<T> where Self: RangeBounds<T> {}
+
+#[unstable(feature = "one_sided_range", issue = "69780")]
+impl<T> OneSidedRange<T> for RangeFrom<T> where Self: RangeBounds<T> {}
+
+#[unstable(feature = "one_sided_range", issue = "69780")]
+impl<T> OneSidedRange<T> for RangeToInclusive<T> where Self: RangeBounds<T> {}

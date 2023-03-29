@@ -134,8 +134,8 @@ fn symbols_with_errors(input: TokenStream) -> (TokenStream, Vec<syn::Error>) {
 
     let mut check_dup = |span: Span, str: &str, errors: &mut Errors| {
         if let Some(prev_span) = keys.get(str) {
-            errors.error(span, format!("Symbol `{}` is duplicated", str));
-            errors.error(*prev_span, format!("location of previous definition"));
+            errors.error(span, format!("Symbol `{str}` is duplicated"));
+            errors.error(*prev_span, "location of previous definition".to_string());
         } else {
             keys.insert(str.to_string(), span);
         }
@@ -144,8 +144,8 @@ fn symbols_with_errors(input: TokenStream) -> (TokenStream, Vec<syn::Error>) {
     let mut check_order = |span: Span, str: &str, errors: &mut Errors| {
         if let Some((prev_span, ref prev_str)) = prev_key {
             if str < prev_str {
-                errors.error(span, format!("Symbol `{}` must precede `{}`", str, prev_str));
-                errors.error(prev_span, format!("location of previous symbol `{}`", prev_str));
+                errors.error(span, format!("Symbol `{str}` must precede `{prev_str}`"));
+                errors.error(prev_span, format!("location of previous symbol `{prev_str}`"));
             }
         }
         prev_key = Some((span, str.to_string()));
@@ -195,10 +195,10 @@ fn symbols_with_errors(input: TokenStream) -> (TokenStream, Vec<syn::Error>) {
             #n,
         });
     }
-    let _ = counter; // for future use
 
     let output = quote! {
         const SYMBOL_DIGITS_BASE: u32 = #digits_base;
+        const PREINTERNED_SYMBOLS_COUNT: u32 = #counter;
 
         #[doc(hidden)]
         #[allow(non_upper_case_globals)]
@@ -207,7 +207,6 @@ fn symbols_with_errors(input: TokenStream) -> (TokenStream, Vec<syn::Error>) {
             #keyword_stream
         }
 
-        #[allow(rustc::default_hash_types)]
         #[allow(non_upper_case_globals)]
         #[doc(hidden)]
         pub mod sym_generated {
@@ -216,7 +215,7 @@ fn symbols_with_errors(input: TokenStream) -> (TokenStream, Vec<syn::Error>) {
         }
 
         impl Interner {
-            pub fn fresh() -> Self {
+            pub(crate) fn fresh() -> Self {
                 Interner::prefill(&[
                     #prefill_stream
                 ])

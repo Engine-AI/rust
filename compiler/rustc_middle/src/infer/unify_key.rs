@@ -1,13 +1,8 @@
-use crate::ty::{self, InferConst, Ty, TyCtxt};
-use rustc_data_structures::snapshot_vec;
-use rustc_data_structures::undo_log::UndoLogs;
-use rustc_data_structures::unify::{
-    self, EqUnifyValue, InPlace, NoError, UnificationTable, UnifyKey, UnifyValue,
-};
+use crate::ty::{self, Region, Ty, TyCtxt};
+use rustc_data_structures::unify::{NoError, UnifyKey, UnifyValue};
 use rustc_span::def_id::DefId;
 use rustc_span::symbol::Symbol;
 use rustc_span::Span;
-
 use std::cmp;
 use std::marker::PhantomData;
 
@@ -16,37 +11,79 @@ pub trait ToType {
 }
 
 #[derive(PartialEq, Copy, Clone, Debug)]
-pub struct RegionVidKey {
-    /// The minimum region vid in the unification set. This is needed
-    /// to have a canonical name for a type to prevent infinite
-    /// recursion.
-    pub min_vid: ty::RegionVid,
+pub struct UnifiedRegion<'tcx> {
+    value: Option<ty::Region<'tcx>>,
 }
 
-impl UnifyValue for RegionVidKey {
+impl<'tcx> UnifiedRegion<'tcx> {
+    pub fn new(value: Option<Region<'tcx>>) -> Self {
+        Self { value }
+    }
+
+    /// The caller is responsible for checking universe compatibility before using this value.
+    pub fn get_value_ignoring_universes(self) -> Option<Region<'tcx>> {
+        self.value
+    }
+}
+
+#[derive(PartialEq, Copy, Clone, Debug)]
+pub struct RegionVidKey<'tcx> {
+    pub vid: ty::RegionVid,
+    pub phantom: PhantomData<UnifiedRegion<'tcx>>,
+}
+
+impl<'tcx> From<ty::RegionVid> for RegionVidKey<'tcx> {
+    fn from(vid: ty::RegionVid) -> Self {
+        RegionVidKey { vid, phantom: PhantomData }
+    }
+}
+
+impl<'tcx> UnifyKey for RegionVidKey<'tcx> {
+    type Value = UnifiedRegion<'tcx>;
+    #[inline]
+    fn index(&self) -> u32 {
+        self.vid.as_u32()
+    }
+    #[inline]
+    fn from_index(i: u32) -> Self {
+        RegionVidKey::from(ty::RegionVid::from_u32(i))
+    }
+    fn tag() -> &'static str {
+        "RegionVidKey"
+    }
+}
+
+impl<'tcx> UnifyValue for UnifiedRegion<'tcx> {
     type Error = NoError;
 
     fn unify_values(value1: &Self, value2: &Self) -> Result<Self, NoError> {
-        let min_vid = if value1.min_vid.index() < value2.min_vid.index() {
-            value1.min_vid
-        } else {
-            value2.min_vid
-        };
+        // We pick the value of the least universe because it is compatible with more variables.
+        // This is *not* neccessary for soundness, but it allows more region variables to be
+        // resolved to the said value.
+        #[cold]
+        fn min_universe<'tcx>(r1: Region<'tcx>, r2: Region<'tcx>) -> Region<'tcx> {
+            cmp::min_by_key(r1, r2, |r| match r.kind() {
+                ty::ReStatic
+                | ty::ReErased
+                | ty::ReFree(..)
+                | ty::ReEarlyBound(..)
+                | ty::ReError(_) => ty::UniverseIndex::ROOT,
+                ty::RePlaceholder(placeholder) => placeholder.universe,
+                ty::ReVar(..) | ty::ReLateBound(..) => bug!("not a universal region"),
+            })
+        }
 
-        Ok(RegionVidKey { min_vid })
-    }
-}
+        Ok(match (value1.value, value2.value) {
+            // Here we can just pick one value, because the full constraints graph
+            // will be handled later. Ideally, we might want a `MultipleValues`
+            // variant or something. For now though, this is fine.
+            (Some(val1), Some(val2)) => Self { value: Some(min_universe(val1, val2)) },
 
-impl UnifyKey for ty::RegionVid {
-    type Value = RegionVidKey;
-    fn index(&self) -> u32 {
-        u32::from(*self)
-    }
-    fn from_index(i: u32) -> ty::RegionVid {
-        ty::RegionVid::from(i)
-    }
-    fn tag() -> &'static str {
-        "RegionVid"
+            (Some(_), _) => *value1,
+            (_, Some(_)) => *value2,
+
+            (None, None) => *value1,
+        })
     }
 }
 
@@ -84,14 +121,14 @@ pub enum ConstVariableOriginKind {
 
 #[derive(Copy, Clone, Debug)]
 pub enum ConstVariableValue<'tcx> {
-    Known { value: &'tcx ty::Const<'tcx> },
+    Known { value: ty::Const<'tcx> },
     Unknown { universe: ty::UniverseIndex },
 }
 
 impl<'tcx> ConstVariableValue<'tcx> {
     /// If this value is known, returns the const it is known to be.
     /// Otherwise, `None`.
-    pub fn known(&self) -> Option<&'tcx ty::Const<'tcx>> {
+    pub fn known(&self) -> Option<ty::Const<'tcx>> {
         match *self {
             ConstVariableValue::Unknown { .. } => None,
             ConstVariableValue::Known { value } => Some(value),
@@ -107,9 +144,11 @@ pub struct ConstVarValue<'tcx> {
 
 impl<'tcx> UnifyKey for ty::ConstVid<'tcx> {
     type Value = ConstVarValue<'tcx>;
+    #[inline]
     fn index(&self) -> u32 {
         self.index
     }
+    #[inline]
     fn from_index(i: u32) -> Self {
         ty::ConstVid { index: i, phantom: PhantomData }
     }
@@ -119,7 +158,7 @@ impl<'tcx> UnifyKey for ty::ConstVid<'tcx> {
 }
 
 impl<'tcx> UnifyValue for ConstVarValue<'tcx> {
-    type Error = (&'tcx ty::Const<'tcx>, &'tcx ty::Const<'tcx>);
+    type Error = NoError;
 
     fn unify_values(&value1: &Self, &value2: &Self) -> Result<Self, Self::Error> {
         Ok(match (value1.val, value2.val) {
@@ -148,25 +187,5 @@ impl<'tcx> UnifyValue for ConstVarValue<'tcx> {
                 }
             }
         })
-    }
-}
-
-impl<'tcx> EqUnifyValue for &'tcx ty::Const<'tcx> {}
-
-pub fn replace_if_possible<V, L>(
-    table: &mut UnificationTable<InPlace<ty::ConstVid<'tcx>, V, L>>,
-    c: &'tcx ty::Const<'tcx>,
-) -> &'tcx ty::Const<'tcx>
-where
-    V: snapshot_vec::VecLike<unify::Delegate<ty::ConstVid<'tcx>>>,
-    L: UndoLogs<snapshot_vec::UndoLog<unify::Delegate<ty::ConstVid<'tcx>>>>,
-{
-    if let ty::Const { val: ty::ConstKind::Infer(InferConst::Var(vid)), .. } = c {
-        match table.probe_value(*vid).val.known() {
-            Some(c) => c,
-            None => c,
-        }
-    } else {
-        c
     }
 }

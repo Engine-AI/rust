@@ -6,28 +6,31 @@ use std::ptr;
 
 use clippy_utils::diagnostics::span_lint_and_then;
 use clippy_utils::in_constant;
+use clippy_utils::macros::macro_backtrace;
 use if_chain::if_chain;
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::def_id::DefId;
 use rustc_hir::{
     BodyId, Expr, ExprKind, HirId, Impl, ImplItem, ImplItemKind, Item, ItemKind, Node, TraitItem, TraitItemKind, UnOp,
 };
-use rustc_infer::traits::specialization_graph;
+use rustc_hir_analysis::hir_ty_to_ty;
 use rustc_lint::{LateContext, LateLintPass, Lint};
+use rustc_middle::mir;
 use rustc_middle::mir::interpret::{ConstValue, ErrorHandled};
 use rustc_middle::ty::adjustment::Adjust;
-use rustc_middle::ty::{self, AssocKind, Const, Ty};
+use rustc_middle::ty::{self, Ty};
 use rustc_session::{declare_lint_pass, declare_tool_lint};
-use rustc_span::{InnerSpan, Span, DUMMY_SP};
-use rustc_typeck::hir_ty_to_ty;
+use rustc_span::{sym, InnerSpan, Span};
 
 // FIXME: this is a correctness problem but there's no suitable
 // warn-by-default category.
 declare_clippy_lint! {
-    /// **What it does:** Checks for declaration of `const` items which is interior
+    /// ### What it does
+    /// Checks for declaration of `const` items which is interior
     /// mutable (e.g., contains a `Cell`, `Mutex`, `AtomicXxxx`, etc.).
     ///
-    /// **Why is this bad?** Consts are copied everywhere they are referenced, i.e.,
+    /// ### Why is this bad?
+    /// Consts are copied everywhere they are referenced, i.e.,
     /// every time you refer to the const a fresh instance of the `Cell` or `Mutex`
     /// or `AtomicXxxx` will be created, which defeats the whole purpose of using
     /// these types in the first place.
@@ -35,7 +38,8 @@ declare_clippy_lint! {
     /// The `const` should better be replaced by a `static` item if a global
     /// variable is wanted, or replaced by a `const fn` if a constructor is wanted.
     ///
-    /// **Known problems:** A "non-constant" const item is a legacy way to supply an
+    /// ### Known problems
+    /// A "non-constant" const item is a legacy way to supply an
     /// initialized value to downstream `static` items (e.g., the
     /// `std::sync::ONCE_INIT` constant). In this case the use of `const` is legit,
     /// and this lint should be suppressed.
@@ -52,20 +56,23 @@ declare_clippy_lint! {
     /// the interior mutable field is used or not. See issues
     /// [#5812](https://github.com/rust-lang/rust-clippy/issues/5812) and
     ///
-    /// **Example:**
+    /// ### Example
     /// ```rust
     /// use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
     ///
-    /// // Bad.
     /// const CONST_ATOM: AtomicUsize = AtomicUsize::new(12);
     /// CONST_ATOM.store(6, SeqCst); // the content of the atomic is unchanged
     /// assert_eq!(CONST_ATOM.load(SeqCst), 12); // because the CONST_ATOM in these lines are distinct
+    /// ```
     ///
-    /// // Good.
+    /// Use instead:
+    /// ```rust
+    /// # use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
     /// static STATIC_ATOM: AtomicUsize = AtomicUsize::new(15);
     /// STATIC_ATOM.store(9, SeqCst);
     /// assert_eq!(STATIC_ATOM.load(SeqCst), 9); // use a `static` item to refer to the same instance
     /// ```
+    #[clippy::version = "pre 1.29.0"]
     pub DECLARE_INTERIOR_MUTABLE_CONST,
     style,
     "declaring `const` with interior mutability"
@@ -74,17 +81,20 @@ declare_clippy_lint! {
 // FIXME: this is a correctness problem but there's no suitable
 // warn-by-default category.
 declare_clippy_lint! {
-    /// **What it does:** Checks if `const` items which is interior mutable (e.g.,
+    /// ### What it does
+    /// Checks if `const` items which is interior mutable (e.g.,
     /// contains a `Cell`, `Mutex`, `AtomicXxxx`, etc.) has been borrowed directly.
     ///
-    /// **Why is this bad?** Consts are copied everywhere they are referenced, i.e.,
+    /// ### Why is this bad?
+    /// Consts are copied everywhere they are referenced, i.e.,
     /// every time you refer to the const a fresh instance of the `Cell` or `Mutex`
     /// or `AtomicXxxx` will be created, which defeats the whole purpose of using
     /// these types in the first place.
     ///
     /// The `const` value should be stored inside a `static` item.
     ///
-    /// **Known problems:** When an enum has variants with interior mutability, use of its non
+    /// ### Known problems
+    /// When an enum has variants with interior mutability, use of its non
     /// interior mutable variants can generate false positives. See issue
     /// [#3962](https://github.com/rust-lang/rust-clippy/issues/3962)
     ///
@@ -93,20 +103,25 @@ declare_clippy_lint! {
     /// [#5812](https://github.com/rust-lang/rust-clippy/issues/5812) and
     /// [#3825](https://github.com/rust-lang/rust-clippy/issues/3825)
     ///
-    /// **Example:**
+    /// ### Example
     /// ```rust
     /// use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
     /// const CONST_ATOM: AtomicUsize = AtomicUsize::new(12);
     ///
-    /// // Bad.
     /// CONST_ATOM.store(6, SeqCst); // the content of the atomic is unchanged
     /// assert_eq!(CONST_ATOM.load(SeqCst), 12); // because the CONST_ATOM in these lines are distinct
+    /// ```
     ///
-    /// // Good.
+    /// Use instead:
+    /// ```rust
+    /// use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    /// const CONST_ATOM: AtomicUsize = AtomicUsize::new(12);
+    ///
     /// static STATIC_ATOM: AtomicUsize = CONST_ATOM;
     /// STATIC_ATOM.store(9, SeqCst);
     /// assert_eq!(STATIC_ATOM.load(SeqCst), 9); // use a `static` item to refer to the same instance
     /// ```
+    #[clippy::version = "pre 1.29.0"]
     pub BORROW_INTERIOR_MUTABLE_CONST,
     style,
     "referencing `const` with interior mutability"
@@ -116,12 +131,12 @@ fn is_unfrozen<'tcx>(cx: &LateContext<'tcx>, ty: Ty<'tcx>) -> bool {
     // Ignore types whose layout is unknown since `is_freeze` reports every generic types as `!Freeze`,
     // making it indistinguishable from `UnsafeCell`. i.e. it isn't a tool to prove a type is
     // 'unfrozen'. However, this code causes a false negative in which
-    // a type contains a layout-unknown type, but also a unsafe cell like `const CELL: Cell<T>`.
+    // a type contains a layout-unknown type, but also an unsafe cell like `const CELL: Cell<T>`.
     // Yet, it's better than `ty.has_type_flags(TypeFlags::HAS_TY_PARAM | TypeFlags::HAS_PROJECTION)`
     // since it works when a pointer indirection involves (`Cell<*const T>`).
     // Making up a `ParamEnv` where every generic params and assoc types are `Freeze`is another option;
     // but I'm not sure whether it's a decent way, if possible.
-    cx.tcx.layout_of(cx.param_env.and(ty)).is_ok() && !ty.is_freeze(cx.tcx.at(DUMMY_SP), cx.param_env)
+    cx.tcx.layout_of(cx.param_env.and(ty)).is_ok() && !ty.is_freeze(cx.tcx, cx.param_env)
 }
 
 fn is_value_unfrozen_raw<'tcx>(
@@ -129,19 +144,21 @@ fn is_value_unfrozen_raw<'tcx>(
     result: Result<ConstValue<'tcx>, ErrorHandled>,
     ty: Ty<'tcx>,
 ) -> bool {
-    fn inner<'tcx>(cx: &LateContext<'tcx>, val: &'tcx Const<'tcx>) -> bool {
-        match val.ty.kind() {
+    fn inner<'tcx>(cx: &LateContext<'tcx>, val: mir::ConstantKind<'tcx>) -> bool {
+        match val.ty().kind() {
             // the fact that we have to dig into every structs to search enums
             // leads us to the point checking `UnsafeCell` directly is the only option.
-            ty::Adt(ty_def, ..) if Some(ty_def.did) == cx.tcx.lang_items().unsafe_cell_type() => true,
+            ty::Adt(ty_def, ..) if ty_def.is_unsafe_cell() => true,
+            // As of 2022-09-08 miri doesn't track which union field is active so there's no safe way to check the
+            // contained value.
+            ty::Adt(def, ..) if def.is_union() => false,
             ty::Array(..) | ty::Adt(..) | ty::Tuple(..) => {
-                let val = cx.tcx.destructure_const(cx.param_env.and(val));
-                val.fields.iter().any(|field| inner(cx, field))
+                let val = cx.tcx.destructure_mir_constant(cx.param_env, val);
+                val.fields.iter().any(|field| inner(cx, *field))
             },
             _ => false,
         }
     }
-
     result.map_or_else(
         |err| {
             // Consider `TooGeneric` cases as being unfrozen.
@@ -167,7 +184,7 @@ fn is_value_unfrozen_raw<'tcx>(
             // I chose this way because unfrozen enums as assoc consts are rare (or, hopefully, none).
             err == ErrorHandled::TooGeneric
         },
-        |val| inner(cx, Const::from_value(cx.tcx, val, ty)),
+        |val| inner(cx, mir::ConstantKind::from_value(val, ty)),
     )
 }
 
@@ -181,11 +198,7 @@ fn is_value_unfrozen_expr<'tcx>(cx: &LateContext<'tcx>, hir_id: HirId, def_id: D
 
     let result = cx.tcx.const_eval_resolve(
         cx.param_env,
-        ty::Unevaluated {
-            def: ty::WithOptConstParam::unknown(def_id),
-            substs,
-            promoted: None,
-        },
+        mir::UnevaluatedConst::new(ty::WithOptConstParam::unknown(def_id), substs),
         None,
     );
     is_value_unfrozen_raw(cx, result, ty)
@@ -241,8 +254,7 @@ impl<'tcx> LateLintPass<'tcx> for NonCopyConst {
     fn check_item(&mut self, cx: &LateContext<'tcx>, it: &'tcx Item<'_>) {
         if let ItemKind::Const(hir_ty, body_id) = it.kind {
             let ty = hir_ty_to_ty(cx.tcx, hir_ty);
-
-            if is_unfrozen(cx, ty) && is_value_unfrozen_poly(cx, body_id, ty) {
+            if !ignored_macro(cx, it) && is_unfrozen(cx, ty) && is_value_unfrozen_poly(cx, body_id, ty) {
                 lint(cx, Source::Item { item: it.span });
             }
         }
@@ -260,7 +272,7 @@ impl<'tcx> LateLintPass<'tcx> for NonCopyConst {
                 // in other words, lint consts whose value *could* be unfrozen, not definitely is.
                 // This feels inconsistent with how the lint treats generic types,
                 // which avoids linting types which potentially become unfrozen.
-                // One could check whether a unfrozen type have a *frozen variant*
+                // One could check whether an unfrozen type have a *frozen variant*
                 // (like `body_id_opt.map_or_else(|| !has_frozen_variant(...), ...)`),
                 // and do the same as the case of generic types at impl items.
                 // Note that it isn't sufficient to check if it has an enum
@@ -277,8 +289,8 @@ impl<'tcx> LateLintPass<'tcx> for NonCopyConst {
 
     fn check_impl_item(&mut self, cx: &LateContext<'tcx>, impl_item: &'tcx ImplItem<'_>) {
         if let ImplItemKind::Const(hir_ty, body_id) = &impl_item.kind {
-            let item_hir_id = cx.tcx.hir().get_parent_node(impl_item.hir_id());
-            let item = cx.tcx.hir().expect_item(item_hir_id);
+            let item_def_id = cx.tcx.hir().get_parent_item(impl_item.hir_id()).def_id;
+            let item = cx.tcx.hir().expect_item(item_def_id);
 
             match &item.kind {
                 ItemKind::Impl(Impl {
@@ -287,10 +299,12 @@ impl<'tcx> LateLintPass<'tcx> for NonCopyConst {
                 }) => {
                     if_chain! {
                         // Lint a trait impl item only when the definition is a generic type,
-                        // assuming a assoc const is not meant to be a interior mutable type.
+                        // assuming an assoc const is not meant to be an interior mutable type.
                         if let Some(of_trait_def_id) = of_trait_ref.trait_def_id();
-                        if let Some(of_assoc_item) = specialization_graph::Node::Trait(of_trait_def_id)
-                            .item(cx.tcx, impl_item.ident, AssocKind::Const, of_trait_def_id);
+                        if let Some(of_assoc_item) = cx
+                            .tcx
+                            .associated_item(impl_item.owner_id)
+                            .trait_item_def_id;
                         if cx
                             .tcx
                             .layout_of(cx.tcx.param_env(of_trait_def_id).and(
@@ -299,7 +313,7 @@ impl<'tcx> LateLintPass<'tcx> for NonCopyConst {
                                 // and, in that case, the definition is *not* generic.
                                 cx.tcx.normalize_erasing_regions(
                                     cx.tcx.param_env(of_trait_def_id),
-                                    cx.tcx.type_of(of_assoc_item.def_id),
+                                    cx.tcx.type_of(of_assoc_item).subst_identity(),
                                 ),
                             ))
                             .is_err();
@@ -343,9 +357,8 @@ impl<'tcx> LateLintPass<'tcx> for NonCopyConst {
             }
 
             // Make sure it is a const item.
-            let item_def_id = match cx.qpath_res(qpath, expr.hir_id) {
-                Res::Def(DefKind::Const | DefKind::AssocConst, did) => did,
-                _ => return,
+            let Res::Def(DefKind::Const | DefKind::AssocConst, item_def_id) = cx.qpath_res(qpath, expr.hir_id) else {
+                return
             };
 
             // Climb up to resolve any field access and explicit referencing.
@@ -353,7 +366,7 @@ impl<'tcx> LateLintPass<'tcx> for NonCopyConst {
             let mut dereferenced_expr = expr;
             let mut needs_check_adjustment = true;
             loop {
-                let parent_id = cx.tcx.hir().get_parent_node(cur_expr.hir_id);
+                let parent_id = cx.tcx.hir().parent_id(cur_expr.hir_id);
                 if parent_id == cur_expr.hir_id {
                     break;
                 }
@@ -426,4 +439,13 @@ impl<'tcx> LateLintPass<'tcx> for NonCopyConst {
             }
         }
     }
+}
+
+fn ignored_macro(cx: &LateContext<'_>, it: &rustc_hir::Item<'_>) -> bool {
+    macro_backtrace(it.span).any(|macro_call| {
+        matches!(
+            cx.tcx.get_diagnostic_name(macro_call.def_id),
+            Some(sym::thread_local_macro)
+        )
+    })
 }

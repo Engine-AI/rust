@@ -1,6 +1,8 @@
 use crate::fmt;
-use crate::iter::adapters::{zip::try_get_unchecked, SourceIter, TrustedRandomAccess};
-use crate::iter::{FusedIterator, InPlaceIterable, TrustedLen};
+use crate::iter::adapters::{
+    zip::try_get_unchecked, SourceIter, TrustedRandomAccess, TrustedRandomAccessNoCoerce,
+};
+use crate::iter::{FusedIterator, InPlaceIterable, TrustedLen, UncheckedIterator};
 use crate::ops::Try;
 
 /// An iterator that maps the values of `iter` with `f`.
@@ -17,7 +19,7 @@ use crate::ops::Try;
 /// you can also [`map`] backwards:
 ///
 /// ```rust
-/// let v: Vec<i32> = vec![1, 2, 3].into_iter().map(|x| x + 1).rev().collect();
+/// let v: Vec<i32> = [1, 2, 3].into_iter().map(|x| x + 1).rev().collect();
 ///
 /// assert_eq!(v, [4, 3, 2]);
 /// ```
@@ -30,13 +32,13 @@ use crate::ops::Try;
 /// ```rust
 /// let mut c = 0;
 ///
-/// for pair in vec!['a', 'b', 'c'].into_iter()
+/// for pair in ['a', 'b', 'c'].into_iter()
 ///                                .map(|letter| { c += 1; (letter, c) }) {
-///     println!("{:?}", pair);
+///     println!("{pair:?}");
 /// }
 /// ```
 ///
-/// This will print "('a', 1), ('b', 2), ('c', 3)".
+/// This will print `('a', 1), ('b', 2), ('c', 3)`.
 ///
 /// Now consider this twist where we add a call to `rev`. This version will
 /// print `('c', 1), ('b', 2), ('a', 3)`. Note that the letters are reversed,
@@ -47,10 +49,10 @@ use crate::ops::Try;
 /// ```rust
 /// let mut c = 0;
 ///
-/// for pair in vec!['a', 'b', 'c'].into_iter()
+/// for pair in ['a', 'b', 'c'].into_iter()
 ///                                .map(|letter| { c += 1; (letter, c) })
 ///                                .rev() {
-///     println!("{:?}", pair);
+///     println!("{pair:?}");
 /// }
 /// ```
 #[must_use = "iterators are lazy and do nothing unless consumed"]
@@ -110,7 +112,7 @@ where
     where
         Self: Sized,
         G: FnMut(Acc, Self::Item) -> R,
-        R: Try<Ok = Acc>,
+        R: Try<Output = Acc>,
     {
         self.iter.try_fold(init, map_try_fold(&mut self.f, g))
     }
@@ -122,9 +124,10 @@ where
         self.iter.fold(init, map_fold(self.f, g))
     }
 
+    #[inline]
     unsafe fn __iterator_get_unchecked(&mut self, idx: usize) -> B
     where
-        Self: TrustedRandomAccess,
+        Self: TrustedRandomAccessNoCoerce,
     {
         // SAFETY: the caller must uphold the contract for
         // `Iterator::__iterator_get_unchecked`.
@@ -146,7 +149,7 @@ where
     where
         Self: Sized,
         G: FnMut(Acc, Self::Item) -> R,
-        R: Try<Ok = Acc>,
+        R: Try<Output = Acc>,
     {
         self.iter.try_rfold(init, map_try_fold(&mut self.f, g))
     }
@@ -184,25 +187,41 @@ where
 {
 }
 
+impl<B, I, F> UncheckedIterator for Map<I, F>
+where
+    I: UncheckedIterator,
+    F: FnMut(I::Item) -> B,
+{
+    unsafe fn next_unchecked(&mut self) -> B {
+        // SAFETY: `Map` is 1:1 with the inner iterator, so if the caller promised
+        // that there's an element left, the inner iterator has one too.
+        let item = unsafe { self.iter.next_unchecked() };
+        (self.f)(item)
+    }
+}
+
 #[doc(hidden)]
 #[unstable(feature = "trusted_random_access", issue = "none")]
-unsafe impl<I, F> TrustedRandomAccess for Map<I, F>
+unsafe impl<I, F> TrustedRandomAccess for Map<I, F> where I: TrustedRandomAccess {}
+
+#[doc(hidden)]
+#[unstable(feature = "trusted_random_access", issue = "none")]
+unsafe impl<I, F> TrustedRandomAccessNoCoerce for Map<I, F>
 where
-    I: TrustedRandomAccess,
+    I: TrustedRandomAccessNoCoerce,
 {
     const MAY_HAVE_SIDE_EFFECT: bool = true;
 }
 
 #[unstable(issue = "none", feature = "inplace_iteration")]
-unsafe impl<S: Iterator, B, I: Iterator, F> SourceIter for Map<I, F>
+unsafe impl<I, F> SourceIter for Map<I, F>
 where
-    F: FnMut(I::Item) -> B,
-    I: SourceIter<Source = S>,
+    I: SourceIter,
 {
-    type Source = S;
+    type Source = I::Source;
 
     #[inline]
-    unsafe fn as_inner(&mut self) -> &mut S {
+    unsafe fn as_inner(&mut self) -> &mut I::Source {
         // SAFETY: unsafe function forwarding to unsafe function with the same requirements
         unsafe { SourceIter::as_inner(&mut self.iter) }
     }

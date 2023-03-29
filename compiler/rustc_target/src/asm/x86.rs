@@ -1,6 +1,8 @@
 use super::{InlineAsmArch, InlineAsmType};
-use crate::spec::Target;
+use crate::spec::{RelocModel, Target};
+use rustc_data_structures::fx::FxIndexSet;
 use rustc_macros::HashStable_Generic;
+use rustc_span::Symbol;
 use std::fmt;
 
 def_reg_class! {
@@ -12,6 +14,10 @@ def_reg_class! {
         ymm_reg,
         zmm_reg,
         kreg,
+        kreg0,
+        mmx_reg,
+        x87_reg,
+        tmm_reg,
     }
 }
 
@@ -34,7 +40,9 @@ impl X86InlineAsmRegClass {
             }
             Self::reg_byte => &[],
             Self::xmm_reg | Self::ymm_reg | Self::zmm_reg => &['x', 'y', 'z'],
-            Self::kreg => &[],
+            Self::kreg | Self::kreg0 => &[],
+            Self::mmx_reg | Self::x87_reg => &[],
+            Self::tmm_reg => &[],
         }
     }
 
@@ -72,7 +80,9 @@ impl X86InlineAsmRegClass {
                 256 => Some(('y', "ymm0")),
                 _ => Some(('x', "xmm0")),
             },
-            Self::kreg => None,
+            Self::kreg | Self::kreg0 => None,
+            Self::mmx_reg | Self::x87_reg => None,
+            Self::tmm_reg => None,
         }
     }
 
@@ -89,14 +99,16 @@ impl X86InlineAsmRegClass {
             Self::xmm_reg => Some(('x', "xmm0")),
             Self::ymm_reg => Some(('y', "ymm0")),
             Self::zmm_reg => Some(('z', "zmm0")),
-            Self::kreg => None,
+            Self::kreg | Self::kreg0 => None,
+            Self::mmx_reg | Self::x87_reg => None,
+            Self::tmm_reg => None,
         }
     }
 
     pub fn supported_types(
         self,
         arch: InlineAsmArch,
-    ) -> &'static [(InlineAsmType, Option<&'static str>)] {
+    ) -> &'static [(InlineAsmType, Option<Symbol>)] {
         match self {
             Self::reg | Self::reg_abcd => {
                 if arch == InlineAsmArch::X86_64 {
@@ -107,32 +119,37 @@ impl X86InlineAsmRegClass {
             }
             Self::reg_byte => types! { _: I8; },
             Self::xmm_reg => types! {
-                "sse": I32, I64, F32, F64,
+                sse: I32, I64, F32, F64,
                   VecI8(16), VecI16(8), VecI32(4), VecI64(2), VecF32(4), VecF64(2);
             },
             Self::ymm_reg => types! {
-                "avx": I32, I64, F32, F64,
+                avx: I32, I64, F32, F64,
                     VecI8(16), VecI16(8), VecI32(4), VecI64(2), VecF32(4), VecF64(2),
                     VecI8(32), VecI16(16), VecI32(8), VecI64(4), VecF32(8), VecF64(4);
             },
             Self::zmm_reg => types! {
-                "avx512f": I32, I64, F32, F64,
+                avx512f: I32, I64, F32, F64,
                     VecI8(16), VecI16(8), VecI32(4), VecI64(2), VecF32(4), VecF64(2),
                     VecI8(32), VecI16(16), VecI32(8), VecI64(4), VecF32(8), VecF64(4),
                     VecI8(64), VecI16(32), VecI32(16), VecI64(8), VecF32(16), VecF64(8);
             },
             Self::kreg => types! {
-                "avx512f": I8, I16;
-                "avx512bw": I32, I64;
+                avx512f: I8, I16;
+                avx512bw: I32, I64;
             },
+            Self::kreg0 => &[],
+            Self::mmx_reg | Self::x87_reg => &[],
+            Self::tmm_reg => &[],
         }
     }
 }
 
 fn x86_64_only(
     arch: InlineAsmArch,
-    _has_feature: impl FnMut(&str) -> bool,
+    _reloc_model: RelocModel,
+    _target_features: &FxIndexSet<Symbol>,
     _target: &Target,
+    _is_clobber: bool,
 ) -> Result<(), &'static str> {
     match arch {
         InlineAsmArch::X86 => Err("register is only available on x86_64"),
@@ -143,8 +160,10 @@ fn x86_64_only(
 
 fn high_byte(
     arch: InlineAsmArch,
-    _has_feature: impl FnMut(&str) -> bool,
+    _reloc_model: RelocModel,
+    _target_features: &FxIndexSet<Symbol>,
     _target: &Target,
+    _is_clobber: bool,
 ) -> Result<(), &'static str> {
     match arch {
         InlineAsmArch::X86_64 => Err("high byte registers cannot be used as an operand on x86_64"),
@@ -152,13 +171,45 @@ fn high_byte(
     }
 }
 
+fn rbx_reserved(
+    arch: InlineAsmArch,
+    _reloc_model: RelocModel,
+    _target_features: &FxIndexSet<Symbol>,
+    _target: &Target,
+    _is_clobber: bool,
+) -> Result<(), &'static str> {
+    match arch {
+        InlineAsmArch::X86 => Ok(()),
+        InlineAsmArch::X86_64 => {
+            Err("rbx is used internally by LLVM and cannot be used as an operand for inline asm")
+        }
+        _ => unreachable!(),
+    }
+}
+
+fn esi_reserved(
+    arch: InlineAsmArch,
+    _reloc_model: RelocModel,
+    _target_features: &FxIndexSet<Symbol>,
+    _target: &Target,
+    _is_clobber: bool,
+) -> Result<(), &'static str> {
+    match arch {
+        InlineAsmArch::X86 => {
+            Err("esi is used internally by LLVM and cannot be used as an operand for inline asm")
+        }
+        InlineAsmArch::X86_64 => Ok(()),
+        _ => unreachable!(),
+    }
+}
+
 def_regs! {
     X86 X86InlineAsmReg X86InlineAsmRegClass {
         ax: reg, reg_abcd = ["ax", "eax", "rax"],
-        bx: reg, reg_abcd = ["bx", "ebx", "rbx"],
+        bx: reg, reg_abcd = ["bx", "ebx", "rbx"] % rbx_reserved,
         cx: reg, reg_abcd = ["cx", "ecx", "rcx"],
         dx: reg, reg_abcd = ["dx", "edx", "rdx"],
-        si: reg = ["si", "esi", "rsi"],
+        si: reg = ["si", "esi", "rsi"] % esi_reserved,
         di: reg = ["di", "edi", "rdi"],
         r8: reg = ["r8", "r8w", "r8d"] % x86_64_only,
         r9: reg = ["r9", "r9w", "r9d"] % x86_64_only,
@@ -250,6 +301,7 @@ def_regs! {
         zmm29: zmm_reg = ["zmm29", "xmm29", "ymm29"] % x86_64_only,
         zmm30: zmm_reg = ["zmm30", "xmm30", "ymm30"] % x86_64_only,
         zmm31: zmm_reg = ["zmm31", "xmm31", "ymm31"] % x86_64_only,
+        k0: kreg0 = ["k0"],
         k1: kreg = ["k1"],
         k2: kreg = ["k2"],
         k3: kreg = ["k3"],
@@ -257,18 +309,36 @@ def_regs! {
         k5: kreg = ["k5"],
         k6: kreg = ["k6"],
         k7: kreg = ["k7"],
+        mm0: mmx_reg = ["mm0"],
+        mm1: mmx_reg = ["mm1"],
+        mm2: mmx_reg = ["mm2"],
+        mm3: mmx_reg = ["mm3"],
+        mm4: mmx_reg = ["mm4"],
+        mm5: mmx_reg = ["mm5"],
+        mm6: mmx_reg = ["mm6"],
+        mm7: mmx_reg = ["mm7"],
+        st0: x87_reg = ["st(0)", "st"],
+        st1: x87_reg = ["st(1)"],
+        st2: x87_reg = ["st(2)"],
+        st3: x87_reg = ["st(3)"],
+        st4: x87_reg = ["st(4)"],
+        st5: x87_reg = ["st(5)"],
+        st6: x87_reg = ["st(6)"],
+        st7: x87_reg = ["st(7)"],
+        tmm0: tmm_reg = ["tmm0"] % x86_64_only,
+        tmm1: tmm_reg = ["tmm1"] % x86_64_only,
+        tmm2: tmm_reg = ["tmm2"] % x86_64_only,
+        tmm3: tmm_reg = ["tmm3"] % x86_64_only,
+        tmm4: tmm_reg = ["tmm4"] % x86_64_only,
+        tmm5: tmm_reg = ["tmm5"] % x86_64_only,
+        tmm6: tmm_reg = ["tmm6"] % x86_64_only,
+        tmm7: tmm_reg = ["tmm7"] % x86_64_only,
         #error = ["bp", "bpl", "ebp", "rbp"] =>
             "the frame pointer cannot be used as an operand for inline asm",
         #error = ["sp", "spl", "esp", "rsp"] =>
             "the stack pointer cannot be used as an operand for inline asm",
         #error = ["ip", "eip", "rip"] =>
             "the instruction pointer cannot be used as an operand for inline asm",
-        #error = ["st", "st(0)", "st(1)", "st(2)", "st(3)", "st(4)", "st(5)", "st(6)", "st(7)"] =>
-            "x87 registers are not currently supported as operands for inline asm",
-        #error = ["mm0", "mm1", "mm2", "mm3", "mm4", "mm5", "mm6", "mm7"] =>
-            "MMX registers are not currently supported as operands for inline asm",
-        #error = ["k0"] =>
-            "the k0 AVX mask register cannot be used as an operand for inline asm",
     }
 }
 
@@ -287,28 +357,28 @@ impl X86InlineAsmReg {
         if self as u32 <= Self::dx as u32 {
             let root = ['a', 'b', 'c', 'd'][self as usize - Self::ax as usize];
             match modifier.unwrap_or(reg_default_modifier) {
-                'l' => write!(out, "{}l", root),
-                'h' => write!(out, "{}h", root),
-                'x' => write!(out, "{}x", root),
-                'e' => write!(out, "e{}x", root),
-                'r' => write!(out, "r{}x", root),
+                'l' => write!(out, "{root}l"),
+                'h' => write!(out, "{root}h"),
+                'x' => write!(out, "{root}x"),
+                'e' => write!(out, "e{root}x"),
+                'r' => write!(out, "r{root}x"),
                 _ => unreachable!(),
             }
         } else if self as u32 <= Self::di as u32 {
             let root = self.name();
             match modifier.unwrap_or(reg_default_modifier) {
-                'l' => write!(out, "{}l", root),
-                'x' => write!(out, "{}", root),
-                'e' => write!(out, "e{}", root),
-                'r' => write!(out, "r{}", root),
+                'l' => write!(out, "{root}l"),
+                'x' => write!(out, "{root}"),
+                'e' => write!(out, "e{root}"),
+                'r' => write!(out, "r{root}"),
                 _ => unreachable!(),
             }
         } else if self as u32 <= Self::r15 as u32 {
             let root = self.name();
             match modifier.unwrap_or(reg_default_modifier) {
-                'l' => write!(out, "{}b", root),
-                'x' => write!(out, "{}w", root),
-                'e' => write!(out, "{}d", root),
+                'l' => write!(out, "{root}b"),
+                'x' => write!(out, "{root}w"),
+                'e' => write!(out, "{root}d"),
                 'r' => out.write_str(root),
                 _ => unreachable!(),
             }
@@ -317,15 +387,15 @@ impl X86InlineAsmReg {
         } else if self as u32 <= Self::xmm15 as u32 {
             let prefix = modifier.unwrap_or('x');
             let index = self as u32 - Self::xmm0 as u32;
-            write!(out, "{}{}", prefix, index)
+            write!(out, "{prefix}{index}")
         } else if self as u32 <= Self::ymm15 as u32 {
             let prefix = modifier.unwrap_or('y');
             let index = self as u32 - Self::ymm0 as u32;
-            write!(out, "{}{}", prefix, index)
+            write!(out, "{prefix}{index}")
         } else if self as u32 <= Self::zmm31 as u32 {
             let prefix = modifier.unwrap_or('z');
             let index = self as u32 - Self::zmm0 as u32;
-            write!(out, "{}{}", prefix, index)
+            write!(out, "{prefix}{index}")
         } else {
             out.write_str(self.name())
         }

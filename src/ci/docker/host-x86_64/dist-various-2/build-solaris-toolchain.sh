@@ -6,21 +6,11 @@ source shared.sh
 ARCH=$1
 LIB_ARCH=$2
 APT_ARCH=$3
+MANUFACTURER=$4
 BINUTILS=2.28.1
 GCC=6.5.0
 
-# Choose correct target based on the $ARCH
-case "$ARCH" in
-x86_64)
-  TARGET=x86_64-pc-solaris2.10
-  ;;
-sparcv9)
-  TARGET=sparcv9-sun-solaris2.10
-  ;;
-*)
-  printf 'ERROR: unknown architecture: %s\n' "$ARCH"
-  exit 1
-esac
+TARGET=${ARCH}-${MANUFACTURER}-solaris2.10
 
 # First up, build binutils
 mkdir binutils
@@ -42,20 +32,22 @@ cd solaris
 
 dpkg --add-architecture $APT_ARCH
 apt-get update
-apt-get download $(apt-cache depends --recurse --no-replaces \
-  libc:$APT_ARCH           \
-  libm-dev:$APT_ARCH       \
-  libpthread:$APT_ARCH     \
-  libresolv:$APT_ARCH      \
-  librt:$APT_ARCH          \
-  libsocket:$APT_ARCH      \
-  system-crt:$APT_ARCH     \
-  system-header:$APT_ARCH  \
-  | grep "^\w")
+apt-get install -y --download-only                           \
+  libc:$APT_ARCH                                             \
+  liblgrp:$APT_ARCH                                          \
+  libm-dev:$APT_ARCH                                         \
+  libpthread:$APT_ARCH                                       \
+  libresolv:$APT_ARCH                                        \
+  librt:$APT_ARCH                                            \
+  libsendfile:$APT_ARCH                                      \
+  libsocket:$APT_ARCH                                        \
+  system-crt:$APT_ARCH                                       \
+  system-header:$APT_ARCH
 
-for deb in *$APT_ARCH.deb; do
+for deb in /var/cache/apt/archives/*$APT_ARCH.deb; do
   dpkg -x $deb .
 done
+apt-get clean
 
 # The -dev packages are not available from the apt repository we're using.
 # However, those packages are just symlinks from *.so to *.so.<version>.

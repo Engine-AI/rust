@@ -3,25 +3,25 @@ use clippy_utils::higher;
 use rustc_hir as hir;
 use rustc_hir::intravisit;
 use rustc_lint::{LateContext, LateLintPass, LintContext};
-use rustc_middle::hir::map::Map;
 use rustc_middle::lint::in_external_macro;
 use rustc_middle::ty;
 use rustc_session::{declare_lint_pass, declare_tool_lint};
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for instances of `mut mut` references.
+    /// ### What it does
+    /// Checks for instances of `mut mut` references.
     ///
-    /// **Why is this bad?** Multiple `mut`s don't add anything meaningful to the
+    /// ### Why is this bad?
+    /// Multiple `mut`s don't add anything meaningful to the
     /// source. This is either a copy'n'paste error, or it shows a fundamental
     /// misunderstanding of references.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
+    /// ### Example
     /// ```rust
     /// # let mut y = 1;
     /// let x = &mut &mut y;
     /// ```
+    #[clippy::version = "pre 1.29.0"]
     pub MUT_MUT,
     pedantic,
     "usage of double-mut refs, e.g., `&mut &mut ...`"
@@ -46,14 +46,12 @@ pub struct MutVisitor<'a, 'tcx> {
 }
 
 impl<'a, 'tcx> intravisit::Visitor<'tcx> for MutVisitor<'a, 'tcx> {
-    type Map = Map<'tcx>;
-
     fn visit_expr(&mut self, expr: &'tcx hir::Expr<'_>) {
         if in_external_macro(self.cx.sess(), expr.span) {
             return;
         }
 
-        if let Some((_, arg, body, _)) = higher::for_loop(expr) {
+        if let Some(higher::ForLoop { arg, body, .. }) = higher::ForLoop::hir(expr) {
             // A `for` loop lowers to:
             // ```rust
             // match ::std::iter::Iterator::next(&mut iter) {
@@ -70,19 +68,25 @@ impl<'a, 'tcx> intravisit::Visitor<'tcx> for MutVisitor<'a, 'tcx> {
                     expr.span,
                     "generally you want to avoid `&mut &mut _` if possible",
                 );
-            } else if let ty::Ref(_, _, hir::Mutability::Mut) = self.cx.typeck_results().expr_ty(e).kind() {
-                span_lint(
-                    self.cx,
-                    MUT_MUT,
-                    expr.span,
-                    "this expression mutably borrows a mutable reference. Consider reborrowing",
-                );
+            } else if let ty::Ref(_, ty, hir::Mutability::Mut) = self.cx.typeck_results().expr_ty(e).kind() {
+                if ty.peel_refs().is_sized(self.cx.tcx, self.cx.param_env) {
+                    span_lint(
+                        self.cx,
+                        MUT_MUT,
+                        expr.span,
+                        "this expression mutably borrows a mutable reference. Consider reborrowing",
+                    );
+                }
             }
         }
     }
 
     fn visit_ty(&mut self, ty: &'tcx hir::Ty<'_>) {
-        if let hir::TyKind::Rptr(
+        if in_external_macro(self.cx.sess(), ty.span) {
+            return;
+        }
+
+        if let hir::TyKind::Ref(
             _,
             hir::MutTy {
                 ty: pty,
@@ -90,7 +94,7 @@ impl<'a, 'tcx> intravisit::Visitor<'tcx> for MutVisitor<'a, 'tcx> {
             },
         ) = ty.kind
         {
-            if let hir::TyKind::Rptr(
+            if let hir::TyKind::Ref(
                 _,
                 hir::MutTy {
                     mutbl: hir::Mutability::Mut,
@@ -108,8 +112,5 @@ impl<'a, 'tcx> intravisit::Visitor<'tcx> for MutVisitor<'a, 'tcx> {
         }
 
         intravisit::walk_ty(self, ty);
-    }
-    fn nested_visit_map(&mut self) -> intravisit::NestedVisitorMap<Self::Map> {
-        intravisit::NestedVisitorMap::None
     }
 }

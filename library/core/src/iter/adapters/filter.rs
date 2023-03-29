@@ -37,7 +37,7 @@ fn filter_fold<T, Acc>(
     move |acc, item| if predicate(&item) { fold(acc, item) } else { acc }
 }
 
-fn filter_try_fold<'a, T, Acc, R: Try<Ok = Acc>>(
+fn filter_try_fold<'a, T, Acc, R: Try<Output = Acc>>(
     predicate: &'a mut impl FnMut(&T) -> bool,
     mut fold: impl FnMut(Acc, T) -> R + 'a,
 ) -> impl FnMut(Acc, T) -> R + 'a {
@@ -88,7 +88,7 @@ where
     where
         Self: Sized,
         Fold: FnMut(Acc, Self::Item) -> R,
-        R: Try<Ok = Acc>,
+        R: Try<Output = Acc>,
     {
         self.iter.try_fold(init, filter_try_fold(&mut self.predicate, fold))
     }
@@ -117,7 +117,7 @@ where
     where
         Self: Sized,
         Fold: FnMut(Acc, Self::Item) -> R,
-        R: Try<Ok = Acc>,
+        R: Try<Output = Acc>,
     {
         self.iter.try_rfold(init, filter_try_fold(&mut self.predicate, fold))
     }
@@ -135,15 +135,14 @@ where
 impl<I: FusedIterator, P> FusedIterator for Filter<I, P> where P: FnMut(&I::Item) -> bool {}
 
 #[unstable(issue = "none", feature = "inplace_iteration")]
-unsafe impl<S: Iterator, P, I: Iterator> SourceIter for Filter<I, P>
+unsafe impl<P, I> SourceIter for Filter<I, P>
 where
-    P: FnMut(&I::Item) -> bool,
-    I: SourceIter<Source = S>,
+    I: SourceIter,
 {
-    type Source = S;
+    type Source = I::Source;
 
     #[inline]
-    unsafe fn as_inner(&mut self) -> &mut S {
+    unsafe fn as_inner(&mut self) -> &mut I::Source {
         // SAFETY: unsafe function forwarding to unsafe function with the same requirements
         unsafe { SourceIter::as_inner(&mut self.iter) }
     }

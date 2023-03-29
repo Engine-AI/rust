@@ -44,7 +44,7 @@ fn check_expr_asm_syntax(lint: &'static Lint, cx: &EarlyContext<'_>, expr: &Expr
                 cx,
                 lint,
                 expr.span,
-                &format!("{} x86 assembly syntax used", style),
+                &format!("{style} x86 assembly syntax used"),
                 None,
                 &format!("use {} x86 assembly syntax", !style),
             );
@@ -53,28 +53,33 @@ fn check_expr_asm_syntax(lint: &'static Lint, cx: &EarlyContext<'_>, expr: &Expr
 }
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for usage of Intel x86 assembly syntax.
+    /// ### What it does
+    /// Checks for usage of Intel x86 assembly syntax.
     ///
-    /// **Why is this bad?** The lint has been enabled to indicate a preference
+    /// ### Why is this bad?
+    /// The lint has been enabled to indicate a preference
     /// for AT&T x86 assembly syntax.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
+    /// ### Example
     ///
     /// ```rust,no_run
     /// # #![feature(asm)]
+    /// # #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     /// # unsafe { let ptr = "".as_ptr();
+    /// # use std::arch::asm;
     /// asm!("lea {}, [{}]", lateout(reg) _, in(reg) ptr);
     /// # }
     /// ```
     /// Use instead:
     /// ```rust,no_run
     /// # #![feature(asm)]
+    /// # #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     /// # unsafe { let ptr = "".as_ptr();
+    /// # use std::arch::asm;
     /// asm!("lea ({}), {}", in(reg) ptr, lateout(reg) _, options(att_syntax));
     /// # }
     /// ```
+    #[clippy::version = "1.49.0"]
     pub INLINE_ASM_X86_INTEL_SYNTAX,
     restriction,
     "prefer AT&T x86 assembly syntax"
@@ -89,28 +94,33 @@ impl EarlyLintPass for InlineAsmX86IntelSyntax {
 }
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for usage of AT&T x86 assembly syntax.
+    /// ### What it does
+    /// Checks for usage of AT&T x86 assembly syntax.
     ///
-    /// **Why is this bad?** The lint has been enabled to indicate a preference
+    /// ### Why is this bad?
+    /// The lint has been enabled to indicate a preference
     /// for Intel x86 assembly syntax.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
+    /// ### Example
     ///
     /// ```rust,no_run
     /// # #![feature(asm)]
+    /// # #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     /// # unsafe { let ptr = "".as_ptr();
+    /// # use std::arch::asm;
     /// asm!("lea ({}), {}", in(reg) ptr, lateout(reg) _, options(att_syntax));
     /// # }
     /// ```
     /// Use instead:
     /// ```rust,no_run
     /// # #![feature(asm)]
+    /// # #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     /// # unsafe { let ptr = "".as_ptr();
+    /// # use std::arch::asm;
     /// asm!("lea {}, [{}]", lateout(reg) _, in(reg) ptr);
     /// # }
     /// ```
+    #[clippy::version = "1.49.0"]
     pub INLINE_ASM_X86_ATT_SYNTAX,
     restriction,
     "prefer Intel x86 assembly syntax"

@@ -39,7 +39,7 @@
 //! ```
 //!
 //! An iterator has a method, [`next`], which when called, returns an
-//! [`Option`]`<Item>`. [`next`] will return [`Some(Item)`] as long as there
+//! <code>[Option]\<Item></code>. Calling [`next`] will return [`Some(Item)`] as long as there
 //! are elements, and once they've all been exhausted, will return `None` to
 //! indicate that iteration is finished. Individual iterators may choose to
 //! resume iteration, and so calling [`next`] again may or may not eventually
@@ -144,7 +144,7 @@
 //! let values = vec![1, 2, 3, 4, 5];
 //!
 //! for x in values {
-//!     println!("{}", x);
+//!     println!("{x}");
 //! }
 //! ```
 //!
@@ -164,7 +164,7 @@
 //! let values = vec![1, 2, 3, 4, 5];
 //!
 //! for x in values {
-//!     println!("{}", x);
+//!     println!("{x}");
 //! }
 //! ```
 //!
@@ -181,7 +181,7 @@
 //!                 None => break,
 //!             };
 //!             let x = next;
-//!             let () = { println!("{}", x); };
+//!             let () = { println!("{x}"); };
 //!         },
 //!     };
 //!     result
@@ -243,13 +243,12 @@
 //! ```
 //!
 //! While many collections offer `iter()`, not all offer `iter_mut()`. For
-//! example, mutating the keys of a [`HashSet<T>`] or [`HashMap<K, V>`] could
-//! put the collection into an inconsistent state if the key hashes change, so
-//! these collections only offer `iter()`.
+//! example, mutating the keys of a [`HashSet<T>`] could put the collection
+//! into an inconsistent state if the key hashes change, so this collection
+//! only offers `iter()`.
 //!
 //! [`into_iter()`]: IntoIterator::into_iter
 //! [`HashSet<T>`]: ../../std/collections/struct.HashSet.html
-//! [`HashMap<K, V>`]: ../../std/collections/struct.HashMap.html
 //!
 //! # Adapters
 //!
@@ -279,8 +278,9 @@
 //!
 //! ```
 //! # #![allow(unused_must_use)]
+//! # #![allow(map_unit_fn)]
 //! let v = vec![1, 2, 3, 4, 5];
-//! v.iter().map(|x| println!("{}", x));
+//! v.iter().map(|x| println!("{x}"));
 //! ```
 //!
 //! This will not print any values, as we only created an iterator, rather than
@@ -297,10 +297,10 @@
 //! ```
 //! let v = vec![1, 2, 3, 4, 5];
 //!
-//! v.iter().for_each(|x| println!("{}", x));
+//! v.iter().for_each(|x| println!("{x}"));
 //! // or
 //! for x in &v {
-//!     println!("{}", x);
+//!     println!("{x}");
 //! }
 //! ```
 //!
@@ -329,14 +329,14 @@
 //! let five_numbers = numbers.take(5);
 //!
 //! for number in five_numbers {
-//!     println!("{}", number);
+//!     println!("{number}");
 //! }
 //! ```
 //!
 //! This will print the numbers `0` through `4`, each on their own line.
 //!
 //! Bear in mind that methods on infinite iterators, even those for which a
-//! result can be determined mathematically in finite time, may not terminate.
+//! result can be determined mathematically in finite time, might not terminate.
 //! Specifically, methods such as [`min`], which in the general case require
 //! traversing every element in the iterator, are likely not to return
 //! successfully for any infinite iterators.
@@ -345,13 +345,34 @@
 //! let ones = std::iter::repeat(1);
 //! let least = ones.min().unwrap(); // Oh no! An infinite loop!
 //! // `ones.min()` causes an infinite loop, so we won't reach this point!
-//! println!("The smallest number one is {}.", least);
+//! println!("The smallest number one is {least}.");
 //! ```
 //!
 //! [`take`]: Iterator::take
 //! [`min`]: Iterator::min
 
 #![stable(feature = "rust1", since = "1.0.0")]
+
+// This needs to be up here in order to be usable in the child modules
+macro_rules! impl_fold_via_try_fold {
+    (fold -> try_fold) => {
+        impl_fold_via_try_fold! { @internal fold -> try_fold }
+    };
+    (rfold -> try_rfold) => {
+        impl_fold_via_try_fold! { @internal rfold -> try_rfold }
+    };
+    (@internal $fold:ident -> $try_fold:ident) => {
+        #[inline]
+        fn $fold<AAA, FFF>(mut self, init: AAA, fold: FFF) -> AAA
+        where
+            FFF: FnMut(AAA, Self::Item) -> AAA,
+        {
+            use crate::ops::NeverShortCircuit;
+
+            self.$try_fold(init, NeverShortCircuit::wrap_mut_2(fold)).0
+        }
+    };
+}
 
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use self::traits::Iterator;
@@ -363,6 +384,12 @@ pub use self::traits::Iterator;
 )]
 pub use self::range::Step;
 
+#[unstable(
+    feature = "iter_from_generator",
+    issue = "43122",
+    reason = "generators are unstable"
+)]
+pub use self::sources::from_generator;
 #[stable(feature = "iter_empty", since = "1.2.0")]
 pub use self::sources::{empty, Empty};
 #[stable(feature = "iter_from_fn", since = "1.34.0")]
@@ -373,6 +400,8 @@ pub use self::sources::{once, Once};
 pub use self::sources::{once_with, OnceWith};
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use self::sources::{repeat, Repeat};
+#[unstable(feature = "iter_repeat_n", issue = "104434")]
+pub use self::sources::{repeat_n, RepeatN};
 #[stable(feature = "iterator_repeat_with", since = "1.28.0")]
 pub use self::sources::{repeat_with, RepeatWith};
 #[stable(feature = "iter_successors", since = "1.34.0")]
@@ -384,20 +413,26 @@ pub use self::traits::FusedIterator;
 pub use self::traits::InPlaceIterable;
 #[unstable(feature = "trusted_len", issue = "37572")]
 pub use self::traits::TrustedLen;
+#[unstable(feature = "trusted_step", issue = "85731")]
+pub use self::traits::TrustedStep;
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use self::traits::{
     DoubleEndedIterator, ExactSizeIterator, Extend, FromIterator, IntoIterator, Product, Sum,
 };
 
-#[unstable(feature = "iter_zip", issue = "83574")]
+#[stable(feature = "iter_zip", since = "1.59.0")]
 pub use self::adapters::zip;
+#[unstable(feature = "iter_array_chunks", reason = "recently added", issue = "100450")]
+pub use self::adapters::ArrayChunks;
+#[unstable(feature = "std_internals", issue = "none")]
+pub use self::adapters::ByRefSized;
 #[stable(feature = "iter_cloned", since = "1.1.0")]
 pub use self::adapters::Cloned;
 #[stable(feature = "iter_copied", since = "1.36.0")]
 pub use self::adapters::Copied;
 #[stable(feature = "iterator_flatten", since = "1.29.0")]
 pub use self::adapters::Flatten;
-#[unstable(feature = "iter_map_while", reason = "recently added", issue = "68537")]
+#[stable(feature = "iter_map_while", since = "1.57.0")]
 pub use self::adapters::MapWhile;
 #[unstable(feature = "inplace_iteration", issue = "none")]
 pub use self::adapters::SourceIter;
@@ -405,6 +440,8 @@ pub use self::adapters::SourceIter;
 pub use self::adapters::StepBy;
 #[unstable(feature = "trusted_random_access", issue = "none")]
 pub use self::adapters::TrustedRandomAccess;
+#[unstable(feature = "trusted_random_access", issue = "none")]
+pub use self::adapters::TrustedRandomAccessNoCoerce;
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use self::adapters::{
     Chain, Cycle, Enumerate, Filter, FilterMap, FlatMap, Fuse, Inspect, Map, Peekable, Rev, Scan,
@@ -413,7 +450,8 @@ pub use self::adapters::{
 #[unstable(feature = "iter_intersperse", reason = "recently added", issue = "79524")]
 pub use self::adapters::{Intersperse, IntersperseWith};
 
-pub(crate) use self::adapters::process_results;
+pub(crate) use self::adapters::try_process;
+pub(crate) use self::traits::UncheckedIterator;
 
 mod adapters;
 mod range;

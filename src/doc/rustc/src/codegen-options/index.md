@@ -1,4 +1,4 @@
-# Codegen options
+# Codegen Options
 
 All of these options are passed to `rustc` via the `-C` flag, short for "codegen." You can see
 a version of this list for your exact compiler by running `rustc -C help`.
@@ -49,10 +49,10 @@ Guard](https://docs.microsoft.com/en-us/windows/win32/secbp/control-flow-guard)
 platform security feature. This flag is currently ignored for non-Windows targets.
 It takes one of the following values:
 
-* `y`, `yes`, `on`, `checks`, or no value: enable Control Flow Guard.
+* `y`, `yes`, `on`, `true`, `checks`, or no value: enable Control Flow Guard.
 * `nochecks`: emit Control Flow Guard metadata without runtime enforcement checks (this
 should only be used for testing purposes as it does not provide security enforcement).
-* `n`, `no`, `off`: do not enable Control Flow Guard (the default).
+* `n`, `no`, `off`, `false`: do not enable Control Flow Guard (the default).
 
 ## debug-assertions
 
@@ -60,8 +60,8 @@ This flag lets you turn `cfg(debug_assertions)` [conditional
 compilation](../../reference/conditional-compilation.md#debug_assertions) on
 or off. It takes one of the following values:
 
-* `y`, `yes`, `on`, or no value: enable debug-assertions.
-* `n`, `no`, or `off`: disable debug-assertions.
+* `y`, `yes`, `on`, `true`, or no value: enable debug-assertions.
+* `n`, `no`, `off` or `false`: disable debug-assertions.
 
 If not specified, debug assertions are automatically enabled only if the
 [opt-level](#opt-level) is 0.
@@ -82,8 +82,8 @@ Note: The [`-g` flag][option-g-debug] is an alias for `-C debuginfo=2`.
 This flag controls whether or not the linker includes its default libraries.
 It takes one of the following values:
 
-* `y`, `yes`, `on`, or no value: include default libraries (the default).
-* `n`, `no`, or `off`: exclude default libraries.
+* `y`, `yes`, `on`, `true` or no value: include default libraries (the default).
+* `n`, `no`, `off` or `false`: exclude default libraries.
 
 For example, for gcc flavor linkers, this issues the `-nodefaultlibs` flag to
 the linker.
@@ -93,8 +93,8 @@ the linker.
 This flag controls whether or not the compiler embeds LLVM bitcode into object
 files. It takes one of the following values:
 
-* `y`, `yes`, `on`, or no value: put bitcode in rlibs (the default).
-* `n`, `no`, or `off`: omit bitcode from rlibs.
+* `y`, `yes`, `on`, `true` or no value: put bitcode in rlibs (the default).
+* `n`, `no`, `off` or `false`: omit bitcode from rlibs.
 
 LLVM bitcode is required when rustc is performing link-time optimization (LTO).
 It is also required on some targets like iOS ones where vendors look for LLVM
@@ -135,8 +135,8 @@ flag][option-emit] for more information.
 This flag forces the use of frame pointers. It takes one of the following
 values:
 
-* `y`, `yes`, `on`, or no value: force-enable frame pointers.
-* `n`, `no`, or `off`: do not force-enable frame pointers. This does
+* `y`, `yes`, `on`, `true` or no value: force-enable frame pointers.
+* `n`, `no`, `off` or `false`: do not force-enable frame pointers. This does
   not necessarily mean frame pointers will be removed.
 
 The default behaviour, if frame pointers are not force-enabled, depends on the
@@ -147,10 +147,9 @@ target.
 This flag forces the generation of unwind tables. It takes one of the following
 values:
 
-* `y`, `yes`, `on`, or no value: Unwind tables are forced to be generated.
-* `n`, `no`, or `off`: Unwind tables are not forced to be generated. If unwind
-  tables are required by the target or `-C panic=unwind`, an error will be
-  emitted.
+* `y`, `yes`, `on`, `true` or no value: Unwind tables are forced to be generated.
+* `n`, `no`, `off` or `false`: Unwind tables are not forced to be generated. If unwind
+  tables are required by the target an error will be emitted.
 
 The default if not specified depends on the target.
 
@@ -178,6 +177,15 @@ The default depends on the [opt-level](#opt-level):
 | s         | 75 |
 | z         | 25 |
 
+## instrument-coverage
+
+This option enables instrumentation-based code coverage support. See the
+chapter on [instrumentation-based code coverage] for more information.
+
+Note that while the `-C instrument-coverage` option is stable, the profile data
+format produced by the resulting instrumentation may change, and may not work
+with coverage tools other than those built and shipped with the compiler.
+
 ## link-arg
 
 This flag lets you append a single extra argument to the linker invocation.
@@ -194,21 +202,21 @@ options should be separated by spaces.
 This flag controls whether the linker will keep dead code. It takes one of
 the following values:
 
-* `y`, `yes`, `on`, or no value: keep dead code.
-* `n`, `no`, or `off`: remove dead code (the default).
+* `y`, `yes`, `on`, `true` or no value: keep dead code.
+* `n`, `no`, `off` or `false`: remove dead code (the default).
 
 An example of when this flag might be useful is when trying to construct code coverage
 metrics.
 
 ## link-self-contained
 
-On targets that support it this flag controls whether the linker will use libraries and objects
-shipped with Rust instead or those in the system.
+On `windows-gnu`, `linux-musl`, and `wasi` targets, this flag controls whether the
+linker will use libraries and objects shipped with Rust instead or those in the system.
 It takes one of the following values:
 
 * no value: rustc will use heuristic to disable self-contained mode if system has necessary tools.
-* `y`, `yes`, `on`: use only libraries/objects shipped with Rust.
-* `n`, `no`, or `off`: rely on the user or the linker to provide non-Rust libraries/objects.
+* `y`, `yes`, `on`, `true`: use only libraries/objects shipped with Rust.
+* `n`, `no`, `off` or `false`: rely on the user or the linker to provide non-Rust libraries/objects.
 
 This allows overriding cases when detection fails or user wants to use shipped libraries.
 
@@ -234,6 +242,8 @@ flavor. Valid options are:
 * `ptx-linker`: use
   [`rust-ptx-linker`](https://github.com/denzp/rust-ptx-linker) for Nvidia
   NVPTX GPGPU support.
+* `bpf-linker`: use
+  [`bpf-linker`](https://github.com/alessandrod/bpf-linker) for eBPF support.
 * `wasm-ld`: use the [`wasm-ld`](https://lld.llvm.org/WebAssembly.html)
   executable, a port of LLVM `lld` for WebAssembly.
 * `ld64.lld`: use the LLVM `lld` executable with the [`-flavor darwin`
@@ -251,8 +261,8 @@ This flag defers LTO optimizations to the linker. See
 [linker-plugin-LTO](../linker-plugin-lto.md) for more details. It takes one of
 the following values:
 
-* `y`, `yes`, `on`, or no value: enable linker plugin LTO.
-* `n`, `no`, or `off`: disable linker plugin LTO (the default).
+* `y`, `yes`, `on`, `true` or no value: enable linker plugin LTO.
+* `n`, `no`, `off` or `false`: disable linker plugin LTO (the default).
 * A path to the linker plugin.
 
 More specifically this flag will cause the compiler to replace its typical
@@ -282,9 +292,9 @@ optimizations](https://llvm.org/docs/LinkTimeOptimization.html) to produce
 better optimized code, using whole-program analysis, at the cost of longer
 linking time. It takes one of the following values:
 
-* `y`, `yes`, `on`, `fat`, or no value: perform "fat" LTO which attempts to
+* `y`, `yes`, `on`, `true`, `fat`, or no value: perform "fat" LTO which attempts to
   perform optimizations across all crates within the dependency graph.
-* `n`, `no`, `off`: disables LTO.
+* `n`, `no`, `off`, `false`: disables LTO.
 * `thin`: perform ["thin"
   LTO](http://blog.llvm.org/2016/06/thinlto-scalable-and-incremental-lto.html).
   This is similar to "fat", but takes substantially less time to run while
@@ -323,8 +333,8 @@ This flag allows you to disable [the
 red zone](https://en.wikipedia.org/wiki/Red_zone_\(computing\)). It takes one
 of the following values:
 
-* `y`, `yes`, `on`, or no value: disable the red zone.
-* `n`, `no`, or `off`: enable the red zone.
+* `y`, `yes`, `on`, `true` or no value: disable the red zone.
+* `n`, `no`, `off` or `false`: enable the red zone.
 
 The default behaviour, if the flag is not specified, depends on the target.
 
@@ -366,8 +376,8 @@ overflow](../../reference/expressions/operator-expr.md#overflow). When
 overflow-checks are enabled, a panic will occur on overflow. This flag takes
 one of the following values:
 
-* `y`, `yes`, `on`, or no value: enable overflow checks.
-* `n`, `no`, or `off`: disable overflow checks.
+* `y`, `yes`, `on`, `true` or no value: enable overflow checks.
+* `n`, `no`, `off` or `false`: disable overflow checks.
 
 If not specified, overflow checks are enabled if
 [debug-assertions](#debug-assertions) are enabled, disabled otherwise.
@@ -399,8 +409,8 @@ for determining whether or not it is possible to statically or dynamically
 link with a dependency. For example, `cdylib` crate types may only use static
 linkage. This flag takes one of the following values:
 
-* `y`, `yes`, `on`, or no value: use dynamic linking.
-* `n`, `no`, or `off`: use static linking (the default).
+* `y`, `yes`, `on`, `true` or no value: use dynamic linking.
+* `n`, `no`, `off` or `false`: use static linking (the default).
 
 ## profile-generate
 
@@ -433,6 +443,10 @@ machine instructions need to use relative addressing modes.  \
 Equivalent to the "uppercase" `-fPIC` or `-fPIE` options in other compilers,
 depending on the produced crate types.  \
 This is the default model for majority of supported targets.
+
+- `pie` - position independent executable, relocatable code but without support for symbol
+interpositioning (replacing symbols by name using `LD_PRELOAD` and similar). Equivalent to the "uppercase" `-fPIE` option in other compilers. `pie`
+code cannot be linked into shared libraries (you'll get a linking error on attempt to do this).
 
 #### Special relocation models
 
@@ -473,24 +487,24 @@ The list of passes should be separated by spaces.
 This flag controls whether [`rpath`](https://en.wikipedia.org/wiki/Rpath) is
 enabled. It takes one of the following values:
 
-* `y`, `yes`, `on`, or no value: enable rpath.
-* `n`, `no`, or `off`: disable rpath (the default).
+* `y`, `yes`, `on`, `true` or no value: enable rpath.
+* `n`, `no`, `off` or `false`: disable rpath (the default).
 
 ## save-temps
 
 This flag controls whether temporary files generated during compilation are
 deleted once compilation finishes. It takes one of the following values:
 
-* `y`, `yes`, `on`, or no value: save temporary files.
-* `n`, `no`, or `off`: delete temporary files (the default).
+* `y`, `yes`, `on`, `true` or no value: save temporary files.
+* `n`, `no`, `off` or `false`: delete temporary files (the default).
 
 ## soft-float
 
 This option controls whether `rustc` generates code that emulates floating
 point instructions in software. It takes one of the following values:
 
-* `y`, `yes`, `on`, or no value: use soft floats.
-* `n`, `no`, or `off`: use hardware floats (the default).
+* `y`, `yes`, `on`, `true` or no value: use soft floats.
+* `n`, `no`, `off` or `false`: use hardware floats (the default).
 
 ## split-debuginfo
 
@@ -517,8 +531,41 @@ platforms. Possible values are:
   debug information. On other Unix platforms this means that `*.dwo` files will
   contain debug information.
 
-Note that `packed` and `unpacked` are gated behind `-Z unstable-options` on
-non-macOS platforms at this time.
+Note that all three options are supported on Linux and Apple platforms,
+`packed` is supported on Windows-MSVC, and all other platforms support `off`.
+Attempting to use an unsupported option requires using the nightly channel
+with the `-Z unstable-options` flag.
+
+## strip
+
+The option `-C strip=val` controls stripping of debuginfo and similar auxiliary
+data from binaries during linking.
+
+Supported values for this option are:
+
+- `none` - debuginfo and symbols (if they exist) are copied to the produced
+  binary or separate files depending on the target (e.g. `.pdb` files in case
+  of MSVC).
+- `debuginfo` - debuginfo sections and debuginfo symbols from the symbol table
+  section are stripped at link time and are not copied to the produced binary
+  or separate files.
+- `symbols` - same as `debuginfo`, but the rest of the symbol table section is
+  stripped as well if the linker supports it.
+
+## symbol-mangling-version
+
+This option controls the [name mangling] format for encoding Rust item names
+for the purpose of generating object code and linking.
+
+Supported values for this option are:
+
+* `v0` — The "v0" mangling scheme. The specific format is not specified at
+  this time.
+
+The default, if not specified, will use a compiler-chosen default which may
+change in the future.
+
+[name mangling]: https://en.wikipedia.org/wiki/Name_mangling
 
 ## target-cpu
 
@@ -576,5 +623,6 @@ effective only for x86 targets.
 
 [option-emit]: ../command-line-arguments.md#option-emit
 [option-o-optimize]: ../command-line-arguments.md#option-o-optimize
+[instrumentation-based code coverage]: ../instrument-coverage.md
 [profile-guided optimization]: ../profile-guided-optimization.md
 [option-g-debug]: ../command-line-arguments.md#option-g-debug

@@ -57,13 +57,13 @@ release: 1.17.0
 LLVM version: 3.9
 ```
 
-## `-o`/`--output`: output path
+## `-o`/`--out-dir`: output directory path
 
 Using this flag looks like this:
 
 ```bash
 $ rustdoc src/lib.rs -o target/doc
-$ rustdoc src/lib.rs --output target/doc
+$ rustdoc src/lib.rs --out-dir target/doc
 ```
 
 By default, `rustdoc`'s output appears in a directory named `doc` in
@@ -94,7 +94,7 @@ $ rustdoc src/lib.rs --document-private-items
 By default, `rustdoc` only documents items that are publicly reachable.
 
 ```rust
-pub fn public() {} // this item is public and will documented
+pub fn public() {} // this item is public and will be documented
 mod private { // this item is private and will not be documented
     pub fn unreachable() {} // this item is public, but unreachable, so it will not be documented
 }
@@ -177,7 +177,7 @@ $ rustdoc src/lib.rs --test
 ```
 
 This flag will run your code examples as tests. For more, see [the chapter
-on documentation tests](documentation-tests.md).
+on documentation tests](write-documentation/documentation-tests.md).
 
 See also `--test-args`.
 
@@ -190,7 +190,7 @@ $ rustdoc src/lib.rs --test --test-args ignored
 ```
 
 This flag will pass options to the test runner when running documentation tests.
-For more, see [the chapter on documentation tests](documentation-tests.md).
+For more, see [the chapter on documentation tests](write-documentation/documentation-tests.md).
 
 See also `--test`.
 
@@ -336,7 +336,7 @@ $ rustdoc src/lib.rs --sysroot /path/to/sysroot
 Similar to `rustc --sysroot`, this lets you change the sysroot `rustdoc` uses
 when compiling your code.
 
-### `--edition`: control the edition of docs and doctests
+## `--edition`: control the edition of docs and doctests
 
 Using this flag looks like this:
 
@@ -381,7 +381,7 @@ the same CSS rules as the official `light` theme.
 `--check-theme` flag, it discards all other flags and only performs the CSS rule
 comparison operation.
 
-### `--crate-version`: control the crate version
+## `--crate-version`: control the crate version
 
 Using this flag looks like this:
 
@@ -403,12 +403,12 @@ encoded as UTF-8.
 ## `--passes`: add more rustdoc passes
 
 This flag is **deprecated**.
-For more details on passes, see [the chapter on them](passes.md).
+For more details on passes, see [the chapter on them](deprecated-features.md#passes).
 
 ## `--no-defaults`: don't run default passes
 
 This flag is **deprecated**.
-For more details on passes, see [the chapter on them](passes.md).
+For more details on passes, see [the chapter on them](deprecated-features.md#passes).
 
 ## `-r`/`--input-format`: input format
 

@@ -1,3 +1,4 @@
+use core::num::NonZeroUsize;
 use super::*;
 
 #[test]
@@ -26,7 +27,6 @@ fn test_range() {
 
 #[test]
 fn test_char_range() {
-    use std::char;
     // Miri is too slow
     let from = if cfg!(miri) { char::from_u32(0xD800 - 10).unwrap() } else { '\0' };
     let to = if cfg!(miri) { char::from_u32(0xDFFF + 10).unwrap() } else { char::MAX };
@@ -283,6 +283,32 @@ fn test_range_step() {
     assert_eq!((i8::MIN..i8::MAX).step_by(-(i8::MIN as i32) as usize).size_hint(), (2, Some(2)));
     assert_eq!((i16::MIN..i16::MAX).step_by(i16::MAX as usize).size_hint(), (3, Some(3)));
     assert_eq!((isize::MIN..isize::MAX).step_by(1).size_hint(), (usize::MAX, Some(usize::MAX)));
+}
+
+#[test]
+fn test_range_advance_by() {
+    let mut r = 0..usize::MAX;
+    assert_eq!(Ok(()), r.advance_by(0));
+    assert_eq!(Ok(()), r.advance_back_by(0));
+
+    assert_eq!(r.len(), usize::MAX);
+
+    assert_eq!(Ok(()), r.advance_by(1));
+    assert_eq!(Ok(()), r.advance_back_by(1));
+
+    assert_eq!((r.start, r.end), (1, usize::MAX - 1));
+
+    assert_eq!(Err(NonZeroUsize::new(2).unwrap()), r.advance_by(usize::MAX));
+
+    assert_eq!(Ok(()), r.advance_by(0));
+    assert_eq!(Ok(()), r.advance_back_by(0));
+
+    let mut r = 0u128..u128::MAX;
+
+    assert_eq!(Ok(()), r.advance_by(usize::MAX));
+    assert_eq!(Ok(()), r.advance_back_by(usize::MAX));
+
+    assert_eq!((r.start, r.end), (0u128 + usize::MAX as u128, u128::MAX - usize::MAX as u128));
 }
 
 #[test]

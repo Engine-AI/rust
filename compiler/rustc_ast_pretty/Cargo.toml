@@ -1,13 +1,11 @@
 [package]
-authors = ["The Rust Project Developers"]
 name = "rustc_ast_pretty"
 version = "0.0.0"
-edition = "2018"
+edition = "2021"
 
 [lib]
-doctest = false
 
 [dependencies]
-tracing = "0.1"
-rustc_span = { path = "../rustc_span" }
 rustc_ast = { path = "../rustc_ast" }
+rustc_span = { path = "../rustc_span" }
+thin-vec = "0.2.12"

@@ -1,52 +1,71 @@
-use clippy_utils::diagnostics::{span_lint_and_sugg, span_lint_and_then};
+use clippy_utils::diagnostics::{span_lint_and_sugg, span_lint_hir_and_then};
+use clippy_utils::eq_expr_value;
 use clippy_utils::source::snippet_opt;
 use clippy_utils::ty::{implements_trait, is_type_diagnostic_item};
-use clippy_utils::{eq_expr_value, get_trait_def_id, in_macro, paths};
 use if_chain::if_chain;
 use rustc_ast::ast::LitKind;
 use rustc_errors::Applicability;
-use rustc_hir::intravisit::{walk_expr, FnKind, NestedVisitorMap, Visitor};
-use rustc_hir::{BinOpKind, Body, Expr, ExprKind, FnDecl, HirId, UnOp};
+use rustc_hir::intravisit::{walk_expr, FnKind, Visitor};
+use rustc_hir::{BinOpKind, Body, Expr, ExprKind, FnDecl, UnOp};
 use rustc_lint::{LateContext, LateLintPass};
-use rustc_middle::hir::map::Map;
 use rustc_session::{declare_lint_pass, declare_tool_lint};
+use rustc_span::def_id::LocalDefId;
 use rustc_span::source_map::Span;
 use rustc_span::sym;
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for boolean expressions that can be written more
+    /// ### What it does
+    /// Checks for boolean expressions that can be written more
     /// concisely.
     ///
-    /// **Why is this bad?** Readability of boolean expressions suffers from
+    /// ### Why is this bad?
+    /// Readability of boolean expressions suffers from
     /// unnecessary duplication.
     ///
-    /// **Known problems:** Ignores short circuiting behavior of `||` and
+    /// ### Known problems
+    /// Ignores short circuiting behavior of `||` and
     /// `&&`. Ignores `|`, `&` and `^`.
     ///
-    /// **Example:**
+    /// ### Example
     /// ```ignore
-    /// if a && true  // should be: if a
-    /// if !(a == b)  // should be: if a != b
+    /// if a && true {}
+    /// if !(a == b) {}
     /// ```
+    ///
+    /// Use instead:
+    /// ```rust,ignore
+    /// if a {}
+    /// if a != b {}
+    /// ```
+    #[clippy::version = "pre 1.29.0"]
     pub NONMINIMAL_BOOL,
     complexity,
     "boolean expressions that can be written more concisely"
 }
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for boolean expressions that contain terminals that
+    /// ### What it does
+    /// Checks for boolean expressions that contain terminals that
     /// can be eliminated.
     ///
-    /// **Why is this bad?** This is most likely a logic bug.
+    /// ### Why is this bad?
+    /// This is most likely a logic bug.
     ///
-    /// **Known problems:** Ignores short circuiting behavior.
+    /// ### Known problems
+    /// Ignores short circuiting behavior.
     ///
-    /// **Example:**
-    /// ```ignore
+    /// ### Example
+    /// ```rust,ignore
+    /// // The `b` is unnecessary, the expression is equivalent to `if a`.
     /// if a && b || a { ... }
     /// ```
-    /// The `b` is unnecessary, the expression is equivalent to `if a`.
-    pub LOGIC_BUG,
+    ///
+    /// Use instead:
+    /// ```rust,ignore
+    /// if a {}
+    /// ```
+    #[clippy::version = "pre 1.29.0"]
+    pub OVERLY_COMPLEX_BOOL_EXPR,
     correctness,
     "boolean expressions that contain terminals which can be eliminated"
 }
@@ -54,7 +73,7 @@ declare_clippy_lint! {
 // For each pairs, both orders are considered.
 const METHODS_WITH_NEGATION: [(&str, &str); 2] = [("is_some", "is_none"), ("is_err", "is_ok")];
 
-declare_lint_pass!(NonminimalBool => [NONMINIMAL_BOOL, LOGIC_BUG]);
+declare_lint_pass!(NonminimalBool => [NONMINIMAL_BOOL, OVERLY_COMPLEX_BOOL_EXPR]);
 
 impl<'tcx> LateLintPass<'tcx> for NonminimalBool {
     fn check_fn(
@@ -64,9 +83,9 @@ impl<'tcx> LateLintPass<'tcx> for NonminimalBool {
         _: &'tcx FnDecl<'_>,
         body: &'tcx Body<'_>,
         _: Span,
-        _: HirId,
+        _: LocalDefId,
     ) {
-        NonminimalBoolVisitor { cx }.visit_body(body)
+        NonminimalBoolVisitor { cx }.visit_body(body);
     }
 }
 
@@ -110,7 +129,7 @@ impl<'a, 'tcx, 'v> Hir2Qmm<'a, 'tcx, 'v> {
         // prevent folding of `cfg!` macros and the like
         if !e.span.from_expansion() {
             match &e.kind {
-                ExprKind::Unary(UnOp::Not, inner) => return Ok(Bool::Not(box self.run(inner)?)),
+                ExprKind::Unary(UnOp::Not, inner) => return Ok(Bool::Not(Box::new(self.run(inner)?))),
                 ExprKind::Binary(binop, lhs, rhs) => match &binop.node {
                     BinOpKind::Or => {
                         return Ok(Bool::Or(self.extract(BinOpKind::Or, &[lhs, rhs], Vec::new())?));
@@ -130,7 +149,7 @@ impl<'a, 'tcx, 'v> Hir2Qmm<'a, 'tcx, 'v> {
         }
         for (n, expr) in self.terminals.iter().enumerate() {
             if eq_expr_value(self.cx, e, expr) {
-                #[allow(clippy::cast_possible_truncation)]
+                #[expect(clippy::cast_possible_truncation)]
                 return Ok(Bool::Term(n as u8));
             }
 
@@ -142,7 +161,7 @@ impl<'a, 'tcx, 'v> Hir2Qmm<'a, 'tcx, 'v> {
                 if eq_expr_value(self.cx, e_lhs, expr_lhs);
                 if eq_expr_value(self.cx, e_rhs, expr_rhs);
                 then {
-                    #[allow(clippy::cast_possible_truncation)]
+                    #[expect(clippy::cast_possible_truncation)]
                     return Ok(Bool::Not(Box::new(Bool::Term(n as u8))));
                 }
             }
@@ -150,7 +169,7 @@ impl<'a, 'tcx, 'v> Hir2Qmm<'a, 'tcx, 'v> {
         let n = self.terminals.len();
         self.terminals.push(e);
         if n < 32 {
-            #[allow(clippy::cast_possible_truncation)]
+            #[expect(clippy::cast_possible_truncation)]
             Ok(Bool::Term(n as u8))
         } else {
             Err("too many literals".to_owned())
@@ -184,7 +203,7 @@ impl<'a, 'tcx, 'v> SuggestContext<'a, 'tcx, 'v> {
                 Term(n) => {
                     let terminal = self.terminals[n as usize];
                     if let Some(str) = simplify_not(self.cx, terminal) {
-                        self.output.push_str(&str)
+                        self.output.push_str(&str);
                     } else {
                         self.output.push('!');
                         let snip = snippet_opt(self.cx, terminal.span)?;
@@ -219,7 +238,7 @@ impl<'a, 'tcx, 'v> SuggestContext<'a, 'tcx, 'v> {
                 }
             },
             &Term(n) => {
-                let snip = snippet_opt(self.cx, self.terminals[n as usize].span)?;
+                let snip = snippet_opt(self.cx, self.terminals[n as usize].span.source_callsite())?;
                 self.output.push_str(&snip);
             },
         }
@@ -245,29 +264,28 @@ fn simplify_not(cx: &LateContext<'_>, expr: &Expr<'_>) -> Option<String> {
             }
             .and_then(|op| {
                 Some(format!(
-                    "{}{}{}",
+                    "{}{op}{}",
                     snippet_opt(cx, lhs.span)?,
-                    op,
                     snippet_opt(cx, rhs.span)?
                 ))
             })
         },
-        ExprKind::MethodCall(path, _, args, _) if args.len() == 1 => {
-            let type_of_receiver = cx.typeck_results().expr_ty(&args[0]);
-            if !is_type_diagnostic_item(cx, type_of_receiver, sym::option_type)
-                && !is_type_diagnostic_item(cx, type_of_receiver, sym::result_type)
+        ExprKind::MethodCall(path, receiver, [], _) => {
+            let type_of_receiver = cx.typeck_results().expr_ty(receiver);
+            if !is_type_diagnostic_item(cx, type_of_receiver, sym::Option)
+                && !is_type_diagnostic_item(cx, type_of_receiver, sym::Result)
             {
                 return None;
             }
             METHODS_WITH_NEGATION
                 .iter()
-                .cloned()
+                .copied()
                 .flat_map(|(a, b)| vec![(a, b), (b, a)])
                 .find(|&(a, _)| {
-                    let path: &str = &path.ident.name.as_str();
+                    let path: &str = path.ident.name.as_str();
                     a == path
                 })
-                .and_then(|(_, neg_method)| Some(format!("{}.{}()", snippet_opt(cx, args[0].span)?, neg_method)))
+                .and_then(|(_, neg_method)| Some(format!("{}.{neg_method}()", snippet_opt(cx, receiver.span)?)))
         },
         _ => None,
     }
@@ -376,9 +394,10 @@ impl<'a, 'tcx> NonminimalBoolVisitor<'a, 'tcx> {
                         continue 'simplified;
                     }
                     if stats.terminals[i] != 0 && simplified_stats.terminals[i] == 0 {
-                        span_lint_and_then(
+                        span_lint_hir_and_then(
                             self.cx,
-                            LOGIC_BUG,
+                            OVERLY_COMPLEX_BOOL_EXPR,
+                            e.hir_id,
                             e.span,
                             "this boolean expression contains a logic bug",
                             |diag| {
@@ -411,9 +430,10 @@ impl<'a, 'tcx> NonminimalBoolVisitor<'a, 'tcx> {
                 }
             }
             let nonminimal_bool_lint = |suggestions: Vec<_>| {
-                span_lint_and_then(
+                span_lint_hir_and_then(
                     self.cx,
                     NONMINIMAL_BOOL,
+                    e.hir_id,
                     e.span,
                     "this boolean expression can be simplified",
                     |diag| {
@@ -444,34 +464,29 @@ impl<'a, 'tcx> NonminimalBoolVisitor<'a, 'tcx> {
 }
 
 impl<'a, 'tcx> Visitor<'tcx> for NonminimalBoolVisitor<'a, 'tcx> {
-    type Map = Map<'tcx>;
-
     fn visit_expr(&mut self, e: &'tcx Expr<'_>) {
-        if in_macro(e.span) {
-            return;
-        }
-        match &e.kind {
-            ExprKind::Binary(binop, _, _) if binop.node == BinOpKind::Or || binop.node == BinOpKind::And => {
-                self.bool_expr(e)
-            },
-            ExprKind::Unary(UnOp::Not, inner) => {
-                if self.cx.typeck_results().node_types()[inner.hir_id].is_bool() {
+        if !e.span.from_expansion() {
+            match &e.kind {
+                ExprKind::Binary(binop, _, _) if binop.node == BinOpKind::Or || binop.node == BinOpKind::And => {
                     self.bool_expr(e);
-                } else {
-                    walk_expr(self, e);
-                }
-            },
-            _ => walk_expr(self, e),
+                },
+                ExprKind::Unary(UnOp::Not, inner) => {
+                    if self.cx.typeck_results().node_types()[inner.hir_id].is_bool() {
+                        self.bool_expr(e);
+                    }
+                },
+                _ => {},
+            }
         }
-    }
-    fn nested_visit_map(&mut self) -> NestedVisitorMap<Self::Map> {
-        NestedVisitorMap::None
+        walk_expr(self, e);
     }
 }
 
-fn implements_ord<'tcx>(cx: &LateContext<'tcx>, expr: &Expr<'_>) -> bool {
+fn implements_ord(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
     let ty = cx.typeck_results().expr_ty(expr);
-    get_trait_def_id(cx, &paths::ORD).map_or(false, |id| implements_trait(cx, ty, id, &[]))
+    cx.tcx
+        .get_diagnostic_item(sym::Ord)
+        .map_or(false, |id| implements_trait(cx, ty, id, &[]))
 }
 
 struct NotSimplificationVisitor<'a, 'tcx> {
@@ -479,26 +494,22 @@ struct NotSimplificationVisitor<'a, 'tcx> {
 }
 
 impl<'a, 'tcx> Visitor<'tcx> for NotSimplificationVisitor<'a, 'tcx> {
-    type Map = Map<'tcx>;
-
     fn visit_expr(&mut self, expr: &'tcx Expr<'_>) {
-        if let ExprKind::Unary(UnOp::Not, inner) = &expr.kind {
-            if let Some(suggestion) = simplify_not(self.cx, inner) {
-                span_lint_and_sugg(
-                    self.cx,
-                    NONMINIMAL_BOOL,
-                    expr.span,
-                    "this boolean expression can be simplified",
-                    "try",
-                    suggestion,
-                    Applicability::MachineApplicable,
-                );
-            }
+        if let ExprKind::Unary(UnOp::Not, inner) = &expr.kind &&
+            !inner.span.from_expansion() &&
+            let Some(suggestion) = simplify_not(self.cx, inner)
+        {
+            span_lint_and_sugg(
+                self.cx,
+                NONMINIMAL_BOOL,
+                expr.span,
+                "this boolean expression can be simplified",
+                "try",
+                suggestion,
+                Applicability::MachineApplicable,
+            );
         }
 
         walk_expr(self, expr);
-    }
-    fn nested_visit_map(&mut self) -> NestedVisitorMap<Self::Map> {
-        NestedVisitorMap::None
     }
 }

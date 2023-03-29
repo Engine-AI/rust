@@ -1,7 +1,8 @@
 // These functions are used by macro expansion for bug! and span_bug!
 
 use crate::ty::{tls, TyCtxt};
-use rustc_span::{MultiSpan, Span};
+use rustc_errors::MultiSpan;
+use rustc_span::Span;
 use std::fmt;
 use std::panic::{panic_any, Location};
 
@@ -34,8 +35,7 @@ fn opt_span_bug_fmt<S: Into<MultiSpan>>(
             (Some(tcx), None) => tcx.sess.diagnostic().bug(&msg),
             (None, _) => panic_any(msg),
         }
-    });
-    unreachable!();
+    })
 }
 
 /// A query to trigger a `delay_span_bug`. Clearly, if one has a `tcx` one can already trigger a

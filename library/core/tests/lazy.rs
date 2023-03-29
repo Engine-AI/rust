@@ -1,6 +1,5 @@
 use core::{
-    cell::Cell,
-    lazy::{Lazy, OnceCell},
+    cell::{Cell, LazyCell, OnceCell},
     sync::atomic::{AtomicUsize, Ordering::SeqCst},
 };
 
@@ -48,6 +47,12 @@ fn unsync_once_cell_drop_empty() {
 }
 
 #[test]
+const fn once_cell_const() {
+    let _once_cell: OnceCell<u32> = OnceCell::new();
+    let _once_cell: OnceCell<u32> = OnceCell::from(32);
+}
+
+#[test]
 fn clone() {
     let s = OnceCell::new();
     let c = s.clone();
@@ -85,7 +90,7 @@ fn into_inner() {
 #[test]
 fn lazy_new() {
     let called = Cell::new(0);
-    let x = Lazy::new(|| {
+    let x = LazyCell::new(|| {
         called.set(called.get() + 1);
         92
     });
@@ -101,13 +106,19 @@ fn lazy_new() {
     assert_eq!(called.get(), 1);
 }
 
+// Check that we can infer `T` from closure's type.
+#[test]
+fn lazy_type_inference() {
+    let _ = LazyCell::new(|| ());
+}
+
 #[test]
 fn aliasing_in_get() {
     let x = OnceCell::new();
     x.set(42).unwrap();
     let at_x = x.get().unwrap(); // --- (shared) borrow of inner `Option<T>` --+
     let _ = x.set(27); // <-- temporary (unique) borrow of inner `Option<T>`   |
-    println!("{}", at_x); // <------- up until here ---------------------------+
+    println!("{at_x}"); // <------- up until here ---------------------------+
 }
 
 #[test]

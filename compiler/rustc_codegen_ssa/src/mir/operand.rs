@@ -8,9 +8,9 @@ use crate::MemFlags;
 
 use rustc_middle::mir;
 use rustc_middle::mir::interpret::{ConstValue, Pointer, Scalar};
-use rustc_middle::ty::layout::TyAndLayout;
+use rustc_middle::ty::layout::{LayoutOf, TyAndLayout};
 use rustc_middle::ty::Ty;
-use rustc_target::abi::{Abi, Align, LayoutOf, Size};
+use rustc_target::abi::{Abi, Align, Size};
 
 use std::fmt;
 
@@ -40,14 +40,14 @@ pub enum OperandValue<V> {
 /// instead.
 #[derive(Copy, Clone)]
 pub struct OperandRef<'tcx, V> {
-    // The value.
+    /// The value.
     pub val: OperandValue<V>,
 
-    // The layout of value, based on its Rust type.
+    /// The layout of value, based on its Rust type.
     pub layout: TyAndLayout<'tcx>,
 }
 
-impl<V: CodegenObject> fmt::Debug for OperandRef<'tcx, V> {
+impl<V: CodegenObject> fmt::Debug for OperandRef<'_, V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "OperandRef({:?} @ {:?})", self.val, self.layout)
     }
@@ -60,7 +60,7 @@ impl<'a, 'tcx, V: CodegenObject> OperandRef<'tcx, V> {
     ) -> OperandRef<'tcx, V> {
         assert!(layout.is_zst());
         OperandRef {
-            val: OperandValue::Immediate(bx.const_undef(bx.immediate_backend_type(layout))),
+            val: OperandValue::Immediate(bx.const_poison(bx.immediate_backend_type(layout))),
             layout,
         }
     }
@@ -72,28 +72,23 @@ impl<'a, 'tcx, V: CodegenObject> OperandRef<'tcx, V> {
     ) -> Self {
         let layout = bx.layout_of(ty);
 
-        if layout.is_zst() {
-            return OperandRef::new_zst(bx, layout);
-        }
-
         let val = match val {
             ConstValue::Scalar(x) => {
-                let scalar = match layout.abi {
-                    Abi::Scalar(ref x) => x,
-                    _ => bug!("from_const: invalid ByVal layout: {:#?}", layout),
+                let Abi::Scalar(scalar) = layout.abi else {
+                    bug!("from_const: invalid ByVal layout: {:#?}", layout);
                 };
                 let llval = bx.scalar_to_backend(x, scalar, bx.immediate_backend_type(layout));
                 OperandValue::Immediate(llval)
             }
+            ConstValue::ZeroSized => return OperandRef::new_zst(bx, layout),
             ConstValue::Slice { data, start, end } => {
-                let a_scalar = match layout.abi {
-                    Abi::ScalarPair(ref a, _) => a,
-                    _ => bug!("from_const: invalid ScalarPair layout: {:#?}", layout),
+                let Abi::ScalarPair(a_scalar, _) = layout.abi else {
+                    bug!("from_const: invalid ScalarPair layout: {:#?}", layout);
                 };
-                let a = Scalar::from(Pointer::new(
-                    bx.tcx().create_memory_alloc(data),
-                    Size::from_bytes(start),
-                ));
+                let a = Scalar::from_pointer(
+                    Pointer::new(bx.tcx().create_memory_alloc(data), Size::from_bytes(start)),
+                    &bx.tcx(),
+                );
                 let a_llval = bx.scalar_to_backend(
                     a,
                     a_scalar,
@@ -120,12 +115,17 @@ impl<'a, 'tcx, V: CodegenObject> OperandRef<'tcx, V> {
     }
 
     pub fn deref<Cx: LayoutTypeMethods<'tcx>>(self, cx: &Cx) -> PlaceRef<'tcx, V> {
+        if self.layout.ty.is_box() {
+            bug!("dereferencing {:?} in codegen", self.layout.ty);
+        }
+
         let projected_ty = self
             .layout
             .ty
             .builtin_deref(true)
             .unwrap_or_else(|| bug!("deref of non-pointer {:?}", self))
             .ty;
+
         let (llptr, llextra) = match self.val {
             OperandValue::Immediate(llptr) => (llptr, None),
             OperandValue::Pair(llptr, llextra) => (llptr, Some(llextra)),
@@ -145,7 +145,7 @@ impl<'a, 'tcx, V: CodegenObject> OperandRef<'tcx, V> {
             let llty = bx.cx().backend_type(self.layout);
             debug!("Operand::immediate_or_packed_pair: packing {:?} into {:?}", self, llty);
             // Reconstruct the immediate aggregate.
-            let mut llpair = bx.cx().const_undef(llty);
+            let mut llpair = bx.cx().const_poison(llty);
             let imm_a = bx.from_immediate(a);
             let imm_b = bx.from_immediate(b);
             llpair = bx.insert_value(llpair, imm_a, 0);
@@ -162,7 +162,7 @@ impl<'a, 'tcx, V: CodegenObject> OperandRef<'tcx, V> {
         llval: V,
         layout: TyAndLayout<'tcx>,
     ) -> Self {
-        let val = if let Abi::ScalarPair(ref a, ref b) = layout.abi {
+        let val = if let Abi::ScalarPair(a, b) = layout.abi {
             debug!("Operand::from_immediate_or_packed_pair: unpacking {:?} @ {:?}", llval, layout);
 
             // Deconstruct the immediate aggregate.
@@ -185,7 +185,7 @@ impl<'a, 'tcx, V: CodegenObject> OperandRef<'tcx, V> {
         let field = self.layout.field(bx.cx(), i);
         let offset = self.layout.fields.offset(i);
 
-        let mut val = match (self.val, &self.layout.abi) {
+        let mut val = match (self.val, self.layout.abi) {
             // If the field is ZST, it has no data.
             _ if field.is_zst() => {
                 return OperandRef::new_zst(bx, field);
@@ -200,26 +200,26 @@ impl<'a, 'tcx, V: CodegenObject> OperandRef<'tcx, V> {
             }
 
             // Extract a scalar component from a pair.
-            (OperandValue::Pair(a_llval, b_llval), &Abi::ScalarPair(ref a, ref b)) => {
+            (OperandValue::Pair(a_llval, b_llval), Abi::ScalarPair(a, b)) => {
                 if offset.bytes() == 0 {
-                    assert_eq!(field.size, a.value.size(bx.cx()));
+                    assert_eq!(field.size, a.size(bx.cx()));
                     OperandValue::Immediate(a_llval)
                 } else {
-                    assert_eq!(offset, a.value.size(bx.cx()).align_to(b.value.align(bx.cx()).abi));
-                    assert_eq!(field.size, b.value.size(bx.cx()));
+                    assert_eq!(offset, a.size(bx.cx()).align_to(b.align(bx.cx()).abi));
+                    assert_eq!(field.size, b.size(bx.cx()));
                     OperandValue::Immediate(b_llval)
                 }
             }
 
             // `#[repr(simd)]` types are also immediate.
-            (OperandValue::Immediate(llval), &Abi::Vector { .. }) => {
+            (OperandValue::Immediate(llval), Abi::Vector { .. }) => {
                 OperandValue::Immediate(bx.extract_element(llval, bx.cx().const_usize(i as u64)))
             }
 
             _ => bug!("OperandRef::extract_field({:?}): not applicable", self),
         };
 
-        match (&mut val, &field.abi) {
+        match (&mut val, field.abi) {
             (OperandValue::Immediate(llval), _) => {
                 // Bools in union fields needs to be truncated.
                 *llval = bx.to_immediate(*llval, field);
@@ -289,6 +289,14 @@ impl<'a, 'tcx, V: CodegenObject> OperandValue<V> {
         }
         match self {
             OperandValue::Ref(r, None, source_align) => {
+                if flags.contains(MemFlags::NONTEMPORAL) {
+                    // HACK(nox): This is inefficient but there is no nontemporal memcpy.
+                    let ty = bx.backend_type(dest.layout);
+                    let ptr = bx.pointercast(r, bx.type_ptr_to(ty));
+                    let val = bx.load(ty, ptr, source_align);
+                    bx.store_with_flags(val, dest.llval, dest.align, flags);
+                    return;
+                }
                 base::memcpy_ty(bx, dest.llval, dest.align, r, source_align, dest.layout, flags)
             }
             OperandValue::Ref(_, Some(_), _) => {
@@ -299,18 +307,18 @@ impl<'a, 'tcx, V: CodegenObject> OperandValue<V> {
                 bx.store_with_flags(val, dest.llval, dest.align, flags);
             }
             OperandValue::Pair(a, b) => {
-                let (a_scalar, b_scalar) = match dest.layout.abi {
-                    Abi::ScalarPair(ref a, ref b) => (a, b),
-                    _ => bug!("store_with_flags: invalid ScalarPair layout: {:#?}", dest.layout),
+                let Abi::ScalarPair(a_scalar, b_scalar) = dest.layout.abi else {
+                    bug!("store_with_flags: invalid ScalarPair layout: {:#?}", dest.layout);
                 };
-                let b_offset = a_scalar.value.size(bx).align_to(b_scalar.value.align(bx).abi);
+                let ty = bx.backend_type(dest.layout);
+                let b_offset = a_scalar.size(bx).align_to(b_scalar.align(bx).abi);
 
-                let llptr = bx.struct_gep(dest.llval, 0);
+                let llptr = bx.struct_gep(ty, dest.llval, 0);
                 let val = bx.from_immediate(a);
                 let align = dest.align;
                 bx.store_with_flags(val, llptr, align, flags);
 
-                let llptr = bx.struct_gep(dest.llval, 1);
+                let llptr = bx.struct_gep(ty, dest.llval, 1);
                 let val = bx.from_immediate(b);
                 let align = dest.align.restrict_for_offset(b_offset);
                 bx.store_with_flags(val, llptr, align, flags);
@@ -334,9 +342,7 @@ impl<'a, 'tcx, V: CodegenObject> OperandValue<V> {
             .unwrap_or_else(|| bug!("indirect_dest has non-pointer type: {:?}", indirect_dest))
             .ty;
 
-        let (llptr, llextra) = if let OperandValue::Ref(llptr, Some(llextra), _) = self {
-            (llptr, llextra)
-        } else {
+        let OperandValue::Ref(llptr, Some(llextra), _) = self else {
             bug!("store_unsized called with a sized value")
         };
 
@@ -346,7 +352,7 @@ impl<'a, 'tcx, V: CodegenObject> OperandValue<V> {
 
         // Allocate an appropriate region on the stack, and copy the value into it
         let (llsize, _) = glue::size_and_align_of_dst(bx, unsized_ty, Some(llextra));
-        let lldst = bx.array_alloca(bx.cx().type_i8(), llsize, max_align);
+        let lldst = bx.byte_array_alloca(llsize, max_align);
         bx.memcpy(lldst, max_align, llptr, min_align, llsize, flags);
 
         // Store the allocated region and the extra to the indirect place.
@@ -364,7 +370,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         debug!("maybe_codegen_consume_direct(place_ref={:?})", place_ref);
 
         match self.locals[place_ref.local] {
-            LocalRef::Operand(Some(mut o)) => {
+            LocalRef::Operand(mut o) => {
                 // Moves out of scalar and scalar pair fields are trivial.
                 for elem in place_ref.projection.iter() {
                     match elem {
@@ -389,7 +395,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
 
                 Some(o)
             }
-            LocalRef::Operand(None) => {
+            LocalRef::PendingOperand => {
                 bug!("use of {:?} before def", place_ref);
             }
             LocalRef::Place(..) | LocalRef::UnsizedPlace(..) => {

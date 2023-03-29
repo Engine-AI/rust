@@ -13,11 +13,12 @@ use crate::sys::fd::FileDesc;
 use crate::sys::fs::File;
 use crate::sys::pipe::{self, AnonPipe};
 use crate::sys_common::process::{CommandEnv, CommandEnvs};
+use crate::sys_common::IntoInner;
 
 #[cfg(not(target_os = "fuchsia"))]
 use crate::sys::fs::OpenOptions;
 
-use libc::{c_char, c_int, gid_t, uid_t, EXIT_FAILURE, EXIT_SUCCESS};
+use libc::{c_char, c_int, gid_t, pid_t, uid_t, EXIT_FAILURE, EXIT_SUCCESS};
 
 cfg_if::cfg_if! {
     if #[cfg(target_os = "fuchsia")] {
@@ -34,23 +35,46 @@ cfg_if::cfg_if! {
 // Android with api less than 21 define sig* functions inline, so it is not
 // available for dynamic link. Implementing sigemptyset and sigaddset allow us
 // to support older Android version (independent of libc version).
-// The following implementations are based on https://git.io/vSkNf
+// The following implementations are based on
+// https://github.com/aosp-mirror/platform_bionic/blob/ad8dcd6023294b646e5a8288c0ed431b0845da49/libc/include/android/legacy_signal_inlines.h
 cfg_if::cfg_if! {
     if #[cfg(target_os = "android")] {
+        #[allow(dead_code)]
         pub unsafe fn sigemptyset(set: *mut libc::sigset_t) -> libc::c_int {
             set.write_bytes(0u8, 1);
             return 0;
         }
+
         #[allow(dead_code)]
         pub unsafe fn sigaddset(set: *mut libc::sigset_t, signum: libc::c_int) -> libc::c_int {
-            use crate::{slice, mem};
+            use crate::{
+                mem::{align_of, size_of},
+                slice,
+            };
+            use libc::{c_ulong, sigset_t};
 
-            let raw = slice::from_raw_parts_mut(set as *mut u8, mem::size_of::<libc::sigset_t>());
+            // The implementations from bionic (android libc) type pun `sigset_t` as an
+            // array of `c_ulong`. This works, but lets add a smoke check to make sure
+            // that doesn't change.
+            const _: () = assert!(
+                align_of::<c_ulong>() == align_of::<sigset_t>()
+                    && (size_of::<sigset_t>() % size_of::<c_ulong>()) == 0
+            );
+
             let bit = (signum - 1) as usize;
-            raw[bit / 8] |= 1 << (bit % 8);
+            if set.is_null() || bit >= (8 * size_of::<sigset_t>()) {
+                crate::sys::unix::os::set_errno(libc::EINVAL);
+                return -1;
+            }
+            let raw = slice::from_raw_parts_mut(
+                set as *mut c_ulong,
+                size_of::<sigset_t>() / size_of::<c_ulong>(),
+            );
+            const LONG_BIT: usize = size_of::<c_ulong>() * 8;
+            raw[bit / LONG_BIT] |= 1 << (bit % LONG_BIT);
             return 0;
         }
-    } else if #[cfg(not(target_os = "vxworks"))] {
+    } else {
         pub use libc::{sigemptyset, sigaddset};
     }
 }
@@ -70,6 +94,7 @@ pub struct Command {
     argv: Argv,
     env: CommandEnv,
 
+    program_kind: ProgramKind,
     cwd: Option<CString>,
     uid: Option<uid_t>,
     gid: Option<gid_t>,
@@ -79,6 +104,9 @@ pub struct Command {
     stdin: Option<Stdio>,
     stdout: Option<Stdio>,
     stderr: Option<Stdio>,
+    #[cfg(target_os = "linux")]
+    create_pidfd: bool,
+    pgroup: Option<pid_t>,
 }
 
 // Create a new type for argv, so that we can make it `Send` and `Sync`
@@ -116,6 +144,7 @@ pub enum ChildStdio {
     Null,
 }
 
+#[derive(Debug)]
 pub enum Stdio {
     Inherit,
     Null,
@@ -123,14 +152,40 @@ pub enum Stdio {
     Fd(FileDesc),
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ProgramKind {
+    /// A program that would be looked up on the PATH (e.g. `ls`)
+    PathLookup,
+    /// A relative path (e.g. `my-dir/foo`, `../foo`, `./foo`)
+    Relative,
+    /// An absolute path.
+    Absolute,
+}
+
+impl ProgramKind {
+    fn new(program: &OsStr) -> Self {
+        if program.bytes().starts_with(b"/") {
+            Self::Absolute
+        } else if program.bytes().contains(&b'/') {
+            // If the program has more than one component in it, it is a relative path.
+            Self::Relative
+        } else {
+            Self::PathLookup
+        }
+    }
+}
+
 impl Command {
+    #[cfg(not(target_os = "linux"))]
     pub fn new(program: &OsStr) -> Command {
         let mut saw_nul = false;
+        let program_kind = ProgramKind::new(program.as_ref());
         let program = os2c(program, &mut saw_nul);
         Command {
             argv: Argv(vec![program.as_ptr(), ptr::null()]),
             args: vec![program.clone()],
             program,
+            program_kind,
             env: Default::default(),
             cwd: None,
             uid: None,
@@ -141,6 +196,32 @@ impl Command {
             stdin: None,
             stdout: None,
             stderr: None,
+            pgroup: None,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn new(program: &OsStr) -> Command {
+        let mut saw_nul = false;
+        let program_kind = ProgramKind::new(program.as_ref());
+        let program = os2c(program, &mut saw_nul);
+        Command {
+            argv: Argv(vec![program.as_ptr(), ptr::null()]),
+            args: vec![program.clone()],
+            program,
+            program_kind,
+            env: Default::default(),
+            cwd: None,
+            uid: None,
+            gid: None,
+            saw_nul,
+            closures: Vec::new(),
+            groups: None,
+            stdin: None,
+            stdout: None,
+            stderr: None,
+            create_pidfd: false,
+            pgroup: None,
         }
     }
 
@@ -153,7 +234,7 @@ impl Command {
     }
 
     pub fn arg(&mut self, arg: &OsStr) {
-        // Overwrite the trailing NULL pointer in `argv` and then add a new null
+        // Overwrite the trailing null pointer in `argv` and then add a new null
         // pointer.
         let arg = os2c(arg, &mut self.saw_nul);
         self.argv.0[self.args.len()] = arg.as_ptr();
@@ -176,6 +257,25 @@ impl Command {
     pub fn groups(&mut self, groups: &[gid_t]) {
         self.groups = Some(Box::from(groups));
     }
+    pub fn pgroup(&mut self, pgroup: pid_t) {
+        self.pgroup = Some(pgroup);
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn create_pidfd(&mut self, val: bool) {
+        self.create_pidfd = val;
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[allow(dead_code)]
+    pub fn get_create_pidfd(&self) -> bool {
+        false
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn get_create_pidfd(&self) -> bool {
+        self.create_pidfd
+    }
 
     pub fn saw_nul(&self) -> bool {
         self.saw_nul
@@ -183,6 +283,11 @@ impl Command {
 
     pub fn get_program(&self) -> &OsStr {
         OsStr::from_bytes(self.program.as_bytes())
+    }
+
+    #[allow(dead_code)]
+    pub fn get_program_kind(&self) -> ProgramKind {
+        self.program_kind
     }
 
     pub fn get_args(&self) -> CommandArgs<'_> {
@@ -222,6 +327,10 @@ impl Command {
     #[allow(dead_code)]
     pub fn get_groups(&self) -> Option<&[gid_t]> {
         self.groups.as_deref()
+    }
+    #[allow(dead_code)]
+    pub fn get_pgroup(&self) -> Option<pid_t> {
+        self.pgroup
     }
 
     pub fn get_closures(&mut self) -> &mut Vec<Box<dyn FnMut() -> io::Result<()> + Send + Sync>> {
@@ -347,17 +456,17 @@ impl Stdio {
             // stderr. No matter which we dup first, the second will get
             // overwritten prematurely.
             Stdio::Fd(ref fd) => {
-                if fd.raw() >= 0 && fd.raw() <= libc::STDERR_FILENO {
+                if fd.as_raw_fd() >= 0 && fd.as_raw_fd() <= libc::STDERR_FILENO {
                     Ok((ChildStdio::Owned(fd.duplicate()?), None))
                 } else {
-                    Ok((ChildStdio::Explicit(fd.raw()), None))
+                    Ok((ChildStdio::Explicit(fd.as_raw_fd()), None))
                 }
             }
 
             Stdio::MakePipe => {
                 let (reader, writer) = pipe::anon_pipe()?;
                 let (ours, theirs) = if readable { (writer, reader) } else { (reader, writer) };
-                Ok((ChildStdio::Owned(theirs.into_fd()), Some(ours)))
+                Ok((ChildStdio::Owned(theirs.into_inner()), Some(ours)))
             }
 
             #[cfg(not(target_os = "fuchsia"))]
@@ -367,7 +476,7 @@ impl Stdio {
                 opts.write(!readable);
                 let path = unsafe { CStr::from_ptr(DEV_NULL.as_ptr() as *const _) };
                 let fd = File::open_c(&path, &opts)?;
-                Ok((ChildStdio::Owned(fd.into_fd()), None))
+                Ok((ChildStdio::Owned(fd.into_inner()), None))
             }
 
             #[cfg(target_os = "fuchsia")]
@@ -378,13 +487,13 @@ impl Stdio {
 
 impl From<AnonPipe> for Stdio {
     fn from(pipe: AnonPipe) -> Stdio {
-        Stdio::Fd(pipe.into_fd())
+        Stdio::Fd(pipe.into_inner())
     }
 }
 
 impl From<File> for Stdio {
     fn from(file: File) -> Stdio {
-        Stdio::Fd(file.into_fd())
+        Stdio::Fd(file.into_inner())
     }
 }
 
@@ -393,7 +502,7 @@ impl ChildStdio {
         match *self {
             ChildStdio::Inherit => None,
             ChildStdio::Explicit(fd) => Some(fd),
-            ChildStdio::Owned(ref fd) => Some(fd.raw()),
+            ChildStdio::Owned(ref fd) => Some(fd.as_raw_fd()),
 
             #[cfg(target_os = "fuchsia")]
             ChildStdio::Null => None,
@@ -402,21 +511,79 @@ impl ChildStdio {
 }
 
 impl fmt::Debug for Command {
+    // show all attributes but `self.closures` which does not implement `Debug`
+    // and `self.argv` which is not useful for debugging
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.program != self.args[0] {
-            write!(f, "[{:?}] ", self.program)?;
-        }
-        write!(f, "{:?}", self.args[0])?;
+        if f.alternate() {
+            let mut debug_command = f.debug_struct("Command");
+            debug_command.field("program", &self.program).field("args", &self.args);
+            if !self.env.is_unchanged() {
+                debug_command.field("env", &self.env);
+            }
 
-        for arg in &self.args[1..] {
-            write!(f, " {:?}", arg)?;
+            if self.cwd.is_some() {
+                debug_command.field("cwd", &self.cwd);
+            }
+            if self.uid.is_some() {
+                debug_command.field("uid", &self.uid);
+            }
+            if self.gid.is_some() {
+                debug_command.field("gid", &self.gid);
+            }
+
+            if self.groups.is_some() {
+                debug_command.field("groups", &self.groups);
+            }
+
+            if self.stdin.is_some() {
+                debug_command.field("stdin", &self.stdin);
+            }
+            if self.stdout.is_some() {
+                debug_command.field("stdout", &self.stdout);
+            }
+            if self.stderr.is_some() {
+                debug_command.field("stderr", &self.stderr);
+            }
+            if self.pgroup.is_some() {
+                debug_command.field("pgroup", &self.pgroup);
+            }
+
+            #[cfg(target_os = "linux")]
+            {
+                debug_command.field("create_pidfd", &self.create_pidfd);
+            }
+
+            debug_command.finish()
+        } else {
+            if let Some(ref cwd) = self.cwd {
+                write!(f, "cd {cwd:?} && ")?;
+            }
+            for (key, value_opt) in self.get_envs() {
+                if let Some(value) = value_opt {
+                    write!(f, "{}={value:?} ", key.to_string_lossy())?;
+                }
+            }
+            if self.program != self.args[0] {
+                write!(f, "[{:?}] ", self.program)?;
+            }
+            write!(f, "{:?}", self.args[0])?;
+
+            for arg in &self.args[1..] {
+                write!(f, " {:?}", arg)?;
+            }
+            Ok(())
         }
-        Ok(())
     }
 }
 
-#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+#[derive(PartialEq, Eq, Clone, Copy)]
 pub struct ExitCode(u8);
+
+impl fmt::Debug for ExitCode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("unix_exit_status").field(&self.0).finish()
+    }
+}
 
 impl ExitCode {
     pub const SUCCESS: ExitCode = ExitCode(EXIT_SUCCESS as _);
@@ -425,6 +592,12 @@ impl ExitCode {
     #[inline]
     pub fn as_i32(&self) -> i32 {
         self.0 as i32
+    }
+}
+
+impl From<u8> for ExitCode {
+    fn from(code: u8) -> Self {
+        Self(code)
     }
 }
 

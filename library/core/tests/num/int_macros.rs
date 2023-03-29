@@ -1,9 +1,9 @@
 macro_rules! int_module {
-    ($T:ident, $T_i:ident) => {
+    ($T:ident) => {
         #[cfg(test)]
         mod tests {
             use core::ops::{BitAnd, BitOr, BitXor, Not, Shl, Shr};
-            use core::$T_i::*;
+            use core::$T::*;
 
             use crate::num;
 
@@ -288,6 +288,81 @@ macro_rules! int_module {
                 assert_eq!(r.saturating_pow(2), 4 as $T);
                 assert_eq!(r.saturating_pow(3), -8 as $T);
                 assert_eq!(r.saturating_pow(0), 1 as $T);
+            }
+
+            #[test]
+            fn test_div_floor() {
+                let a: $T = 8;
+                let b = 3;
+                assert_eq!(a.div_floor(b), 2);
+                assert_eq!(a.div_floor(-b), -3);
+                assert_eq!((-a).div_floor(b), -3);
+                assert_eq!((-a).div_floor(-b), 2);
+            }
+
+            #[test]
+            fn test_div_ceil() {
+                let a: $T = 8;
+                let b = 3;
+                assert_eq!(a.div_ceil(b), 3);
+                assert_eq!(a.div_ceil(-b), -2);
+                assert_eq!((-a).div_ceil(b), -2);
+                assert_eq!((-a).div_ceil(-b), 3);
+            }
+
+            #[test]
+            fn test_next_multiple_of() {
+                assert_eq!((16 as $T).next_multiple_of(8), 16);
+                assert_eq!((23 as $T).next_multiple_of(8), 24);
+                assert_eq!((16 as $T).next_multiple_of(-8), 16);
+                assert_eq!((23 as $T).next_multiple_of(-8), 16);
+                assert_eq!((-16 as $T).next_multiple_of(8), -16);
+                assert_eq!((-23 as $T).next_multiple_of(8), -16);
+                assert_eq!((-16 as $T).next_multiple_of(-8), -16);
+                assert_eq!((-23 as $T).next_multiple_of(-8), -24);
+                assert_eq!(MIN.next_multiple_of(-1), MIN);
+            }
+
+            #[test]
+            fn test_checked_next_multiple_of() {
+                assert_eq!((16 as $T).checked_next_multiple_of(8), Some(16));
+                assert_eq!((23 as $T).checked_next_multiple_of(8), Some(24));
+                assert_eq!((16 as $T).checked_next_multiple_of(-8), Some(16));
+                assert_eq!((23 as $T).checked_next_multiple_of(-8), Some(16));
+                assert_eq!((-16 as $T).checked_next_multiple_of(8), Some(-16));
+                assert_eq!((-23 as $T).checked_next_multiple_of(8), Some(-16));
+                assert_eq!((-16 as $T).checked_next_multiple_of(-8), Some(-16));
+                assert_eq!((-23 as $T).checked_next_multiple_of(-8), Some(-24));
+                assert_eq!((1 as $T).checked_next_multiple_of(0), None);
+                assert_eq!(MAX.checked_next_multiple_of(2), None);
+                assert_eq!(MIN.checked_next_multiple_of(-3), None);
+                assert_eq!(MIN.checked_next_multiple_of(-1), Some(MIN));
+            }
+
+            #[test]
+            fn test_carrying_add() {
+                assert_eq!($T::MAX.carrying_add(1, false), ($T::MIN, true));
+                assert_eq!($T::MAX.carrying_add(0, true), ($T::MIN, true));
+                assert_eq!($T::MAX.carrying_add(1, true), ($T::MIN + 1, true));
+                assert_eq!($T::MAX.carrying_add(-1, false), ($T::MAX - 1, false));
+                assert_eq!($T::MAX.carrying_add(-1, true), ($T::MAX, false)); // no intermediate overflow
+                assert_eq!($T::MIN.carrying_add(-1, false), ($T::MAX, true));
+                assert_eq!($T::MIN.carrying_add(-1, true), ($T::MIN, false)); // no intermediate overflow
+                assert_eq!((0 as $T).carrying_add($T::MAX, true), ($T::MIN, true));
+                assert_eq!((0 as $T).carrying_add($T::MIN, true), ($T::MIN + 1, false));
+            }
+
+            #[test]
+            fn test_borrowing_sub() {
+                assert_eq!($T::MIN.borrowing_sub(1, false), ($T::MAX, true));
+                assert_eq!($T::MIN.borrowing_sub(0, true), ($T::MAX, true));
+                assert_eq!($T::MIN.borrowing_sub(1, true), ($T::MAX - 1, true));
+                assert_eq!($T::MIN.borrowing_sub(-1, false), ($T::MIN + 1, false));
+                assert_eq!($T::MIN.borrowing_sub(-1, true), ($T::MIN, false)); // no intermediate overflow
+                assert_eq!($T::MAX.borrowing_sub(-1, false), ($T::MIN, true));
+                assert_eq!($T::MAX.borrowing_sub(-1, true), ($T::MAX, false)); // no intermediate overflow
+                assert_eq!((0 as $T).borrowing_sub($T::MIN, false), ($T::MIN, true));
+                assert_eq!((0 as $T).borrowing_sub($T::MIN, true), ($T::MAX, false));
             }
         }
     };

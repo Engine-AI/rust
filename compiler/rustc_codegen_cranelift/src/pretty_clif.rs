@@ -57,17 +57,16 @@ use std::io::Write;
 
 use cranelift_codegen::{
     entity::SecondaryMap,
-    ir::{entities::AnyEntity, function::DisplayFunctionAnnotations},
+    ir::entities::AnyEntity,
     write::{FuncWriter, PlainWriter},
 };
 
-use rustc_middle::ty::layout::FnAbiExt;
-use rustc_session::config::OutputType;
-use rustc_target::abi::call::FnAbi;
+use rustc_middle::ty::layout::FnAbiOf;
+use rustc_session::config::{OutputFilenames, OutputType};
 
 use crate::prelude::*;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct CommentWriter {
     enabled: bool,
     global_comments: Vec<String>,
@@ -81,7 +80,10 @@ impl CommentWriter {
             vec![
                 format!("symbol {}", tcx.symbol_name(instance).name),
                 format!("instance {:?}", instance),
-                format!("abi {:?}", FnAbi::of_instance(&RevealAllLayoutCx(tcx), instance, &[])),
+                format!(
+                    "abi {:?}",
+                    RevealAllLayoutCx(tcx).fn_abi_of_instance(instance, ty::List::empty())
+                ),
                 String::new(),
             ]
         } else {
@@ -127,7 +129,6 @@ impl FuncWriter for &'_ CommentWriter {
         &mut self,
         w: &mut dyn fmt::Write,
         func: &Function,
-        reg_info: Option<&isa::RegInfo>,
     ) -> Result<bool, fmt::Error> {
         for comment in &self.global_comments {
             if !comment.is_empty() {
@@ -140,7 +141,7 @@ impl FuncWriter for &'_ CommentWriter {
             writeln!(w)?;
         }
 
-        self.super_preamble(w, func, reg_info)
+        self.super_preamble(w, func)
     }
 
     fn write_entity_definition(
@@ -163,11 +164,10 @@ impl FuncWriter for &'_ CommentWriter {
         &mut self,
         w: &mut dyn fmt::Write,
         func: &Function,
-        isa: Option<&dyn isa::TargetIsa>,
         block: Block,
         indent: usize,
     ) -> fmt::Result {
-        PlainWriter.write_block_header(w, func, isa, block, indent)
+        PlainWriter.write_block_header(w, func, block, indent)
     }
 
     fn write_instruction(
@@ -175,11 +175,10 @@ impl FuncWriter for &'_ CommentWriter {
         w: &mut dyn fmt::Write,
         func: &Function,
         aliases: &SecondaryMap<Value, Vec<Value>>,
-        isa: Option<&dyn isa::TargetIsa>,
         inst: Inst,
         indent: usize,
     ) -> fmt::Result {
-        PlainWriter.write_instruction(w, func, aliases, isa, inst, indent)?;
+        PlainWriter.write_instruction(w, func, aliases, inst, indent)?;
         if let Some(comment) = self.entity_comments.get(&inst.into()) {
             writeln!(w, "; {}", comment.replace('\n', "\n; "))?;
         }
@@ -206,15 +205,11 @@ pub(crate) fn should_write_ir(tcx: TyCtxt<'_>) -> bool {
 }
 
 pub(crate) fn write_ir_file(
-    tcx: TyCtxt<'_>,
+    output_filenames: &OutputFilenames,
     name: &str,
     write: impl FnOnce(&mut dyn Write) -> std::io::Result<()>,
 ) {
-    if !should_write_ir(tcx) {
-        return;
-    }
-
-    let clif_output_dir = tcx.output_filenames(LOCAL_CRATE).with_extension("clif");
+    let clif_output_dir = output_filenames.with_extension("clif");
 
     match std::fs::create_dir(&clif_output_dir) {
         Ok(()) => {}
@@ -226,38 +221,35 @@ pub(crate) fn write_ir_file(
 
     let res = std::fs::File::create(clif_file_name).and_then(|mut file| write(&mut file));
     if let Err(err) = res {
-        tcx.sess.warn(&format!("error writing ir file: {}", err));
+        // Using early_warn as no Session is available here
+        rustc_session::early_warn(
+            rustc_session::config::ErrorOutputType::default(),
+            &format!("error writing ir file: {}", err),
+        );
     }
 }
 
-pub(crate) fn write_clif_file<'tcx>(
-    tcx: TyCtxt<'tcx>,
+pub(crate) fn write_clif_file(
+    output_filenames: &OutputFilenames,
+    symbol_name: &str,
     postfix: &str,
-    isa: Option<&dyn cranelift_codegen::isa::TargetIsa>,
-    instance: Instance<'tcx>,
-    context: &cranelift_codegen::Context,
+    isa: &dyn cranelift_codegen::isa::TargetIsa,
+    func: &cranelift_codegen::ir::Function,
     mut clif_comments: &CommentWriter,
 ) {
-    write_ir_file(tcx, &format!("{}.{}.clif", tcx.symbol_name(instance).name, postfix), |file| {
-        let value_ranges =
-            isa.map(|isa| context.build_value_labels_ranges(isa).expect("value location ranges"));
-
+    // FIXME work around filename too long errors
+    write_ir_file(output_filenames, &format!("{}.{}.clif", symbol_name, postfix), |file| {
         let mut clif = String::new();
-        cranelift_codegen::write::decorate_function(
-            &mut clif_comments,
-            &mut clif,
-            &context.func,
-            &DisplayFunctionAnnotations {
-                isa: Some(&*crate::build_isa(tcx.sess)),
-                value_ranges: value_ranges.as_ref(),
-            },
-        )
-        .unwrap();
+        cranelift_codegen::write::decorate_function(&mut clif_comments, &mut clif, func).unwrap();
 
-        writeln!(file, "test compile")?;
-        writeln!(file, "set is_pic")?;
-        writeln!(file, "set enable_simd")?;
-        writeln!(file, "target {} haswell", crate::target_triple(tcx.sess))?;
+        for flag in isa.flags().iter() {
+            writeln!(file, "set {}", flag)?;
+        }
+        write!(file, "target {}", isa.triple().architecture)?;
+        for isa_flag in isa.isa_flags().iter() {
+            write!(file, " {}", isa_flag)?;
+        }
+        writeln!(file, "\n")?;
         writeln!(file)?;
         file.write_all(clif.as_bytes())?;
         Ok(())
@@ -274,7 +266,6 @@ impl fmt::Debug for FunctionCx<'_, '_, '_> {
             &mut &self.clif_comments,
             &mut clif,
             &self.bcx.func,
-            &DisplayFunctionAnnotations::default(),
         )
         .unwrap();
         writeln!(f, "\n{}", clif)

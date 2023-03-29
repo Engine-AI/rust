@@ -14,27 +14,27 @@
 // - `relocation-model` set to `static`; also no PIE, no relro and no dynamic
 // linking. rationale: matches `thumb` targets
 
-use super::{LinkerFlavor, LldFlavor, PanicStrategy, RelocModel, Target, TargetOptions};
+use super::{Cc, LinkerFlavor, Lld, PanicStrategy, RelocModel, Target, TargetOptions};
 
 pub fn target() -> Target {
     let opts = TargetOptions {
-        linker_flavor: LinkerFlavor::Lld(LldFlavor::Ld),
-        linker: Some("rust-lld".to_owned()),
-        features: "+v7,+thumb2,+soft-float,-neon,+strict-align".to_string(),
-        executables: true,
+        abi: "eabi".into(),
+        linker_flavor: LinkerFlavor::Gnu(Cc::No, Lld::Yes),
+        linker: Some("rust-lld".into()),
+        features: "+v7,+thumb2,+soft-float,-neon,+strict-align".into(),
         relocation_model: RelocModel::Static,
         disable_redzone: true,
         max_atomic_width: Some(64),
         panic_strategy: PanicStrategy::Abort,
-        unsupported_abis: super::arm_base::unsupported_abis(),
         emit_debug_gdb_scripts: false,
+        c_enum_min_bits: Some(8),
         ..Default::default()
     };
     Target {
-        llvm_target: "armv7a-none-eabi".to_string(),
+        llvm_target: "armv7a-none-eabi".into(),
         pointer_width: 32,
-        data_layout: "e-m:e-p:32:32-Fi8-i64:64-v128:64:128-a:0:32-n32-S64".to_string(),
-        arch: "arm".to_string(),
+        data_layout: "e-m:e-p:32:32-Fi8-i64:64-v128:64:128-a:0:32-n32-S64".into(),
+        arch: "arm".into(),
         options: opts,
     }
 }

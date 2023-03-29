@@ -1,10 +1,10 @@
 // aux-build:option_helpers.rs
-// edition:2018
 
 #![warn(clippy::all, clippy::pedantic)]
 #![allow(
-    clippy::blacklisted_name,
+    clippy::disallowed_names,
     clippy::default_trait_access,
+    clippy::let_underscore_untyped,
     clippy::missing_docs_in_private_items,
     clippy::missing_safety_doc,
     clippy::non_ascii_literal,
@@ -16,6 +16,7 @@
     clippy::use_self,
     clippy::useless_format,
     clippy::wrong_self_convention,
+    clippy::unused_async,
     clippy::unused_self,
     unused
 )]
@@ -27,12 +28,11 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
-use std::iter::FromIterator;
 use std::ops::Mul;
 use std::rc::{self, Rc};
 use std::sync::{self, Arc};
 
-use option_helpers::IteratorFalsePositives;
+use option_helpers::{IteratorFalsePositives, IteratorMethodFalsePositives};
 
 struct Lt<'a> {
     foo: &'a u32,
@@ -131,6 +131,9 @@ fn filter_next() {
     // Check that we don't lint if the caller is not an `Iterator`.
     let foo = IteratorFalsePositives { foo: 0 };
     let _ = foo.filter().next();
+
+    let foo = IteratorMethodFalsePositives {};
+    let _ = foo.filter(42).next();
 }
 
 fn main() {

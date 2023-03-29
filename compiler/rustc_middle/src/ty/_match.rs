@@ -23,19 +23,24 @@ pub struct Match<'tcx> {
     param_env: ty::ParamEnv<'tcx>,
 }
 
-impl Match<'tcx> {
+impl<'tcx> Match<'tcx> {
     pub fn new(tcx: TyCtxt<'tcx>, param_env: ty::ParamEnv<'tcx>) -> Match<'tcx> {
         Match { tcx, param_env }
     }
 }
 
-impl TypeRelation<'tcx> for Match<'tcx> {
+impl<'tcx> TypeRelation<'tcx> for Match<'tcx> {
     fn tag(&self) -> &'static str {
         "Match"
     }
     fn tcx(&self) -> TyCtxt<'tcx> {
         self.tcx
     }
+
+    fn intercrate(&self) -> bool {
+        false
+    }
+
     fn param_env(&self) -> ty::ParamEnv<'tcx> {
         self.param_env
     }
@@ -43,26 +48,31 @@ impl TypeRelation<'tcx> for Match<'tcx> {
         true
     } // irrelevant
 
+    fn mark_ambiguous(&mut self) {
+        bug!()
+    }
+
     fn relate_with_variance<T: Relate<'tcx>>(
         &mut self,
         _: ty::Variance,
+        _: ty::VarianceDiagInfo<'tcx>,
         a: T,
         b: T,
     ) -> RelateResult<'tcx, T> {
         self.relate(a, b)
     }
 
+    #[instrument(skip(self), level = "debug")]
     fn regions(
         &mut self,
         a: ty::Region<'tcx>,
         b: ty::Region<'tcx>,
     ) -> RelateResult<'tcx, ty::Region<'tcx>> {
-        debug!("{}.regions({:?}, {:?})", self.tag(), a, b);
         Ok(a)
     }
 
+    #[instrument(skip(self), level = "debug")]
     fn tys(&mut self, a: Ty<'tcx>, b: Ty<'tcx>) -> RelateResult<'tcx, Ty<'tcx>> {
-        debug!("{}.tys({:?}, {:?})", self.tag(), a, b);
         if a == b {
             return Ok(a);
         }
@@ -76,10 +86,10 @@ impl TypeRelation<'tcx> for Match<'tcx> {
             ) => Ok(a),
 
             (&ty::Infer(_), _) | (_, &ty::Infer(_)) => {
-                Err(TypeError::Sorts(relate::expected_found(self, &a, &b)))
+                Err(TypeError::Sorts(relate::expected_found(self, a, b)))
             }
 
-            (&ty::Error(_), _) | (_, &ty::Error(_)) => Ok(self.tcx().ty_error()),
+            (&ty::Error(guar), _) | (_, &ty::Error(guar)) => Ok(self.tcx().ty_error(guar)),
 
             _ => relate::super_relate_tys(self, a, b),
         }
@@ -87,21 +97,21 @@ impl TypeRelation<'tcx> for Match<'tcx> {
 
     fn consts(
         &mut self,
-        a: &'tcx ty::Const<'tcx>,
-        b: &'tcx ty::Const<'tcx>,
-    ) -> RelateResult<'tcx, &'tcx ty::Const<'tcx>> {
+        a: ty::Const<'tcx>,
+        b: ty::Const<'tcx>,
+    ) -> RelateResult<'tcx, ty::Const<'tcx>> {
         debug!("{}.consts({:?}, {:?})", self.tag(), a, b);
         if a == b {
             return Ok(a);
         }
 
-        match (a.val, b.val) {
+        match (a.kind(), b.kind()) {
             (_, ty::ConstKind::Infer(InferConst::Fresh(_))) => {
                 return Ok(a);
             }
 
             (ty::ConstKind::Infer(_), _) | (_, ty::ConstKind::Infer(_)) => {
-                return Err(TypeError::ConstMismatch(relate::expected_found(self, &a, &b)));
+                return Err(TypeError::ConstMismatch(relate::expected_found(self, a, b)));
             }
 
             _ => {}

@@ -23,8 +23,10 @@ use core::panic::PanicInfo;
 
 extern crate libc;
 
+struct Unique<T>(*mut T);
+
 #[lang = "owned_box"]
-pub struct Box<T>(*mut T);
+pub struct Box<T>(Unique<T>);
 
 #[lang = "exchange_malloc"]
 unsafe fn allocate(size: usize, _align: usize) -> *mut u8 {
@@ -191,7 +193,7 @@ mechanisms of the compiler. This is often mapped to GCC's personality function
 which do not trigger a panic can be assured that this function is never
 called. The language item's name is `eh_personality`.
 
-[unwind]: https://github.com/rust-lang/rust/blob/master/src/libpanic_unwind/gcc.rs
+[unwind]: https://github.com/rust-lang/rust/blob/master/library/panic_unwind/src/gcc.rs
 
 The second function, `rust_begin_panic`, is also used by the failure mechanisms of the
 compiler. When a panic happens, this controls the message that's displayed on

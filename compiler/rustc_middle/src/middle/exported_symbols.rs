@@ -21,6 +21,23 @@ impl SymbolExportLevel {
     }
 }
 
+/// Kind of exported symbols.
+#[derive(Eq, PartialEq, Debug, Copy, Clone, Encodable, Decodable, HashStable)]
+pub enum SymbolExportKind {
+    Text,
+    Data,
+    Tls,
+}
+
+/// The `SymbolExportInfo` of a symbols specifies symbol-related information
+/// that is relevant to code generation and linking.
+#[derive(Eq, PartialEq, Debug, Copy, Clone, TyEncodable, TyDecodable, HashStable)]
+pub struct SymbolExportInfo {
+    pub level: SymbolExportLevel,
+    pub kind: SymbolExportKind,
+    pub used: bool,
+}
+
 #[derive(Eq, PartialEq, Debug, Copy, Clone, TyEncodable, TyDecodable, HashStable)]
 pub enum ExportedSymbol<'tcx> {
     NonGeneric(DefId),
@@ -48,8 +65,8 @@ impl<'tcx> ExportedSymbol<'tcx> {
 
 pub fn metadata_symbol_name(tcx: TyCtxt<'_>) -> String {
     format!(
-        "rust_metadata_{}_{}",
-        tcx.original_crate_name(LOCAL_CRATE),
-        tcx.crate_disambiguator(LOCAL_CRATE).to_fingerprint().to_hex()
+        "rust_metadata_{}_{:08x}",
+        tcx.crate_name(LOCAL_CRATE),
+        tcx.sess.local_stable_crate_id().to_u64(),
     )
 }

@@ -1,10 +1,14 @@
 // run-rustfix
-// edition:2018
 // aux-build:proc_macro_derive.rs
 
 #![warn(clippy::use_self)]
-#![allow(dead_code)]
-#![allow(clippy::should_implement_trait, clippy::upper_case_acronyms, clippy::from_over_into)]
+#![allow(dead_code, unreachable_code)]
+#![allow(
+    clippy::should_implement_trait,
+    clippy::upper_case_acronyms,
+    clippy::from_over_into,
+    clippy::self_named_constructors
+)]
 
 #[macro_use]
 extern crate proc_macro_derive;
@@ -12,7 +16,7 @@ extern crate proc_macro_derive;
 fn main() {}
 
 mod use_self {
-    struct Foo {}
+    struct Foo;
 
     impl Foo {
         fn new() -> Foo {
@@ -31,7 +35,7 @@ mod use_self {
 }
 
 mod better {
-    struct Foo {}
+    struct Foo;
 
     impl Foo {
         fn new() -> Self {
@@ -119,7 +123,7 @@ mod macros {
         };
     }
 
-    struct Foo {}
+    struct Foo;
 
     impl Foo {
         use_self_expand!(); // Should not lint in local macros
@@ -130,7 +134,7 @@ mod macros {
 }
 
 mod nesting {
-    struct Foo {}
+    struct Foo;
     impl Foo {
         fn foo() {
             #[allow(unused_imports)]
@@ -205,7 +209,7 @@ mod issue3410 {
 #[allow(clippy::no_effect, path_statements)]
 mod rustfix {
     mod nested {
-        pub struct A {}
+        pub struct A;
     }
 
     impl nested::A {
@@ -223,7 +227,7 @@ mod rustfix {
 }
 
 mod issue3567 {
-    struct TestStruct {}
+    struct TestStruct;
     impl TestStruct {
         fn from_something() -> Self {
             Self {}
@@ -244,7 +248,7 @@ mod issue3567 {
 mod paths_created_by_lowering {
     use std::ops::Range;
 
-    struct S {}
+    struct S;
 
     impl S {
         const A: usize = 0;
@@ -279,7 +283,7 @@ mod generics {
     impl<T> Foo<T> {
         // `Self` is applicable here
         fn foo(value: T) -> Foo<T> {
-            Foo { value }
+            Foo::<T> { value }
         }
 
         // `Cannot` use `Self` as a return type as the generic types are different
@@ -378,7 +382,7 @@ mod issue4305 {
 }
 
 mod lint_at_item_level {
-    struct Foo {}
+    struct Foo;
 
     #[allow(clippy::use_self)]
     impl Foo {
@@ -396,7 +400,7 @@ mod lint_at_item_level {
 }
 
 mod lint_at_impl_item_level {
-    struct Foo {}
+    struct Foo;
 
     impl Foo {
         #[allow(clippy::use_self)]
@@ -429,8 +433,8 @@ mod issue4734 {
 mod nested_paths {
     use std::convert::Into;
     mod submod {
-        pub struct B {}
-        pub struct C {}
+        pub struct B;
+        pub struct C;
 
         impl Into<C> for B {
             fn into(self) -> C {
@@ -460,5 +464,196 @@ mod issue6818 {
     #[derive(serde::Deserialize)]
     struct A {
         a: i32,
+    }
+}
+
+mod issue7206 {
+    struct MyStruct<const C: char>;
+    impl From<MyStruct<'a'>> for MyStruct<'b'> {
+        fn from(_s: MyStruct<'a'>) -> Self {
+            Self
+        }
+    }
+
+    // keep linting non-`Const` generic args
+    struct S<'a> {
+        inner: &'a str,
+    }
+
+    struct S2<T> {
+        inner: T,
+    }
+
+    impl<T> S2<T> {
+        fn new() -> Self {
+            unimplemented!();
+        }
+    }
+
+    impl<'a> S2<S<'a>> {
+        fn new_again() -> Self {
+            S2::new()
+        }
+    }
+}
+
+mod self_is_ty_param {
+    trait Trait {
+        type Type;
+        type Hi;
+
+        fn test();
+    }
+
+    impl<I> Trait for I
+    where
+        I: Iterator,
+        I::Item: Trait, // changing this to Self would require <Self as Iterator>
+    {
+        type Type = I;
+        type Hi = I::Item;
+
+        fn test() {
+            let _: I::Item;
+            let _: I; // this could lint, but is questionable
+        }
+    }
+}
+
+mod use_self_in_pat {
+    enum Foo {
+        Bar,
+        Baz,
+    }
+
+    impl Foo {
+        fn do_stuff(self) {
+            match self {
+                Foo::Bar => unimplemented!(),
+                Foo::Baz => unimplemented!(),
+            }
+            match Some(1) {
+                Some(_) => unimplemented!(),
+                None => unimplemented!(),
+            }
+            if let Foo::Bar = self {
+                unimplemented!()
+            }
+        }
+    }
+}
+
+mod issue8845 {
+    pub enum Something {
+        Num(u8),
+        TupleNums(u8, u8),
+        StructNums { one: u8, two: u8 },
+    }
+
+    struct Foo(u8);
+
+    struct Bar {
+        x: u8,
+        y: usize,
+    }
+
+    impl Something {
+        fn get_value(&self) -> u8 {
+            match self {
+                Something::Num(n) => *n,
+                Something::TupleNums(n, _m) => *n,
+                Something::StructNums { one, two: _ } => *one,
+            }
+        }
+
+        fn use_crate(&self) -> u8 {
+            match self {
+                crate::issue8845::Something::Num(n) => *n,
+                crate::issue8845::Something::TupleNums(n, _m) => *n,
+                crate::issue8845::Something::StructNums { one, two: _ } => *one,
+            }
+        }
+
+        fn imported_values(&self) -> u8 {
+            use Something::*;
+            match self {
+                Num(n) => *n,
+                TupleNums(n, _m) => *n,
+                StructNums { one, two: _ } => *one,
+            }
+        }
+    }
+
+    impl Foo {
+        fn get_value(&self) -> u8 {
+            let Foo(x) = self;
+            *x
+        }
+
+        fn use_crate(&self) -> u8 {
+            let crate::issue8845::Foo(x) = self;
+            *x
+        }
+    }
+
+    impl Bar {
+        fn get_value(&self) -> u8 {
+            let Bar { x, .. } = self;
+            *x
+        }
+
+        fn use_crate(&self) -> u8 {
+            let crate::issue8845::Bar { x, .. } = self;
+            *x
+        }
+    }
+}
+
+mod issue6902 {
+    use serde::Serialize;
+
+    #[derive(Serialize)]
+    pub enum Foo {
+        Bar = 1,
+    }
+}
+
+#[clippy::msrv = "1.36"]
+fn msrv_1_36() {
+    enum E {
+        A,
+    }
+
+    impl E {
+        fn foo(self) {
+            match self {
+                E::A => {},
+            }
+        }
+    }
+}
+
+#[clippy::msrv = "1.37"]
+fn msrv_1_37() {
+    enum E {
+        A,
+    }
+
+    impl E {
+        fn foo(self) {
+            match self {
+                E::A => {},
+            }
+        }
+    }
+}
+
+mod issue_10371 {
+    struct Val<const V: i32> {}
+
+    impl<const V: i32> From<Val<V>> for i32 {
+        fn from(_: Val<V>) -> Self {
+            todo!()
+        }
     }
 }

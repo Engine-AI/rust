@@ -1,7 +1,8 @@
 use clippy_utils::diagnostics::span_lint_and_sugg;
 use clippy_utils::source::snippet_with_applicability;
 use if_chain::if_chain;
-use rustc_ast::ast::{BinOpKind, Expr, ExprKind, LitKind, UnOp};
+use rustc_ast::ast::{BinOpKind, Expr, ExprKind, MethodCall, UnOp};
+use rustc_ast::token;
 use rustc_errors::Applicability;
 use rustc_lint::{EarlyContext, EarlyLintPass};
 use rustc_session::{declare_lint_pass, declare_tool_lint};
@@ -25,7 +26,8 @@ const ALLOWED_ODD_FUNCTIONS: [&str; 14] = [
 ];
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for operations where precedence may be unclear
+    /// ### What it does
+    /// Checks for operations where precedence may be unclear
     /// and suggests to add parentheses. Currently it catches the following:
     /// * mixed usage of arithmetic and bit shifting/combining operators without
     /// parentheses
@@ -33,15 +35,15 @@ declare_clippy_lint! {
     /// numeric literal)
     ///   followed by a method call
     ///
-    /// **Why is this bad?** Not everyone knows the precedence of those operators by
+    /// ### Why is this bad?
+    /// Not everyone knows the precedence of those operators by
     /// heart, so expressions like these may trip others trying to reason about the
     /// code.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
+    /// ### Example
     /// * `1 << 2 + 3` equals 32, while `(1 << 2) + 3` equals 7
     /// * `-1i32.abs()` equals -1, while `(-1i32).abs()` equals 1
+    #[clippy::version = "pre 1.29.0"]
     pub PRECEDENCE,
     complexity,
     "operations where precedence may be unclear"
@@ -108,18 +110,18 @@ impl EarlyLintPass for Precedence {
             let mut arg = operand;
 
             let mut all_odd = true;
-            while let ExprKind::MethodCall(path_segment, args, _) = &arg.kind {
-                let path_segment_str = path_segment.ident.name.as_str();
+            while let ExprKind::MethodCall(box MethodCall { seg, receiver, .. }) = &arg.kind {
+                let seg_str = seg.ident.name.as_str();
                 all_odd &= ALLOWED_ODD_FUNCTIONS
                     .iter()
-                    .any(|odd_function| **odd_function == *path_segment_str);
-                arg = args.first().expect("A method always has a receiver.");
+                    .any(|odd_function| **odd_function == *seg_str);
+                arg = receiver;
             }
 
             if_chain! {
                 if !all_odd;
                 if let ExprKind::Lit(lit) = &arg.kind;
-                if let LitKind::Int(..) | LitKind::Float(..) = &lit.kind;
+                if let token::LitKind::Integer | token::LitKind::Float = &lit.kind;
                 then {
                     let mut applicability = Applicability::MachineApplicable;
                     span_lint_and_sugg(

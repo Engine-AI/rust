@@ -1,7 +1,7 @@
 // run-rustfix
-
 #![warn(clippy::match_single_binding)]
 #![allow(unused_variables)]
+#![allow(clippy::uninlined_format_args)]
 
 fn main() {
     // Lint (additional curly braces needed, see #6572)
@@ -33,5 +33,23 @@ fn main() {
             }
         },
         None => println!("nothing"),
+    }
+
+    fn side_effects() {}
+
+    // Lint (scrutinee has side effects)
+    // issue #7094
+    match side_effects() {
+        _ => println!("Side effects"),
+    }
+
+    // Lint (scrutinee has side effects)
+    // issue #7094
+    let x = 1;
+    match match x {
+        0 => 1,
+        _ => 2,
+    } {
+        _ => println!("Single branch"),
     }
 }

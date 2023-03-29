@@ -1,7 +1,8 @@
+#[derive(Debug)]
 pub enum EntryPointType {
     None,
     MainNamed,
-    MainAttr,
+    RustcMainAttr,
     Start,
     OtherMain, // Not an entry point, but some other function named main
 }

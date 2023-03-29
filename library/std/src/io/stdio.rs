@@ -7,14 +7,11 @@ use crate::io::prelude::*;
 
 use crate::cell::{Cell, RefCell};
 use crate::fmt;
-use crate::io::{self, BufReader, Initializer, IoSlice, IoSliceMut, LineWriter};
-use crate::lazy::SyncOnceCell;
-use crate::pin::Pin;
+use crate::fs::File;
+use crate::io::{self, BorrowedCursor, BufReader, IoSlice, IoSliceMut, LineWriter, Lines};
 use crate::sync::atomic::{AtomicBool, Ordering};
-use crate::sync::{Arc, Mutex, MutexGuard};
+use crate::sync::{Arc, Mutex, MutexGuard, OnceLock, ReentrantMutex, ReentrantMutexGuard};
 use crate::sys::stdio;
-use crate::sys_common;
-use crate::sys_common::remutex::{ReentrantMutex, ReentrantMutexGuard};
 
 type LocalStream = Arc<Mutex<Vec<u8>>>;
 
@@ -100,6 +97,10 @@ impl Read for StdinRaw {
         handle_ebadf(self.0.read(buf), 0)
     }
 
+    fn read_buf(&mut self, buf: BorrowedCursor<'_>) -> io::Result<()> {
+        handle_ebadf(self.0.read_buf(buf), ())
+    }
+
     fn read_vectored(&mut self, bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
         handle_ebadf(self.0.read_vectored(bufs), 0)
     }
@@ -107,11 +108,6 @@ impl Read for StdinRaw {
     #[inline]
     fn is_read_vectored(&self) -> bool {
         self.0.is_read_vectored()
-    }
-
-    #[inline]
-    unsafe fn initializer(&self) -> Initializer {
-        Initializer::nop()
     }
 
     fn read_to_end(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
@@ -208,21 +204,27 @@ fn handle_ebadf<T>(r: io::Result<T>, default: T) -> io::Result<T> {
 ///
 /// [`io::stdin`]: stdin
 ///
-/// ### Note: Windows Portability Consideration
+/// ### Note: Windows Portability Considerations
 ///
 /// When operating in a console, the Windows implementation of this stream does not support
 /// non-UTF-8 byte sequences. Attempting to read bytes that are not valid UTF-8 will return
 /// an error.
 ///
+/// In a process with a detached console, such as one using
+/// `#![windows_subsystem = "windows"]`, or in a child process spawned from such a process,
+/// the contained handle will be null. In such cases, the standard library's `Read` and
+/// `Write` will do nothing and silently succeed. All other I/O operations, via the
+/// standard library or via raw Windows API calls, will fail.
+///
 /// # Examples
 ///
 /// ```no_run
-/// use std::io::{self, Read};
+/// use std::io;
 ///
 /// fn main() -> io::Result<()> {
 ///     let mut buffer = String::new();
-///     let mut stdin = io::stdin(); // We get `Stdin` here.
-///     stdin.read_to_string(&mut buffer)?;
+///     let stdin = io::stdin(); // We get `Stdin` here.
+///     stdin.read_line(&mut buffer)?;
 ///     Ok(())
 /// }
 /// ```
@@ -236,27 +238,34 @@ pub struct Stdin {
 /// This handle implements both the [`Read`] and [`BufRead`] traits, and
 /// is constructed via the [`Stdin::lock`] method.
 ///
-/// ### Note: Windows Portability Consideration
+/// ### Note: Windows Portability Considerations
 ///
 /// When operating in a console, the Windows implementation of this stream does not support
 /// non-UTF-8 byte sequences. Attempting to read bytes that are not valid UTF-8 will return
 /// an error.
 ///
+/// In a process with a detached console, such as one using
+/// `#![windows_subsystem = "windows"]`, or in a child process spawned from such a process,
+/// the contained handle will be null. In such cases, the standard library's `Read` and
+/// `Write` will do nothing and silently succeed. All other I/O operations, via the
+/// standard library or via raw Windows API calls, will fail.
+///
 /// # Examples
 ///
 /// ```no_run
-/// use std::io::{self, Read};
+/// use std::io::{self, BufRead};
 ///
 /// fn main() -> io::Result<()> {
 ///     let mut buffer = String::new();
 ///     let stdin = io::stdin(); // We get `Stdin` here.
 ///     {
 ///         let mut handle = stdin.lock(); // We get `StdinLock` here.
-///         handle.read_to_string(&mut buffer)?;
+///         handle.read_line(&mut buffer)?;
 ///     } // `StdinLock` is dropped here.
 ///     Ok(())
 /// }
 /// ```
+#[must_use = "if unused stdin will immediately unlock"]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct StdinLock<'a> {
     inner: MutexGuard<'a, BufReader<StdinRaw>>,
@@ -268,21 +277,28 @@ pub struct StdinLock<'a> {
 /// is synchronized via a mutex. If you need more explicit control over
 /// locking, see the [`Stdin::lock`] method.
 ///
-/// ### Note: Windows Portability Consideration
+/// ### Note: Windows Portability Considerations
+///
 /// When operating in a console, the Windows implementation of this stream does not support
 /// non-UTF-8 byte sequences. Attempting to read bytes that are not valid UTF-8 will return
 /// an error.
+///
+/// In a process with a detached console, such as one using
+/// `#![windows_subsystem = "windows"]`, or in a child process spawned from such a process,
+/// the contained handle will be null. In such cases, the standard library's `Read` and
+/// `Write` will do nothing and silently succeed. All other I/O operations, via the
+/// standard library or via raw Windows API calls, will fail.
 ///
 /// # Examples
 ///
 /// Using implicit synchronization:
 ///
 /// ```no_run
-/// use std::io::{self, Read};
+/// use std::io;
 ///
 /// fn main() -> io::Result<()> {
 ///     let mut buffer = String::new();
-///     io::stdin().read_to_string(&mut buffer)?;
+///     io::stdin().read_line(&mut buffer)?;
 ///     Ok(())
 /// }
 /// ```
@@ -290,20 +306,21 @@ pub struct StdinLock<'a> {
 /// Using explicit synchronization:
 ///
 /// ```no_run
-/// use std::io::{self, Read};
+/// use std::io::{self, BufRead};
 ///
 /// fn main() -> io::Result<()> {
 ///     let mut buffer = String::new();
 ///     let stdin = io::stdin();
 ///     let mut handle = stdin.lock();
 ///
-///     handle.read_to_string(&mut buffer)?;
+///     handle.read_line(&mut buffer)?;
 ///     Ok(())
 /// }
 /// ```
+#[must_use]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub fn stdin() -> Stdin {
-    static INSTANCE: SyncOnceCell<Mutex<BufReader<StdinRaw>>> = SyncOnceCell::new();
+    static INSTANCE: OnceLock<Mutex<BufReader<StdinRaw>>> = OnceLock::new();
     Stdin {
         inner: INSTANCE.get_or_init(|| {
             Mutex::new(BufReader::with_capacity(stdio::STDIN_BUF_SIZE, stdin_raw()))
@@ -322,19 +339,21 @@ impl Stdin {
     /// # Examples
     ///
     /// ```no_run
-    /// use std::io::{self, Read};
+    /// use std::io::{self, BufRead};
     ///
     /// fn main() -> io::Result<()> {
     ///     let mut buffer = String::new();
     ///     let stdin = io::stdin();
     ///     let mut handle = stdin.lock();
     ///
-    ///     handle.read_to_string(&mut buffer)?;
+    ///     handle.read_line(&mut buffer)?;
     ///     Ok(())
     /// }
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
-    pub fn lock(&self) -> StdinLock<'_> {
+    pub fn lock(&self) -> StdinLock<'static> {
+        // Locks this handle with 'static lifetime. This depends on the
+        // implementation detail that the underlying `Mutex` is static.
         StdinLock { inner: self.inner.lock().unwrap_or_else(|e| e.into_inner()) }
     }
 
@@ -351,10 +370,10 @@ impl Stdin {
     /// let mut input = String::new();
     /// match io::stdin().read_line(&mut input) {
     ///     Ok(n) => {
-    ///         println!("{} bytes read", n);
-    ///         println!("{}", input);
+    ///         println!("{n} bytes read");
+    ///         println!("{input}");
     ///     }
-    ///     Err(error) => println!("error: {}", error),
+    ///     Err(error) => println!("error: {error}"),
     /// }
     /// ```
     ///
@@ -368,12 +387,33 @@ impl Stdin {
     pub fn read_line(&self, buf: &mut String) -> io::Result<usize> {
         self.lock().read_line(buf)
     }
+
+    /// Consumes this handle and returns an iterator over input lines.
+    ///
+    /// For detailed semantics of this method, see the documentation on
+    /// [`BufRead::lines`].
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use std::io;
+    ///
+    /// let lines = io::stdin().lines();
+    /// for line in lines {
+    ///     println!("got a line: {}", line.unwrap());
+    /// }
+    /// ```
+    #[must_use = "`self` will be dropped if the result is not used"]
+    #[stable(feature = "stdin_forwarders", since = "1.62.0")]
+    pub fn lines(self) -> Lines<StdinLock<'static>> {
+        self.lock().lines()
+    }
 }
 
 #[stable(feature = "std_debug", since = "1.16.0")]
 impl fmt::Debug for Stdin {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.pad("Stdin { .. }")
+        f.debug_struct("Stdin").finish_non_exhaustive()
     }
 }
 
@@ -382,16 +422,15 @@ impl Read for Stdin {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         self.lock().read(buf)
     }
+    fn read_buf(&mut self, buf: BorrowedCursor<'_>) -> io::Result<()> {
+        self.lock().read_buf(buf)
+    }
     fn read_vectored(&mut self, bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
         self.lock().read_vectored(bufs)
     }
     #[inline]
     fn is_read_vectored(&self) -> bool {
         self.lock().is_read_vectored()
-    }
-    #[inline]
-    unsafe fn initializer(&self) -> Initializer {
-        Initializer::nop()
     }
     fn read_to_end(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
         self.lock().read_to_end(buf)
@@ -418,6 +457,10 @@ impl Read for StdinLock<'_> {
         self.inner.read(buf)
     }
 
+    fn read_buf(&mut self, buf: BorrowedCursor<'_>) -> io::Result<()> {
+        self.inner.read_buf(buf)
+    }
+
     fn read_vectored(&mut self, bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
         self.inner.read_vectored(bufs)
     }
@@ -425,11 +468,6 @@ impl Read for StdinLock<'_> {
     #[inline]
     fn is_read_vectored(&self) -> bool {
         self.inner.is_read_vectored()
-    }
-
-    #[inline]
-    unsafe fn initializer(&self) -> Initializer {
-        Initializer::nop()
     }
 
     fn read_to_end(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
@@ -467,7 +505,7 @@ impl BufRead for StdinLock<'_> {
 #[stable(feature = "std_debug", since = "1.16.0")]
 impl fmt::Debug for StdinLock<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.pad("StdinLock { .. }")
+        f.debug_struct("StdinLock").finish_non_exhaustive()
     }
 }
 
@@ -479,10 +517,17 @@ impl fmt::Debug for StdinLock<'_> {
 ///
 /// Created by the [`io::stdout`] method.
 ///
-/// ### Note: Windows Portability Consideration
+/// ### Note: Windows Portability Considerations
+///
 /// When operating in a console, the Windows implementation of this stream does not support
 /// non-UTF-8 byte sequences. Attempting to write bytes that are not valid UTF-8 will return
 /// an error.
+///
+/// In a process with a detached console, such as one using
+/// `#![windows_subsystem = "windows"]`, or in a child process spawned from such a process,
+/// the contained handle will be null. In such cases, the standard library's `Read` and
+/// `Write` will do nothing and silently succeed. All other I/O operations, via the
+/// standard library or via raw Windows API calls, will fail.
 ///
 /// [`lock`]: Stdout::lock
 /// [`io::stdout`]: stdout
@@ -491,7 +536,7 @@ pub struct Stdout {
     // FIXME: this should be LineWriter or BufWriter depending on the state of
     //        stdout (tty or not). Note that if this is not line buffered it
     //        should also flush-on-panic or some form of flush-on-abort.
-    inner: Pin<&'static ReentrantMutex<RefCell<LineWriter<StdoutRaw>>>>,
+    inner: &'static ReentrantMutex<RefCell<LineWriter<StdoutRaw>>>,
 }
 
 /// A locked reference to the [`Stdout`] handle.
@@ -499,14 +544,24 @@ pub struct Stdout {
 /// This handle implements the [`Write`] trait, and is constructed via
 /// the [`Stdout::lock`] method. See its documentation for more.
 ///
-/// ### Note: Windows Portability Consideration
+/// ### Note: Windows Portability Considerations
+///
 /// When operating in a console, the Windows implementation of this stream does not support
 /// non-UTF-8 byte sequences. Attempting to write bytes that are not valid UTF-8 will return
 /// an error.
+///
+/// In a process with a detached console, such as one using
+/// `#![windows_subsystem = "windows"]`, or in a child process spawned from such a process,
+/// the contained handle will be null. In such cases, the standard library's `Read` and
+/// `Write` will do nothing and silently succeed. All other I/O operations, via the
+/// standard library or via raw Windows API calls, will fail.
+#[must_use = "if unused stdout will immediately unlock"]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct StdoutLock<'a> {
     inner: ReentrantMutexGuard<'a, RefCell<LineWriter<StdoutRaw>>>,
 }
+
+static STDOUT: OnceLock<ReentrantMutex<RefCell<LineWriter<StdoutRaw>>>> = OnceLock::new();
 
 /// Constructs a new handle to the standard output of the current process.
 ///
@@ -514,10 +569,17 @@ pub struct StdoutLock<'a> {
 /// is synchronized via a mutex. If you need more explicit control over
 /// locking, see the [`Stdout::lock`] method.
 ///
-/// ### Note: Windows Portability Consideration
+/// ### Note: Windows Portability Considerations
+///
 /// When operating in a console, the Windows implementation of this stream does not support
 /// non-UTF-8 byte sequences. Attempting to write bytes that are not valid UTF-8 will return
 /// an error.
+///
+/// In a process with a detached console, such as one using
+/// `#![windows_subsystem = "windows"]`, or in a child process spawned from such a process,
+/// the contained handle will be null. In such cases, the standard library's `Read` and
+/// `Write` will do nothing and silently succeed. All other I/O operations, via the
+/// standard library or via raw Windows API calls, will fail.
 ///
 /// # Examples
 ///
@@ -547,33 +609,33 @@ pub struct StdoutLock<'a> {
 ///     Ok(())
 /// }
 /// ```
+#[must_use]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub fn stdout() -> Stdout {
-    static INSTANCE: SyncOnceCell<ReentrantMutex<RefCell<LineWriter<StdoutRaw>>>> =
-        SyncOnceCell::new();
-
-    fn cleanup() {
-        if let Some(instance) = INSTANCE.get() {
-            // Flush the data and disable buffering during shutdown
-            // by replacing the line writer by one with zero
-            // buffering capacity.
-            // We use try_lock() instead of lock(), because someone
-            // might have leaked a StdoutLock, which would
-            // otherwise cause a deadlock here.
-            if let Some(lock) = Pin::static_ref(instance).try_lock() {
-                *lock.borrow_mut() = LineWriter::with_capacity(0, stdout_raw());
-            }
-        }
-    }
-
     Stdout {
-        inner: Pin::static_ref(&INSTANCE).get_or_init_pin(
-            || unsafe {
-                let _ = sys_common::at_exit(cleanup);
-                ReentrantMutex::new(RefCell::new(LineWriter::new(stdout_raw())))
-            },
-            |mutex| unsafe { mutex.init() },
-        ),
+        inner: STDOUT
+            .get_or_init(|| ReentrantMutex::new(RefCell::new(LineWriter::new(stdout_raw())))),
+    }
+}
+
+// Flush the data and disable buffering during shutdown
+// by replacing the line writer by one with zero
+// buffering capacity.
+pub fn cleanup() {
+    let mut initialized = false;
+    let stdout = STDOUT.get_or_init(|| {
+        initialized = true;
+        ReentrantMutex::new(RefCell::new(LineWriter::with_capacity(0, stdout_raw())))
+    });
+
+    if !initialized {
+        // The buffer was previously initialized, overwrite it here.
+        // We use try_lock() instead of lock(), because someone
+        // might have leaked a StdoutLock, which would
+        // otherwise cause a deadlock here.
+        if let Some(lock) = stdout.try_lock() {
+            *lock.borrow_mut() = LineWriter::with_capacity(0, stdout_raw());
+        }
     }
 }
 
@@ -590,16 +652,18 @@ impl Stdout {
     /// use std::io::{self, Write};
     ///
     /// fn main() -> io::Result<()> {
-    ///     let stdout = io::stdout();
-    ///     let mut handle = stdout.lock();
+    ///     let mut stdout = io::stdout().lock();
     ///
-    ///     handle.write_all(b"hello world")?;
+    ///     stdout.write_all(b"hello world")?;
     ///
     ///     Ok(())
     /// }
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
-    pub fn lock(&self) -> StdoutLock<'_> {
+    pub fn lock(&self) -> StdoutLock<'static> {
+        // Locks this handle with 'static lifetime. This depends on the
+        // implementation detail that the underlying `ReentrantMutex` is
+        // static.
         StdoutLock { inner: self.inner.lock() }
     }
 }
@@ -607,7 +671,7 @@ impl Stdout {
 #[stable(feature = "std_debug", since = "1.16.0")]
 impl fmt::Debug for Stdout {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.pad("Stdout { .. }")
+        f.debug_struct("Stdout").finish_non_exhaustive()
     }
 }
 
@@ -689,7 +753,7 @@ impl Write for StdoutLock<'_> {
 #[stable(feature = "std_debug", since = "1.16.0")]
 impl fmt::Debug for StdoutLock<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.pad("StdoutLock { .. }")
+        f.debug_struct("StdoutLock").finish_non_exhaustive()
     }
 }
 
@@ -699,13 +763,20 @@ impl fmt::Debug for StdoutLock<'_> {
 ///
 /// [`io::stderr`]: stderr
 ///
-/// ### Note: Windows Portability Consideration
+/// ### Note: Windows Portability Considerations
+///
 /// When operating in a console, the Windows implementation of this stream does not support
 /// non-UTF-8 byte sequences. Attempting to write bytes that are not valid UTF-8 will return
 /// an error.
+///
+/// In a process with a detached console, such as one using
+/// `#![windows_subsystem = "windows"]`, or in a child process spawned from such a process,
+/// the contained handle will be null. In such cases, the standard library's `Read` and
+/// `Write` will do nothing and silently succeed. All other I/O operations, via the
+/// standard library or via raw Windows API calls, will fail.
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct Stderr {
-    inner: Pin<&'static ReentrantMutex<RefCell<StderrRaw>>>,
+    inner: &'static ReentrantMutex<RefCell<StderrRaw>>,
 }
 
 /// A locked reference to the [`Stderr`] handle.
@@ -713,10 +784,18 @@ pub struct Stderr {
 /// This handle implements the [`Write`] trait and is constructed via
 /// the [`Stderr::lock`] method. See its documentation for more.
 ///
-/// ### Note: Windows Portability Consideration
+/// ### Note: Windows Portability Considerations
+///
 /// When operating in a console, the Windows implementation of this stream does not support
 /// non-UTF-8 byte sequences. Attempting to write bytes that are not valid UTF-8 will return
 /// an error.
+///
+/// In a process with a detached console, such as one using
+/// `#![windows_subsystem = "windows"]`, or in a child process spawned from such a process,
+/// the contained handle will be null. In such cases, the standard library's `Read` and
+/// `Write` will do nothing and silently succeed. All other I/O operations, via the
+/// standard library or via raw Windows API calls, will fail.
+#[must_use = "if unused stderr will immediately unlock"]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct StderrLock<'a> {
     inner: ReentrantMutexGuard<'a, RefCell<StderrRaw>>,
@@ -726,10 +805,17 @@ pub struct StderrLock<'a> {
 ///
 /// This handle is not buffered.
 ///
-/// ### Note: Windows Portability Consideration
+/// ### Note: Windows Portability Considerations
+///
 /// When operating in a console, the Windows implementation of this stream does not support
 /// non-UTF-8 byte sequences. Attempting to write bytes that are not valid UTF-8 will return
 /// an error.
+///
+/// In a process with a detached console, such as one using
+/// `#![windows_subsystem = "windows"]`, or in a child process spawned from such a process,
+/// the contained handle will be null. In such cases, the standard library's `Read` and
+/// `Write` will do nothing and silently succeed. All other I/O operations, via the
+/// standard library or via raw Windows API calls, will fail.
 ///
 /// # Examples
 ///
@@ -759,19 +845,16 @@ pub struct StderrLock<'a> {
 ///     Ok(())
 /// }
 /// ```
+#[must_use]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub fn stderr() -> Stderr {
     // Note that unlike `stdout()` we don't use `at_exit` here to register a
-    // destructor. Stderr is not buffered , so there's no need to run a
+    // destructor. Stderr is not buffered, so there's no need to run a
     // destructor for flushing the buffer
-    static INSTANCE: SyncOnceCell<ReentrantMutex<RefCell<StderrRaw>>> = SyncOnceCell::new();
+    static INSTANCE: ReentrantMutex<RefCell<StderrRaw>> =
+        ReentrantMutex::new(RefCell::new(stderr_raw()));
 
-    Stderr {
-        inner: Pin::static_ref(&INSTANCE).get_or_init_pin(
-            || unsafe { ReentrantMutex::new(RefCell::new(stderr_raw())) },
-            |mutex| unsafe { mutex.init() },
-        ),
-    }
+    Stderr { inner: &INSTANCE }
 }
 
 impl Stderr {
@@ -796,7 +879,10 @@ impl Stderr {
     /// }
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
-    pub fn lock(&self) -> StderrLock<'_> {
+    pub fn lock(&self) -> StderrLock<'static> {
+        // Locks this handle with 'static lifetime. This depends on the
+        // implementation detail that the underlying `ReentrantMutex` is
+        // static.
         StderrLock { inner: self.inner.lock() }
     }
 }
@@ -804,7 +890,7 @@ impl Stderr {
 #[stable(feature = "std_debug", since = "1.16.0")]
 impl fmt::Debug for Stderr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.pad("Stderr { .. }")
+        f.debug_struct("Stderr").finish_non_exhaustive()
     }
 }
 
@@ -886,7 +972,7 @@ impl Write for StderrLock<'_> {
 #[stable(feature = "std_debug", since = "1.16.0")]
 impl fmt::Debug for StderrLock<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.pad("StderrLock { .. }")
+        f.debug_struct("StderrLock").finish_non_exhaustive()
     }
 }
 
@@ -911,17 +997,31 @@ pub fn set_output_capture(sink: Option<LocalStream>) -> Option<LocalStream> {
 /// otherwise. `label` identifies the stream in a panic message.
 ///
 /// This function is used to print error messages, so it takes extra
-/// care to avoid causing a panic when `local_s` is unusable.
-/// For instance, if the TLS key for the local stream is
-/// already destroyed, or if the local stream is locked by another
-/// thread, it will just fall back to the global stream.
+/// care to avoid causing a panic when `OUTPUT_CAPTURE` is unusable.
+/// For instance, if the TLS key for output capturing is already destroyed, or
+/// if the local stream is in use by another thread, it will just fall back to
+/// the global stream.
 ///
 /// However, if the actual I/O causes an error, this function does panic.
+///
+/// Writing to non-blocking stdout/stderr can cause an error, which will lead
+/// this function to panic.
 fn print_to<T>(args: fmt::Arguments<'_>, global_s: fn() -> T, label: &str)
 where
     T: Write,
 {
-    if OUTPUT_CAPTURE_USED.load(Ordering::Relaxed)
+    if print_to_buffer_if_capture_used(args) {
+        // Successfully wrote to capture buffer.
+        return;
+    }
+
+    if let Err(e) = global_s().write_fmt(args) {
+        panic!("failed printing to {label}: {e}");
+    }
+}
+
+fn print_to_buffer_if_capture_used(args: fmt::Arguments<'_>) -> bool {
+    OUTPUT_CAPTURE_USED.load(Ordering::Relaxed)
         && OUTPUT_CAPTURE.try_with(|s| {
             // Note that we completely remove a local sink to write to in case
             // our printing recursively panics/prints, so the recursive
@@ -931,15 +1031,57 @@ where
                 s.set(Some(w));
             })
         }) == Ok(Some(()))
-    {
-        // Succesfully wrote to capture buffer.
+}
+
+/// Used by impl Termination for Result to print error after `main` or a test
+/// has returned. Should avoid panicking, although we can't help it if one of
+/// the Display impls inside args decides to.
+pub(crate) fn attempt_print_to_stderr(args: fmt::Arguments<'_>) {
+    if print_to_buffer_if_capture_used(args) {
         return;
     }
 
-    if let Err(e) = global_s().write_fmt(args) {
-        panic!("failed printing to {}: {}", label, e);
-    }
+    // Ignore error if the write fails, for example because stderr is already
+    // closed. There is not much point panicking at this point.
+    let _ = stderr().write_fmt(args);
 }
+
+/// Trait to determine if a descriptor/handle refers to a terminal/tty.
+#[unstable(feature = "is_terminal", issue = "98070")]
+pub trait IsTerminal: crate::sealed::Sealed {
+    /// Returns `true` if the descriptor/handle refers to a terminal/tty.
+    ///
+    /// On platforms where Rust does not know how to detect a terminal yet, this will return
+    /// `false`. This will also return `false` if an unexpected error occurred, such as from
+    /// passing an invalid file descriptor.
+    ///
+    /// # Platform-specific behavior
+    ///
+    /// On Windows, in addition to detecting consoles, this currently uses some heuristics to
+    /// detect older msys/cygwin/mingw pseudo-terminals based on device name: devices with names
+    /// starting with `msys-` or `cygwin-` and ending in `-pty` will be considered terminals.
+    /// Note that this [may change in the future][changes].
+    ///
+    /// [changes]: io#platform-specific-behavior
+    fn is_terminal(&self) -> bool;
+}
+
+macro_rules! impl_is_terminal {
+    ($($t:ty),*$(,)?) => {$(
+        #[unstable(feature = "sealed", issue = "none")]
+        impl crate::sealed::Sealed for $t {}
+
+        #[unstable(feature = "is_terminal", issue = "98070")]
+        impl IsTerminal for $t {
+            #[inline]
+            fn is_terminal(&self) -> bool {
+                crate::sys::io::is_terminal(self)
+            }
+        }
+    )*}
+}
+
+impl_is_terminal!(File, Stdin, StdinLock<'_>, Stdout, StdoutLock<'_>, Stderr, StderrLock<'_>);
 
 #[unstable(
     feature = "print_internals",

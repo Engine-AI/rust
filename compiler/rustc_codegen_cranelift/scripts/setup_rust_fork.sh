@@ -1,8 +1,7 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -e
 
-./build.sh
-source build/config.sh
+./y.rs build --no-unstable-features
 
 echo "[SETUP] Rust fork"
 git clone https://github.com/rust-lang/rust.git || true
@@ -11,31 +10,9 @@ git fetch
 git checkout -- .
 git checkout "$(rustc -V | cut -d' ' -f3 | tr -d '(')"
 
+git -c user.name=Dummy -c user.email=dummy@example.com am ../patches/*-stdlib-*.patch
+
 git apply - <<EOF
-diff --git a/Cargo.toml b/Cargo.toml
-index 5bd1147cad5..10d68a2ff14 100644
---- a/Cargo.toml
-+++ b/Cargo.toml
-@@ -111,5 +111,7 @@ rustc-std-workspace-std = { path = 'library/rustc-std-workspace-std' }
- rustc-std-workspace-alloc = { path = 'library/rustc-std-workspace-alloc' }
- rustc-std-workspace-std = { path = 'library/rustc-std-workspace-std' }
-
-+compiler_builtins = { path = "../build_sysroot/compiler-builtins" }
-+
- [patch."https://github.com/rust-lang/rust-clippy"]
- clippy_lints = { path = "src/tools/clippy/clippy_lints" }
-diff --git a/compiler/rustc_data_structures/Cargo.toml b/compiler/rustc_data_structures/Cargo.toml
-index 23e689fcae7..5f077b765b6 100644
---- a/compiler/rustc_data_structures/Cargo.toml
-+++ b/compiler/rustc_data_structures/Cargo.toml
-@@ -32,7 +32,6 @@ tempfile = "3.0.5"
-
- [dependencies.parking_lot]
- version = "0.11"
--features = ["nightly"]
-
- [target.'cfg(windows)'.dependencies]
- winapi = { version = "0.3", features = ["fileapi", "psapi"] }
 diff --git a/library/alloc/Cargo.toml b/library/alloc/Cargo.toml
 index d95b5b7f17f..00b6f0e3635 100644
 --- a/library/alloc/Cargo.toml
@@ -44,19 +21,22 @@ index d95b5b7f17f..00b6f0e3635 100644
 
  [dependencies]
  core = { path = "../core" }
--compiler_builtins = { version = "0.1.39", features = ['rustc-dep-of-std'] }
-+compiler_builtins = { version = "0.1.39", features = ['rustc-dep-of-std', 'no-asm'] }
+-compiler_builtins = { version = "0.1.40", features = ['rustc-dep-of-std'] }
++compiler_builtins = { version = "0.1.66", features = ['rustc-dep-of-std', 'no-asm'] }
 
  [dev-dependencies]
- rand = "0.7"
+ rand = { version = "0.8.5", default-features = false, features = ["alloc"] }
+ rand_xorshift = "0.3.0"
 EOF
 
 cat > config.toml <<EOF
+changelog-seen = 2
+
 [llvm]
 ninja = false
 
 [build]
-rustc = "$(pwd)/../build/bin/cg_clif"
+rustc = "$(pwd)/../dist/bin/rustc-clif"
 cargo = "$(rustup which cargo)"
 full-bootstrap = true
 local-rebuild = true
@@ -64,5 +44,15 @@ local-rebuild = true
 [rust]
 codegen-backends = ["cranelift"]
 deny-warnings = false
+verbose-tests = false
 EOF
 popd
+
+# FIXME remove once inline asm is fully supported
+export RUSTFLAGS="$RUSTFLAGS --cfg=rustix_use_libc"
+
+export CFG_VIRTUAL_RUST_SOURCE_BASE_DIR="$(cd download/sysroot/sysroot_src; pwd)"
+
+# Allow the testsuite to use llvm tools
+host_triple=$(rustc -vV | grep host | cut -d: -f2 | tr -d " ")
+export LLVM_BIN_DIR="$(rustc --print sysroot)/lib/rustlib/$host_triple/bin"

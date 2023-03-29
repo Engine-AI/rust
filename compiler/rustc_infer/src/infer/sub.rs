@@ -1,17 +1,16 @@
 use super::combine::{CombineFields, RelationDir};
-use super::SubregionOrigin;
+use super::{DefineOpaqueTypes, ObligationEmittingRelation, SubregionOrigin};
 
-use crate::infer::combine::ConstEquateRelation;
-use crate::traits::Obligation;
-use rustc_middle::ty::fold::TypeFoldable;
+use crate::traits::{Obligation, PredicateObligations};
 use rustc_middle::ty::relate::{Cause, Relate, RelateResult, TypeRelation};
+use rustc_middle::ty::visit::TypeVisitableExt;
 use rustc_middle::ty::TyVar;
-use rustc_middle::ty::{self, ToPredicate, Ty, TyCtxt};
+use rustc_middle::ty::{self, Ty, TyCtxt};
 use std::mem;
 
 /// Ensures `a` is made a subtype of `b`. Returns `a` on success.
-pub struct Sub<'combine, 'infcx, 'tcx> {
-    fields: &'combine mut CombineFields<'infcx, 'tcx>,
+pub struct Sub<'combine, 'a, 'tcx> {
+    fields: &'combine mut CombineFields<'a, 'tcx>,
     a_is_expected: bool,
 }
 
@@ -31,10 +30,15 @@ impl<'combine, 'infcx, 'tcx> Sub<'combine, 'infcx, 'tcx> {
     }
 }
 
-impl TypeRelation<'tcx> for Sub<'combine, 'infcx, 'tcx> {
+impl<'tcx> TypeRelation<'tcx> for Sub<'_, '_, 'tcx> {
     fn tag(&self) -> &'static str {
         "Sub"
     }
+
+    fn intercrate(&self) -> bool {
+        self.fields.infcx.intercrate
+    }
+
     fn tcx(&self) -> TyCtxt<'tcx> {
         self.fields.infcx.tcx
     }
@@ -45,6 +49,10 @@ impl TypeRelation<'tcx> for Sub<'combine, 'infcx, 'tcx> {
 
     fn a_is_expected(&self) -> bool {
         self.a_is_expected
+    }
+
+    fn mark_ambiguous(&mut self) {
+        self.fields.mark_ambiguous()
     }
 
     fn with_cause<F, R>(&mut self, cause: Cause, f: F) -> R
@@ -62,6 +70,7 @@ impl TypeRelation<'tcx> for Sub<'combine, 'infcx, 'tcx> {
     fn relate_with_variance<T: Relate<'tcx>>(
         &mut self,
         variance: ty::Variance,
+        _info: ty::VarianceDiagInfo<'tcx>,
         a: T,
         b: T,
     ) -> RelateResult<'tcx, T> {
@@ -73,9 +82,8 @@ impl TypeRelation<'tcx> for Sub<'combine, 'infcx, 'tcx> {
         }
     }
 
+    #[instrument(skip(self), level = "debug")]
     fn tys(&mut self, a: Ty<'tcx>, b: Ty<'tcx>) -> RelateResult<'tcx, Ty<'tcx>> {
-        debug!("{}.tys({:?}, {:?})", self.tag(), a, b);
-
         if a == b {
             return Ok(a);
         }
@@ -83,8 +91,9 @@ impl TypeRelation<'tcx> for Sub<'combine, 'infcx, 'tcx> {
         let infcx = self.fields.infcx;
         let a = infcx.inner.borrow_mut().type_variables().replace_if_possible(a);
         let b = infcx.inner.borrow_mut().type_variables().replace_if_possible(b);
+
         match (a.kind(), b.kind()) {
-            (&ty::Infer(TyVar(a_vid)), &ty::Infer(TyVar(b_vid))) => {
+            (&ty::Infer(TyVar(_)), &ty::Infer(TyVar(_))) => {
                 // Shouldn't have any LBR here, so we can safely put
                 // this under a binder below without fear of accidental
                 // capture.
@@ -92,20 +101,16 @@ impl TypeRelation<'tcx> for Sub<'combine, 'infcx, 'tcx> {
                 assert!(!b.has_escaping_bound_vars());
 
                 // can't make progress on `A <: B` if both A and B are
-                // type variables, so record an obligation. We also
-                // have to record in the `type_variables` tracker that
-                // the two variables are equal modulo subtyping, which
-                // is important to the occurs check later on.
-                infcx.inner.borrow_mut().type_variables().sub(a_vid, b_vid);
+                // type variables, so record an obligation.
                 self.fields.obligations.push(Obligation::new(
+                    self.tcx(),
                     self.fields.trace.cause.clone(),
                     self.fields.param_env,
-                    ty::PredicateKind::Subtype(ty::SubtypePredicate {
+                    ty::Binder::dummy(ty::PredicateKind::Subtype(ty::SubtypePredicate {
                         a_is_expected: self.a_is_expected,
                         a,
                         b,
-                    })
-                    .to_predicate(self.tcx()),
+                    })),
                 ));
 
                 Ok(a)
@@ -119,9 +124,53 @@ impl TypeRelation<'tcx> for Sub<'combine, 'infcx, 'tcx> {
                 Ok(a)
             }
 
-            (&ty::Error(_), _) | (_, &ty::Error(_)) => {
-                infcx.set_tainted_by_errors();
-                Ok(self.tcx().ty_error())
+            (&ty::Error(e), _) | (_, &ty::Error(e)) => {
+                infcx.set_tainted_by_errors(e);
+                Ok(self.tcx().ty_error(e))
+            }
+
+            (
+                &ty::Alias(ty::Opaque, ty::AliasTy { def_id: a_def_id, .. }),
+                &ty::Alias(ty::Opaque, ty::AliasTy { def_id: b_def_id, .. }),
+            ) if a_def_id == b_def_id => {
+                self.fields.infcx.super_combine_tys(self, a, b)?;
+                Ok(a)
+            }
+            (&ty::Alias(ty::Opaque, ty::AliasTy { def_id, .. }), _)
+            | (_, &ty::Alias(ty::Opaque, ty::AliasTy { def_id, .. }))
+                if self.fields.define_opaque_types == DefineOpaqueTypes::Yes
+                    && def_id.is_local() =>
+            {
+                self.fields.obligations.extend(
+                    infcx
+                        .handle_opaque_type(
+                            a,
+                            b,
+                            self.a_is_expected,
+                            &self.fields.trace.cause,
+                            self.param_env(),
+                        )?
+                        .obligations,
+                );
+                Ok(a)
+            }
+            // Optimization of GeneratorWitness relation since we know that all
+            // free regions are replaced with bound regions during construction.
+            // This greatly speeds up subtyping of GeneratorWitness.
+            (&ty::GeneratorWitness(a_types), &ty::GeneratorWitness(b_types)) => {
+                let a_types = infcx.tcx.anonymize_bound_vars(a_types);
+                let b_types = infcx.tcx.anonymize_bound_vars(b_types);
+                if a_types.bound_vars() == b_types.bound_vars() {
+                    let (a_types, b_types) = infcx.instantiate_binder_with_placeholders(
+                        a_types.map_bound(|a_types| (a_types, b_types.skip_binder())),
+                    );
+                    for (a, b) in std::iter::zip(a_types, b_types) {
+                        self.relate(a, b)?;
+                    }
+                    Ok(a)
+                } else {
+                    Err(ty::error::TypeError::Sorts(ty::relate::expected_found(self, a, b)))
+                }
             }
 
             _ => {
@@ -141,22 +190,23 @@ impl TypeRelation<'tcx> for Sub<'combine, 'infcx, 'tcx> {
         // FIXME -- we have more fine-grained information available
         // from the "cause" field, we could perhaps give more tailored
         // error messages.
-        let origin = SubregionOrigin::Subtype(box self.fields.trace.clone());
+        let origin = SubregionOrigin::Subtype(Box::new(self.fields.trace.clone()));
+        // Subtype(&'a u8, &'b u8) => Outlives('a: 'b) => SubRegion('b, 'a)
         self.fields
             .infcx
             .inner
             .borrow_mut()
             .unwrap_region_constraints()
-            .make_subregion(origin, a, b);
+            .make_subregion(origin, b, a);
 
         Ok(a)
     }
 
     fn consts(
         &mut self,
-        a: &'tcx ty::Const<'tcx>,
-        b: &'tcx ty::Const<'tcx>,
-    ) -> RelateResult<'tcx, &'tcx ty::Const<'tcx>> {
+        a: ty::Const<'tcx>,
+        b: ty::Const<'tcx>,
+    ) -> RelateResult<'tcx, ty::Const<'tcx>> {
         self.fields.infcx.super_combine_consts(self, a, b)
     }
 
@@ -168,12 +218,26 @@ impl TypeRelation<'tcx> for Sub<'combine, 'infcx, 'tcx> {
     where
         T: Relate<'tcx>,
     {
-        self.fields.higher_ranked_sub(a, b, self.a_is_expected)
+        // A binder is always a subtype of itself if it's structually equal to itself
+        if a == b {
+            return Ok(a);
+        }
+
+        self.fields.higher_ranked_sub(a, b, self.a_is_expected)?;
+        Ok(a)
     }
 }
 
-impl<'tcx> ConstEquateRelation<'tcx> for Sub<'_, '_, 'tcx> {
-    fn const_equate_obligation(&mut self, a: &'tcx ty::Const<'tcx>, b: &'tcx ty::Const<'tcx>) {
-        self.fields.add_const_equate_obligation(self.a_is_expected, a, b);
+impl<'tcx> ObligationEmittingRelation<'tcx> for Sub<'_, '_, 'tcx> {
+    fn register_predicates(&mut self, obligations: impl IntoIterator<Item: ty::ToPredicate<'tcx>>) {
+        self.fields.register_predicates(obligations);
+    }
+
+    fn register_obligations(&mut self, obligations: PredicateObligations<'tcx>) {
+        self.fields.register_obligations(obligations);
+    }
+
+    fn alias_relate_direction(&self) -> ty::AliasRelationDirection {
+        ty::AliasRelationDirection::Subtype
     }
 }

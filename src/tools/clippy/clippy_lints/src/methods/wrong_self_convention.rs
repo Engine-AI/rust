@@ -2,11 +2,10 @@ use crate::methods::SelfKind;
 use clippy_utils::diagnostics::span_lint_and_help;
 use clippy_utils::ty::is_copy;
 use rustc_lint::LateContext;
-use rustc_middle::ty::TyS;
+use rustc_middle::ty::Ty;
 use rustc_span::source_map::Span;
 use std::fmt;
 
-use super::WRONG_PUB_SELF_CONVENTION;
 use super::WRONG_SELF_CONVENTION;
 
 #[rustfmt::skip]
@@ -15,15 +14,15 @@ const CONVENTIONS: [(&[Convention], &[SelfKind]); 9] = [
     (&[Convention::StartsWith("as_")], &[SelfKind::Ref, SelfKind::RefMut]),
     (&[Convention::StartsWith("from_")], &[SelfKind::No]),
     (&[Convention::StartsWith("into_")], &[SelfKind::Value]),
-    (&[Convention::StartsWith("is_")], &[SelfKind::Ref, SelfKind::No]),
+    (&[Convention::StartsWith("is_")], &[SelfKind::RefMut, SelfKind::Ref, SelfKind::No]),
     (&[Convention::Eq("to_mut")], &[SelfKind::RefMut]),
     (&[Convention::StartsWith("to_"), Convention::EndsWith("_mut")], &[SelfKind::RefMut]),
 
     // Conversion using `to_` can use borrowed (non-Copy types) or owned (Copy types).
     // Source: https://rust-lang.github.io/api-guidelines/naming.html#ad-hoc-conversions-follow-as_-to_-into_-conventions-c-conv
-    (&[Convention::StartsWith("to_"), Convention::NotEndsWith("_mut"), Convention::IsSelfTypeCopy(false), 
-    Convention::IsTraitItem(false)], &[SelfKind::Ref]),
-    (&[Convention::StartsWith("to_"), Convention::NotEndsWith("_mut"), Convention::IsSelfTypeCopy(true), 
+    (&[Convention::StartsWith("to_"), Convention::NotEndsWith("_mut"), Convention::IsSelfTypeCopy(false),
+    Convention::IsTraitItem(false), Convention::ImplementsTrait(false)], &[SelfKind::Ref]),
+    (&[Convention::StartsWith("to_"), Convention::NotEndsWith("_mut"), Convention::IsSelfTypeCopy(true),
     Convention::IsTraitItem(false), Convention::ImplementsTrait(false)], &[SelfKind::Value]),
 ];
 
@@ -42,7 +41,7 @@ impl Convention {
     fn check<'tcx>(
         &self,
         cx: &LateContext<'tcx>,
-        self_ty: &'tcx TyS<'tcx>,
+        self_ty: Ty<'tcx>,
         other: &str,
         implements_trait: bool,
         is_trait_item: bool,
@@ -62,20 +61,20 @@ impl Convention {
 impl fmt::Display for Convention {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         match *self {
-            Self::Eq(this) => format!("`{}`", this).fmt(f),
-            Self::StartsWith(this) => format!("`{}*`", this).fmt(f),
-            Self::EndsWith(this) => format!("`*{}`", this).fmt(f),
-            Self::NotEndsWith(this) => format!("`~{}`", this).fmt(f),
+            Self::Eq(this) => format!("`{this}`").fmt(f),
+            Self::StartsWith(this) => format!("`{this}*`").fmt(f),
+            Self::EndsWith(this) => format!("`*{this}`").fmt(f),
+            Self::NotEndsWith(this) => format!("`~{this}`").fmt(f),
             Self::IsSelfTypeCopy(is_true) => {
                 format!("`self` type is{} `Copy`", if is_true { "" } else { " not" }).fmt(f)
             },
             Self::ImplementsTrait(is_true) => {
                 let (negation, s_suffix) = if is_true { ("", "s") } else { (" does not", "") };
-                format!("method{} implement{} a trait", negation, s_suffix).fmt(f)
+                format!("method{negation} implement{s_suffix} a trait").fmt(f)
             },
             Self::IsTraitItem(is_true) => {
                 let suffix = if is_true { " is" } else { " is not" };
-                format!("method{} a trait item", suffix).fmt(f)
+                format!("method{suffix} a trait item").fmt(f)
             },
         }
     }
@@ -85,23 +84,25 @@ impl fmt::Display for Convention {
 pub(super) fn check<'tcx>(
     cx: &LateContext<'tcx>,
     item_name: &str,
-    is_pub: bool,
-    self_ty: &'tcx TyS<'tcx>,
-    first_arg_ty: &'tcx TyS<'tcx>,
+    self_ty: Ty<'tcx>,
+    first_arg_ty: Ty<'tcx>,
     first_arg_span: Span,
     implements_trait: bool,
     is_trait_item: bool,
 ) {
-    let lint = if is_pub {
-        WRONG_PUB_SELF_CONVENTION
-    } else {
-        WRONG_SELF_CONVENTION
-    };
     if let Some((conventions, self_kinds)) = &CONVENTIONS.iter().find(|(convs, _)| {
         convs
             .iter()
             .all(|conv| conv.check(cx, self_ty, item_name, implements_trait, is_trait_item))
     }) {
+        // don't lint if it implements a trait but not willing to check `Copy` types conventions (see #7032)
+        if implements_trait
+            && !conventions
+                .iter()
+                .any(|conv| matches!(conv, Convention::IsSelfTypeCopy(_)))
+        {
+            return;
+        }
         if !self_kinds.iter().any(|k| k.matches(cx, self_ty, first_arg_ty)) {
             let suggestion = {
                 if conventions.len() > 1 {
@@ -134,11 +135,10 @@ pub(super) fn check<'tcx>(
 
             span_lint_and_help(
                 cx,
-                lint,
+                WRONG_SELF_CONVENTION,
                 first_arg_span,
                 &format!(
-                    "{} usually take {}",
-                    suggestion,
+                    "{suggestion} usually take {}",
                     &self_kinds
                         .iter()
                         .map(|k| k.description())

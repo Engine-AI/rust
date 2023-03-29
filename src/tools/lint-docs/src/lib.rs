@@ -37,16 +37,44 @@ impl Lint {
     }
 
     fn is_ignored(&self) -> bool {
-        self.doc
-            .iter()
-            .filter(|line| line.starts_with("```rust"))
-            .all(|line| line.contains(",ignore"))
+        let blocks: Vec<_> = self.doc.iter().filter(|line| line.starts_with("```rust")).collect();
+        !blocks.is_empty() && blocks.iter().all(|line| line.contains(",ignore"))
     }
 
     /// Checks the doc style of the lint.
     fn check_style(&self) -> Result<(), Box<dyn Error>> {
         for &expected in &["### Example", "### Explanation", "{{produces}}"] {
             if expected == "{{produces}}" && self.is_ignored() {
+                if self.doc_contains("{{produces}}") {
+                    return Err(format!(
+                        "the lint example has `ignore`, but also contains the {{{{produces}}}} marker\n\
+                        \n\
+                        The documentation generator cannot generate the example output when the \
+                        example is ignored.\n\
+                        Manually include the sample output below the example. For example:\n\
+                        \n\
+                        /// ```rust,ignore (needs command line option)\n\
+                        /// #[cfg(widnows)]\n\
+                        /// fn foo() {{}}\n\
+                        /// ```\n\
+                        ///\n\
+                        /// This will produce:\n\
+                        /// \n\
+                        /// ```text\n\
+                        /// warning: unknown condition name used\n\
+                        ///  --> lint_example.rs:1:7\n\
+                        ///   |\n\
+                        /// 1 | #[cfg(widnows)]\n\
+                        ///   |       ^^^^^^^\n\
+                        ///   |\n\
+                        ///   = note: `#[warn(unexpected_cfgs)]` on by default\n\
+                        /// ```\n\
+                        \n\
+                        Replacing the output with the text of the example you \
+                        compiled manually yourself.\n\
+                        "
+                    ).into());
+                }
                 continue;
             }
             if !self.doc_contains(expected) {
@@ -148,6 +176,10 @@ impl<'a> LintExtractor<'a> {
                             doc_lines.push("".to_string());
                         } else if line.starts_with("// ") {
                             // Ignore comments.
+                            continue;
+                        } else if line.starts_with("#[allow") {
+                            // Ignore allow of lints (useful for
+                            // invalid_rust_codeblocks).
                             continue;
                         } else {
                             let name = lint_name(line).map_err(|e| {
@@ -315,10 +347,10 @@ impl<'a> LintExtractor<'a> {
                             ..,
                             &format!(
                                 "This will produce:\n\
-                            \n\
-                            ```text\n\
-                            {}\
-                            ```",
+                                \n\
+                                ```text\n\
+                                {}\
+                                ```",
                                 output
                             ),
                         );
@@ -390,37 +422,36 @@ impl<'a> LintExtractor<'a> {
             .filter(|line| line.starts_with('{'))
             .map(serde_json::from_str)
             .collect::<Result<Vec<serde_json::Value>, _>>()?;
-        match msgs
+        // First try to find the messages with the `code` field set to our lint.
+        let matches: Vec<_> = msgs
             .iter()
-            .find(|msg| matches!(&msg["code"]["code"], serde_json::Value::String(s) if s==name))
-        {
-            Some(msg) => {
-                let rendered = msg["rendered"].as_str().expect("rendered field should exist");
-                Ok(rendered.to_string())
+            .filter(|msg| matches!(&msg["code"]["code"], serde_json::Value::String(s) if s==name))
+            .map(|msg| msg["rendered"].as_str().expect("rendered field should exist").to_string())
+            .collect();
+        if matches.is_empty() {
+            // Some lints override their code to something else (E0566).
+            // Try to find something that looks like it could be our lint.
+            let matches: Vec<_> = msgs.iter().filter(|msg|
+                matches!(&msg["rendered"], serde_json::Value::String(s) if s.contains(name)))
+                .map(|msg| msg["rendered"].as_str().expect("rendered field should exist").to_string())
+                .collect();
+            if matches.is_empty() {
+                let rendered: Vec<&str> =
+                    msgs.iter().filter_map(|msg| msg["rendered"].as_str()).collect();
+                let non_json: Vec<&str> =
+                    stderr.lines().filter(|line| !line.starts_with('{')).collect();
+                Err(format!(
+                    "did not find lint `{}` in output of example, got:\n{}\n{}",
+                    name,
+                    non_json.join("\n"),
+                    rendered.join("\n")
+                )
+                .into())
+            } else {
+                Ok(matches.join("\n"))
             }
-            None => {
-                match msgs.iter().find(
-                    |msg| matches!(&msg["rendered"], serde_json::Value::String(s) if s.contains(name)),
-                ) {
-                    Some(msg) => {
-                        let rendered = msg["rendered"].as_str().expect("rendered field should exist");
-                        Ok(rendered.to_string())
-                    }
-                    None => {
-                        let rendered: Vec<&str> =
-                            msgs.iter().filter_map(|msg| msg["rendered"].as_str()).collect();
-                        let non_json: Vec<&str> =
-                            stderr.lines().filter(|line| !line.starts_with('{')).collect();
-                        Err(format!(
-                            "did not find lint `{}` in output of example, got:\n{}\n{}",
-                            name,
-                            non_json.join("\n"),
-                            rendered.join("\n")
-                        )
-                        .into())
-                    }
-                }
-            }
+        } else {
+            Ok(matches.join("\n"))
         }
     }
 
@@ -467,7 +498,9 @@ fn lint_name(line: &str) -> Result<String, &'static str> {
                 return Err("lint name should end with comma");
             }
             let name = &name[..name.len() - 1];
-            if !name.chars().all(|ch| ch.is_uppercase() || ch == '_') || name.is_empty() {
+            if !name.chars().all(|ch| ch.is_uppercase() || ch.is_ascii_digit() || ch == '_')
+                || name.is_empty()
+            {
                 return Err("lint name did not have expected format");
             }
             Ok(name.to_lowercase().to_string())
@@ -476,20 +509,20 @@ fn lint_name(line: &str) -> Result<String, &'static str> {
     }
 }
 
-static ALLOWED_MD: &str = r#"# Allowed-by-default lints
+static ALLOWED_MD: &str = r#"# Allowed-by-default Lints
 
 These lints are all set to the 'allow' level by default. As such, they won't show up
 unless you set them to a higher lint level with a flag or attribute.
 
 "#;
 
-static WARN_MD: &str = r#"# Warn-by-default lints
+static WARN_MD: &str = r#"# Warn-by-default Lints
 
 These lints are all set to the 'warn' level by default.
 
 "#;
 
-static DENY_MD: &str = r#"# Deny-by-default lints
+static DENY_MD: &str = r#"# Deny-by-default Lints
 
 These lints are all set to the 'deny' level by default.
 

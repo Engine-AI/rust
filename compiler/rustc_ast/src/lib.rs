@@ -1,4 +1,4 @@
-//! The Rust parser and macro expander.
+//! The Rust Abstract Syntax Tree (AST).
 //!
 //! # Note
 //!
@@ -8,43 +8,40 @@
     html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/",
     test(attr(deny(warnings)))
 )]
-#![feature(box_syntax)]
+#![feature(associated_type_bounds)]
 #![feature(box_patterns)]
-#![feature(const_fn)] // For the `transmute` in `P::new`
-#![feature(const_fn_transmute)]
-#![feature(const_panic)]
-#![feature(crate_visibility_modifier)]
-#![feature(iter_zip)]
-#![feature(label_break_value)]
-#![feature(nll)]
-#![cfg_attr(bootstrap, feature(or_patterns))]
+#![feature(const_default_impls)]
+#![feature(const_trait_impl)]
+#![feature(if_let_guard)]
+#![feature(let_chains)]
+#![feature(min_specialization)]
+#![feature(negative_impls)]
+#![feature(stmt_expr_attributes)]
 #![recursion_limit = "256"]
+#![deny(rustc::untranslatable_diagnostic)]
+#![deny(rustc::diagnostic_outside_of_impl)]
 
 #[macro_use]
 extern crate rustc_macros;
 
-#[macro_export]
-macro_rules! unwrap_or {
-    ($opt:expr, $default:expr) => {
-        match $opt {
-            Some(x) => x,
-            None => $default,
-        }
-    };
-}
+#[macro_use]
+extern crate tracing;
 
 pub mod util {
+    pub mod case;
     pub mod classify;
     pub mod comments;
     pub mod literal;
     pub mod parser;
+    pub mod unicode;
 }
 
 pub mod ast;
-pub mod ast_like;
+pub mod ast_traits;
 pub mod attr;
 pub mod entry;
 pub mod expand;
+pub mod format;
 pub mod mut_visit;
 pub mod node_id;
 pub mod ptr;
@@ -53,7 +50,8 @@ pub mod tokenstream;
 pub mod visit;
 
 pub use self::ast::*;
-pub use self::ast_like::AstLike;
+pub use self::ast_traits::{AstDeref, AstNodeWrapper, HasAttrs, HasNodeId, HasSpan, HasTokens};
+pub use self::format::*;
 
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
 

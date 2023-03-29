@@ -1,12 +1,5 @@
 //! Enums denoting options for test execution.
 
-/// Whether to execute tests concurrently or not
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum Concurrent {
-    Yes,
-    No,
-}
-
 /// Number of times to run a benchmarked function
 #[derive(Clone, PartialEq, Eq)]
 pub enum BenchMode {
@@ -39,6 +32,8 @@ pub enum OutputFormat {
     Terse,
     /// JSON output
     Json,
+    /// JUnit output
+    Junit,
 }
 
 /// Whether ignored test should be run or not

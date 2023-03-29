@@ -13,7 +13,7 @@ use proc_macro::{quote, TokenStream};
 
 #[proc_macro_derive(DeriveSomething)]
 pub fn derive(_: TokenStream) -> TokenStream {
-    // Shound not trigger `used_underscore_binding`
+    // Should not trigger `used_underscore_binding`
     let _inside_derive = 1;
     assert_eq!(_inside_derive, _inside_derive);
 
@@ -52,4 +52,37 @@ pub fn derive_use_self(_input: TokenStream) -> proc_macro::TokenStream {
             }
         }
     }
+}
+
+#[proc_macro_derive(ClippyMiniMacroTest)]
+pub fn mini_macro(_: TokenStream) -> TokenStream {
+    quote!(
+        #[allow(unused)]
+        fn needless_take_by_value(s: String) {
+            println!("{}", s.len());
+        }
+        #[allow(unused)]
+        fn needless_loop(items: &[u8]) {
+            for i in 0..items.len() {
+                println!("{}", items[i]);
+            }
+        }
+        fn line_wrapper() {
+            println!("{}", line!());
+        }
+    )
+}
+
+#[proc_macro_derive(ExtraLifetimeDerive)]
+#[allow(unused)]
+pub fn extra_lifetime(_input: TokenStream) -> TokenStream {
+    quote!(
+        pub struct ExtraLifetime;
+
+        impl<'b> ExtraLifetime {
+            pub fn something<'c>() -> Self {
+                Self
+            }
+        }
+    )
 }

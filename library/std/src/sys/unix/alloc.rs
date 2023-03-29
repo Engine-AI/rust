@@ -1,6 +1,6 @@
 use crate::alloc::{GlobalAlloc, Layout, System};
 use crate::ptr;
-use crate::sys_common::alloc::{realloc_fallback, MIN_ALIGN};
+use crate::sys::common::alloc::{realloc_fallback, MIN_ALIGN};
 
 #[stable(feature = "alloc_system_type", since = "1.28.0")]
 unsafe impl GlobalAlloc for System {
@@ -57,7 +57,9 @@ cfg_if::cfg_if! {
         target_os = "android",
         target_os = "illumos",
         target_os = "redox",
-        target_os = "solaris"
+        target_os = "solaris",
+        target_os = "espidf",
+        target_os = "horizon"
     ))] {
         #[inline]
         unsafe fn aligned_malloc(layout: &Layout) -> *mut u8 {

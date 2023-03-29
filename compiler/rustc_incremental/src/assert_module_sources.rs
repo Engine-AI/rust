@@ -5,6 +5,7 @@
 //! The user adds annotations to the crate of the following form:
 //!
 //! ```
+//! # #![feature(rustc_attrs)]
 //! #![rustc_partition_reused(module="spike", cfg="rpass2")]
 //! #![rustc_partition_codegened(module="spike-x", cfg="rpass2")]
 //! ```
@@ -17,30 +18,29 @@
 //! the HIR doesn't change as a result of the annotations, which might
 //! perturb the reuse results.
 //!
-//! `#![rustc_expected_cgu_reuse(module="spike", cfg="rpass2", kind="post-lto")]
+//! `#![rustc_expected_cgu_reuse(module="spike", cfg="rpass2", kind="post-lto")]`
 //! allows for doing a more fine-grained check to see if pre- or post-lto data
 //! was re-used.
 
+use crate::errors;
 use rustc_ast as ast;
+use rustc_data_structures::fx::FxHashSet;
 use rustc_hir::def_id::LOCAL_CRATE;
 use rustc_middle::mir::mono::CodegenUnitNameBuilder;
 use rustc_middle::ty::TyCtxt;
 use rustc_session::cgu_reuse_tracker::*;
 use rustc_span::symbol::{sym, Symbol};
-use std::collections::BTreeSet;
+use thin_vec::ThinVec;
 
+#[allow(missing_docs)]
 pub fn assert_module_sources(tcx: TyCtxt<'_>) {
     tcx.dep_graph.with_ignore(|| {
         if tcx.sess.opts.incremental.is_none() {
             return;
         }
 
-        let available_cgus = tcx
-            .collect_and_partition_mono_items(LOCAL_CRATE)
-            .1
-            .iter()
-            .map(|cgu| cgu.name().to_string())
-            .collect::<BTreeSet<String>>();
+        let available_cgus =
+            tcx.collect_and_partition_mono_items(()).1.iter().map(|cgu| cgu.name()).collect();
 
         let ams = AssertModuleSource { tcx, available_cgus };
 
@@ -52,38 +52,33 @@ pub fn assert_module_sources(tcx: TyCtxt<'_>) {
 
 struct AssertModuleSource<'tcx> {
     tcx: TyCtxt<'tcx>,
-    available_cgus: BTreeSet<String>,
+    available_cgus: FxHashSet<Symbol>,
 }
 
-impl AssertModuleSource<'tcx> {
+impl<'tcx> AssertModuleSource<'tcx> {
     fn check_attr(&self, attr: &ast::Attribute) {
-        let (expected_reuse, comp_kind) =
-            if self.tcx.sess.check_name(attr, sym::rustc_partition_reused) {
-                (CguReuse::PreLto, ComparisonKind::AtLeast)
-            } else if self.tcx.sess.check_name(attr, sym::rustc_partition_codegened) {
-                (CguReuse::No, ComparisonKind::Exact)
-            } else if self.tcx.sess.check_name(attr, sym::rustc_expected_cgu_reuse) {
-                match self.field(attr, sym::kind) {
-                    sym::no => (CguReuse::No, ComparisonKind::Exact),
-                    sym::pre_dash_lto => (CguReuse::PreLto, ComparisonKind::Exact),
-                    sym::post_dash_lto => (CguReuse::PostLto, ComparisonKind::Exact),
-                    sym::any => (CguReuse::PreLto, ComparisonKind::AtLeast),
-                    other => {
-                        self.tcx.sess.span_fatal(
-                            attr.span,
-                            &format!("unknown cgu-reuse-kind `{}` specified", other),
-                        );
-                    }
+        let (expected_reuse, comp_kind) = if attr.has_name(sym::rustc_partition_reused) {
+            (CguReuse::PreLto, ComparisonKind::AtLeast)
+        } else if attr.has_name(sym::rustc_partition_codegened) {
+            (CguReuse::No, ComparisonKind::Exact)
+        } else if attr.has_name(sym::rustc_expected_cgu_reuse) {
+            match self.field(attr, sym::kind) {
+                sym::no => (CguReuse::No, ComparisonKind::Exact),
+                sym::pre_dash_lto => (CguReuse::PreLto, ComparisonKind::Exact),
+                sym::post_dash_lto => (CguReuse::PostLto, ComparisonKind::Exact),
+                sym::any => (CguReuse::PreLto, ComparisonKind::AtLeast),
+                other => {
+                    self.tcx
+                        .sess
+                        .emit_fatal(errors::UnknownReuseKind { span: attr.span, kind: other });
                 }
-            } else {
-                return;
-            };
+            }
+        } else {
+            return;
+        };
 
-        if !self.tcx.sess.opts.debugging_opts.query_dep_graph {
-            self.tcx.sess.span_fatal(
-                attr.span,
-                "found CGU-reuse attribute but `-Zquery-dep-graph` was not specified",
-            );
+        if !self.tcx.sess.opts.unstable_opts.query_dep_graph {
+            self.tcx.sess.emit_fatal(errors::MissingQueryDepGraph { span: attr.span });
         }
 
         if !self.check_config(attr) {
@@ -95,13 +90,11 @@ impl AssertModuleSource<'tcx> {
         let crate_name = self.tcx.crate_name(LOCAL_CRATE).to_string();
 
         if !user_path.starts_with(&crate_name) {
-            let msg = format!(
-                "Found malformed codegen unit name `{}`. \
-                Codegen units names must always start with the name of the \
-                crate (`{}` in this case).",
-                user_path, crate_name
-            );
-            self.tcx.sess.span_fatal(attr.span, &msg);
+            self.tcx.sess.emit_fatal(errors::MalformedCguName {
+                span: attr.span,
+                user_path,
+                crate_name,
+            });
         }
 
         // Split of the "special suffix" if there is one.
@@ -124,20 +117,16 @@ impl AssertModuleSource<'tcx> {
 
         debug!("mapping '{}' to cgu name '{}'", self.field(attr, sym::module), cgu_name);
 
-        if !self.available_cgus.contains(&*cgu_name.as_str()) {
-            self.tcx.sess.span_err(
-                attr.span,
-                &format!(
-                    "no module named `{}` (mangled: {}). Available modules: {}",
-                    user_path,
-                    cgu_name,
-                    self.available_cgus
-                        .iter()
-                        .map(|cgu| cgu.to_string())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
-            );
+        if !self.available_cgus.contains(&cgu_name) {
+            let mut cgu_names: Vec<&str> =
+                self.available_cgus.iter().map(|cgu| cgu.as_str()).collect();
+            cgu_names.sort();
+            self.tcx.sess.emit_err(errors::NoModuleNamed {
+                span: attr.span,
+                user_path,
+                cgu_name,
+                cgu_names: cgu_names.join(", "),
+            });
         }
 
         self.tcx.sess.cgu_reuse_tracker.set_expectation(
@@ -150,20 +139,20 @@ impl AssertModuleSource<'tcx> {
     }
 
     fn field(&self, attr: &ast::Attribute, name: Symbol) -> Symbol {
-        for item in attr.meta_item_list().unwrap_or_else(Vec::new) {
+        for item in attr.meta_item_list().unwrap_or_else(ThinVec::new) {
             if item.has_name(name) {
                 if let Some(value) = item.value_str() {
                     return value;
                 } else {
-                    self.tcx.sess.span_fatal(
-                        item.span(),
-                        &format!("associated value expected for `{}`", name),
-                    );
+                    self.tcx.sess.emit_fatal(errors::FieldAssociatedValueExpected {
+                        span: item.span(),
+                        name,
+                    });
                 }
             }
         }
 
-        self.tcx.sess.span_fatal(attr.span, &format!("no field `{}`", name));
+        self.tcx.sess.emit_fatal(errors::NoField { span: attr.span, name });
     }
 
     /// Scan for a `cfg="foo"` attribute and check whether we have a

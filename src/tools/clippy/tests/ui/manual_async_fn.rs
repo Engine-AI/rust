@@ -1,5 +1,4 @@
 // run-rustfix
-// edition:2018
 #![warn(clippy::manual_async_fn)]
 #![allow(unused)]
 
@@ -53,7 +52,7 @@ async fn already_async() -> impl Future<Output = i32> {
     async { 42 }
 }
 
-struct S {}
+struct S;
 impl S {
     fn inh_fut() -> impl Future<Output = i32> {
         async {
@@ -126,6 +125,18 @@ mod issue_5765 {
             a.f()
         };
     }
+}
+
+pub fn issue_10450() -> impl Future<Output = i32> {
+    async { 42 }
+}
+
+pub(crate) fn issue_10450_2() -> impl Future<Output = i32> {
+    async { 42 }
+}
+
+pub(self) fn issue_10450_3() -> impl Future<Output = i32> {
+    async { 42 }
 }
 
 fn main() {}

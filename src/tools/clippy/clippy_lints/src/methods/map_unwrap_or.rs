@@ -1,17 +1,14 @@
 use clippy_utils::diagnostics::{span_lint, span_lint_and_sugg};
-use clippy_utils::meets_msrv;
+use clippy_utils::msrvs::{self, Msrv};
 use clippy_utils::source::snippet;
 use clippy_utils::ty::is_type_diagnostic_item;
 use clippy_utils::usage::mutated_variables;
 use rustc_errors::Applicability;
 use rustc_hir as hir;
 use rustc_lint::LateContext;
-use rustc_semver::RustcVersion;
 use rustc_span::symbol::sym;
 
 use super::MAP_UNWRAP_OR;
-
-const MAP_UNWRAP_OR_MSRV: RustcVersion = RustcVersion::new(1, 41, 0);
 
 /// lint use of `map().unwrap_or_else()` for `Option`s and `Result`s
 /// Return true if lint triggered
@@ -21,14 +18,15 @@ pub(super) fn check<'tcx>(
     recv: &'tcx hir::Expr<'_>,
     map_arg: &'tcx hir::Expr<'_>,
     unwrap_arg: &'tcx hir::Expr<'_>,
-    msrv: Option<&RustcVersion>,
+    msrv: &Msrv,
 ) -> bool {
-    if !meets_msrv(msrv, &MAP_UNWRAP_OR_MSRV) {
+    // lint if the caller of `map()` is an `Option`
+    let is_option = is_type_diagnostic_item(cx, cx.typeck_results().expr_ty(recv), sym::Option);
+    let is_result = is_type_diagnostic_item(cx, cx.typeck_results().expr_ty(recv), sym::Result);
+
+    if is_result && !msrv.meets(msrvs::RESULT_MAP_OR_ELSE) {
         return false;
     }
-    // lint if the caller of `map()` is an `Option`
-    let is_option = is_type_diagnostic_item(cx, cx.typeck_results().expr_ty(recv), sym::option_type);
-    let is_result = is_type_diagnostic_item(cx, cx.typeck_results().expr_ty(recv), sym::result_type);
 
     if is_option || is_result {
         // Don't make a suggestion that may fail to compile due to mutably borrowing
@@ -66,7 +64,7 @@ pub(super) fn check<'tcx>(
                 expr.span,
                 msg,
                 "try this",
-                format!("{}.map_or_else({}, {})", var_snippet, unwrap_snippet, map_snippet),
+                format!("{var_snippet}.map_or_else({unwrap_snippet}, {map_snippet})"),
                 Applicability::MachineApplicable,
             );
             return true;

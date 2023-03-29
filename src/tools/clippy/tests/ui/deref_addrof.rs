@@ -1,5 +1,11 @@
 // run-rustfix
+// aux-build:proc_macros.rs
+
+#![allow(clippy::return_self_not_must_use)]
 #![warn(clippy::deref_addrof)]
+
+extern crate proc_macros;
+use proc_macros::inline_macros;
 
 fn get_number() -> usize {
     10
@@ -9,7 +15,7 @@ fn get_reference(n: &usize) -> &usize {
     n
 }
 
-#[allow(clippy::many_single_char_names, clippy::double_parens)]
+#[allow(clippy::double_parens)]
 #[allow(unused_variables, unused_parens)]
 fn main() {
     let a = 10;
@@ -36,28 +42,19 @@ fn main() {
     let b = *&&a;
 
     let b = **&aref;
+
+    let _ = unsafe { *core::ptr::addr_of!(a) };
 }
 
-#[rustfmt::skip]
-macro_rules! m {
-    ($visitor: expr) => {
-        *& $visitor
-    };
-}
-
-#[rustfmt::skip]
-macro_rules! m_mut {
-    ($visitor: expr) => {
-        *& mut $visitor
-    };
-}
-
+#[derive(Copy, Clone)]
 pub struct S;
+#[inline_macros]
 impl S {
     pub fn f(&self) -> &Self {
-        m!(self)
+        inline!(*& $(@expr self))
     }
-    pub fn f_mut(&self) -> &Self {
-        m_mut!(self)
+    #[allow(unused_mut)] // mut will be unused, once the macro is fixed
+    pub fn f_mut(mut self) -> Self {
+        inline!(*&mut $(@expr self))
     }
 }

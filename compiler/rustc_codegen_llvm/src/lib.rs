@@ -5,19 +5,25 @@
 //! This API is completely unstable and subject to change.
 
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
-#![feature(bool_to_option)]
-#![feature(const_cstr_unchecked)]
-#![feature(crate_visibility_modifier)]
-#![feature(extended_key_value_attributes)]
 #![feature(extern_types)]
-#![feature(in_band_lifetimes)]
-#![feature(iter_zip)]
-#![feature(nll)]
-#![cfg_attr(bootstrap, feature(or_patterns))]
+#![feature(hash_raw_entry)]
+#![feature(iter_intersperse)]
+#![feature(let_chains)]
+#![feature(never_type)]
+#![feature(once_cell)]
 #![recursion_limit = "256"]
+#![allow(rustc::potential_query_instability)]
+#![deny(rustc::untranslatable_diagnostic)]
+#![deny(rustc::diagnostic_outside_of_impl)]
+
+#[macro_use]
+extern crate rustc_macros;
+#[macro_use]
+extern crate tracing;
 
 use back::write::{create_informational_target_machine, create_target_machine};
 
+use errors::ParseTargetMachineConfig;
 pub use llvm_util::target_features;
 use rustc_ast::expand::allocator::AllocatorKind;
 use rustc_codegen_ssa::back::lto::{LtoModuleCodegen, SerializedModule, ThinModule};
@@ -28,10 +34,12 @@ use rustc_codegen_ssa::traits::*;
 use rustc_codegen_ssa::ModuleCodegen;
 use rustc_codegen_ssa::{CodegenResults, CompiledModule};
 use rustc_data_structures::fx::FxHashMap;
-use rustc_errors::{ErrorReported, FatalError, Handler};
+use rustc_errors::{DiagnosticMessage, ErrorGuaranteed, FatalError, Handler, SubdiagnosticMessage};
+use rustc_macros::fluent_messages;
+use rustc_metadata::EncodedMetadata;
 use rustc_middle::dep_graph::{WorkProduct, WorkProductId};
-use rustc_middle::middle::cstore::{EncodedMetadata, MetadataLoaderDyn};
-use rustc_middle::ty::{self, TyCtxt};
+use rustc_middle::ty::query::Providers;
+use rustc_middle::ty::TyCtxt;
 use rustc_session::config::{OptLevel, OutputFilenames, PrintRequest};
 use rustc_session::Session;
 use rustc_span::symbol::Symbol;
@@ -59,6 +67,7 @@ mod context;
 mod coverageinfo;
 mod debuginfo;
 mod declare;
+mod errors;
 mod intrinsic;
 
 // The following is a work around that replaces `pub mod llvm;` and that fixes issue 53912.
@@ -69,37 +78,51 @@ pub mod llvm {
 }
 
 mod llvm_util;
-mod metadata;
 mod mono_item;
 mod type_;
 mod type_of;
 mod va_arg;
 mod value;
 
+fluent_messages! { "../messages.ftl" }
+
 #[derive(Clone)]
 pub struct LlvmCodegenBackend(());
 
-impl ExtraBackendMethods for LlvmCodegenBackend {
-    fn new_metadata(&self, tcx: TyCtxt<'_>, mod_name: &str) -> ModuleLlvm {
-        ModuleLlvm::new_metadata(tcx, mod_name)
-    }
+struct TimeTraceProfiler {
+    enabled: bool,
+}
 
-    fn write_compressed_metadata<'tcx>(
-        &self,
-        tcx: TyCtxt<'tcx>,
-        metadata: &EncodedMetadata,
-        llvm_module: &mut ModuleLlvm,
-    ) {
-        base::write_compressed_metadata(tcx, metadata, llvm_module)
+impl TimeTraceProfiler {
+    fn new(enabled: bool) -> Self {
+        if enabled {
+            unsafe { llvm::LLVMTimeTraceProfilerInitialize() }
+        }
+        TimeTraceProfiler { enabled }
     }
+}
+
+impl Drop for TimeTraceProfiler {
+    fn drop(&mut self) {
+        if self.enabled {
+            unsafe { llvm::LLVMTimeTraceProfilerFinishThread() }
+        }
+    }
+}
+
+impl ExtraBackendMethods for LlvmCodegenBackend {
     fn codegen_allocator<'tcx>(
         &self,
         tcx: TyCtxt<'tcx>,
-        mods: &mut ModuleLlvm,
+        module_name: &str,
         kind: AllocatorKind,
-        has_alloc_error_handler: bool,
-    ) {
-        unsafe { allocator::codegen(tcx, mods, kind, has_alloc_error_handler) }
+        alloc_error_handler_kind: AllocatorKind,
+    ) -> ModuleLlvm {
+        let mut module_llvm = ModuleLlvm::new_metadata(tcx, module_name);
+        unsafe {
+            allocator::codegen(tcx, &mut module_llvm, module_name, kind, alloc_error_handler_kind);
+        }
+        module_llvm
     }
     fn compile_codegen_unit(
         &self,
@@ -112,22 +135,45 @@ impl ExtraBackendMethods for LlvmCodegenBackend {
         &self,
         sess: &Session,
         optlvl: OptLevel,
+        target_features: &[String],
     ) -> TargetMachineFactoryFn<Self> {
-        back::write::target_machine_factory(sess, optlvl)
+        back::write::target_machine_factory(sess, optlvl, target_features)
     }
-    fn target_cpu<'b>(&self, sess: &'b Session) -> &'b str {
-        llvm_util::target_cpu(sess)
+
+    fn spawn_thread<F, T>(time_trace: bool, f: F) -> std::thread::JoinHandle<T>
+    where
+        F: FnOnce() -> T,
+        F: Send + 'static,
+        T: Send + 'static,
+    {
+        std::thread::spawn(move || {
+            let _profiler = TimeTraceProfiler::new(time_trace);
+            f()
+        })
     }
-    fn tune_cpu<'b>(&self, sess: &'b Session) -> Option<&'b str> {
-        llvm_util::tune_cpu(sess)
+
+    fn spawn_named_thread<F, T>(
+        time_trace: bool,
+        name: String,
+        f: F,
+    ) -> std::io::Result<std::thread::JoinHandle<T>>
+    where
+        F: FnOnce() -> T,
+        F: Send + 'static,
+        T: Send + 'static,
+    {
+        std::thread::Builder::new().name(name).spawn(move || {
+            let _profiler = TimeTraceProfiler::new(time_trace);
+            f()
+        })
     }
 }
 
 impl WriteBackendMethods for LlvmCodegenBackend {
     type Module = ModuleLlvm;
     type ModuleBuffer = back::lto::ModuleBuffer;
-    type Context = llvm::Context;
     type TargetMachine = &'static mut llvm::TargetMachine;
+    type TargetMachineError = crate::errors::LlvmError<'static>;
     type ThinData = back::lto::ThinData;
     type ThinBuffer = back::lto::ThinBuffer;
     fn print_pass_timings(&self) {
@@ -162,11 +208,18 @@ impl WriteBackendMethods for LlvmCodegenBackend {
         module: &ModuleCodegen<Self::Module>,
         config: &ModuleConfig,
     ) -> Result<(), FatalError> {
-        Ok(back::write::optimize(cgcx, diag_handler, module, config))
+        back::write::optimize(cgcx, diag_handler, module, config)
+    }
+    fn optimize_fat(
+        cgcx: &CodegenContext<Self>,
+        module: &mut ModuleCodegen<Self::Module>,
+    ) -> Result<(), FatalError> {
+        let diag_handler = cgcx.create_diag_handler();
+        back::lto::run_pass_manager(cgcx, &diag_handler, module, false)
     }
     unsafe fn optimize_thin(
         cgcx: &CodegenContext<Self>,
-        thin: &mut ThinModule<Self>,
+        thin: ThinModule<Self>,
     ) -> Result<ModuleCodegen<Self::Module>, FatalError> {
         back::lto::optimize_thin_module(thin, cgcx)
     }
@@ -184,14 +237,6 @@ impl WriteBackendMethods for LlvmCodegenBackend {
     fn serialize_module(module: ModuleCodegen<Self::Module>) -> (String, Self::ModuleBuffer) {
         (module.name, back::lto::ModuleBuffer::new(module.module_llvm.llmod()))
     }
-    fn run_lto_pass_manager(
-        cgcx: &CodegenContext<Self>,
-        module: &ModuleCodegen<Self::Module>,
-        config: &ModuleConfig,
-        thin: bool,
-    ) {
-        back::lto::run_pass_manager(cgcx, module, config, thin)
-    }
 }
 
 unsafe impl Send for LlvmCodegenBackend {} // Llvm is on a per-thread basis
@@ -204,17 +249,33 @@ impl LlvmCodegenBackend {
 }
 
 impl CodegenBackend for LlvmCodegenBackend {
+    fn locale_resource(&self) -> &'static str {
+        crate::DEFAULT_LOCALE_RESOURCE
+    }
+
     fn init(&self, sess: &Session) {
         llvm_util::init(sess); // Make sure llvm is inited
+    }
+
+    fn provide(&self, providers: &mut Providers) {
+        providers.global_backend_features =
+            |tcx, ()| llvm_util::global_llvm_features(tcx.sess, true)
     }
 
     fn print(&self, req: PrintRequest, sess: &Session) {
         match req {
             PrintRequest::RelocationModels => {
                 println!("Available relocation models:");
-                for name in
-                    &["static", "pic", "dynamic-no-pic", "ropi", "rwpi", "ropi-rwpi", "default"]
-                {
+                for name in &[
+                    "static",
+                    "pic",
+                    "pie",
+                    "dynamic-no-pic",
+                    "ropi",
+                    "rwpi",
+                    "ropi-rwpi",
+                    "default",
+                ] {
                     println!("    {}", name);
                 }
                 println!();
@@ -233,6 +294,31 @@ impl CodegenBackend for LlvmCodegenBackend {
                 }
                 println!();
             }
+            PrintRequest::StackProtectorStrategies => {
+                println!(
+                    r#"Available stack protector strategies:
+    all
+        Generate stack canaries in all functions.
+
+    strong
+        Generate stack canaries in a function if it either:
+        - has a local variable of `[T; N]` type, regardless of `T` and `N`
+        - takes the address of a local variable.
+
+          (Note that a local variable being borrowed is not equivalent to its
+          address being taken: e.g. some borrows may be removed by optimization,
+          while by-value argument passing may be implemented with reference to a
+          local stack variable in the ABI.)
+
+    basic
+        Generate stack canaries in functions with local variables of `[T; N]`
+        type, where `T` is byte-sized and `N` >= 8.
+
+    none
+        Do not generate stack canaries.
+"#
+                );
+            }
             req => llvm_util::print(req, sess),
         }
     }
@@ -245,20 +331,8 @@ impl CodegenBackend for LlvmCodegenBackend {
         llvm_util::print_version();
     }
 
-    fn target_features(&self, sess: &Session) -> Vec<Symbol> {
-        target_features(sess)
-    }
-
-    fn metadata_loader(&self) -> Box<MetadataLoaderDyn> {
-        Box::new(metadata::LlvmMetadataLoader)
-    }
-
-    fn provide(&self, providers: &mut ty::query::Providers) {
-        attributes::provide_both(providers);
-    }
-
-    fn provide_extern(&self, providers: &mut ty::query::Providers) {
-        attributes::provide_both(providers);
+    fn target_features(&self, sess: &Session, allow_unstable: bool) -> Vec<Symbol> {
+        target_features(sess, allow_unstable)
     }
 
     fn codegen_crate<'tcx>(
@@ -270,6 +344,7 @@ impl CodegenBackend for LlvmCodegenBackend {
         Box::new(rustc_codegen_ssa::base::codegen_crate(
             LlvmCodegenBackend(()),
             tcx,
+            crate::llvm_util::target_cpu(tcx.sess).to_string(),
             metadata,
             need_metadata_module,
         ))
@@ -279,17 +354,19 @@ impl CodegenBackend for LlvmCodegenBackend {
         &self,
         ongoing_codegen: Box<dyn Any>,
         sess: &Session,
-    ) -> Result<(CodegenResults, FxHashMap<WorkProductId, WorkProduct>), ErrorReported> {
+        outputs: &OutputFilenames,
+    ) -> Result<(CodegenResults, FxHashMap<WorkProductId, WorkProduct>), ErrorGuaranteed> {
         let (codegen_results, work_products) = ongoing_codegen
             .downcast::<rustc_codegen_ssa::back::write::OngoingCodegen<LlvmCodegenBackend>>()
             .expect("Expected LlvmCodegenBackend's OngoingCodegen, found Box<Any>")
             .join(sess);
 
-        sess.time("llvm_dump_timing_file", || {
-            if sess.opts.debugging_opts.llvm_time_trace {
-                llvm_util::time_trace_profiler_finish("llvm_timings.json");
-            }
-        });
+        if sess.opts.unstable_opts.llvm_time_trace {
+            sess.time("llvm_dump_timing_file", || {
+                let file_name = outputs.with_extension("llvm_timings.json");
+                llvm_util::time_trace_profiler_finish(&file_name);
+            });
+        }
 
         Ok((codegen_results, work_products))
     }
@@ -299,22 +376,13 @@ impl CodegenBackend for LlvmCodegenBackend {
         sess: &Session,
         codegen_results: CodegenResults,
         outputs: &OutputFilenames,
-    ) -> Result<(), ErrorReported> {
-        use crate::back::archive::LlvmArchiveBuilder;
+    ) -> Result<(), ErrorGuaranteed> {
+        use crate::back::archive::LlvmArchiveBuilderBuilder;
         use rustc_codegen_ssa::back::link::link_binary;
 
         // Run the linker on any artifacts that resulted from the LLVM run.
         // This should produce either a finished executable or library.
-        let target_cpu = crate::llvm_util::target_cpu(sess);
-        link_binary::<LlvmArchiveBuilder<'_>>(
-            sess,
-            &codegen_results,
-            outputs,
-            &codegen_results.crate_name.as_str(),
-            target_cpu,
-        );
-
-        Ok(())
+        link_binary(sess, &LlvmArchiveBuilderBuilder, &codegen_results, outputs)
     }
 }
 
@@ -353,12 +421,11 @@ impl ModuleLlvm {
         unsafe {
             let llcx = llvm::LLVMRustContextCreate(cgcx.fewer_names);
             let llmod_raw = back::lto::parse_module(llcx, name, buffer, handler)?;
-            let tm_factory_config = TargetMachineFactoryConfig::new(&cgcx, name.to_str().unwrap());
+            let tm_factory_config = TargetMachineFactoryConfig::new(cgcx, name.to_str().unwrap());
             let tm = match (cgcx.tm_factory)(tm_factory_config) {
                 Ok(m) => m,
                 Err(e) => {
-                    handler.struct_err(&e).emit();
-                    return Err(FatalError);
+                    return Err(handler.emit_almost_fatal(ParseTargetMachineConfig(e)));
                 }
             };
 
@@ -374,8 +441,8 @@ impl ModuleLlvm {
 impl Drop for ModuleLlvm {
     fn drop(&mut self) {
         unsafe {
-            llvm::LLVMContextDispose(&mut *(self.llcx as *mut _));
             llvm::LLVMRustDisposeTargetMachine(&mut *(self.tm as *mut _));
+            llvm::LLVMContextDispose(&mut *(self.llcx as *mut _));
         }
     }
 }

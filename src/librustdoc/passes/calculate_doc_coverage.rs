@@ -1,9 +1,11 @@
+//! Calculates information used for the --show-coverage flag.
 use crate::clean;
 use crate::core::DocContext;
-use crate::fold::{self, DocFolder};
 use crate::html::markdown::{find_testable_code, ErrorCodes};
-use crate::passes::doc_test_lints::{should_have_doc_example, Tests};
+use crate::passes::check_doc_test_visibility::{should_have_doc_example, Tests};
 use crate::passes::Pass;
+use crate::visit::DocVisitor;
+use rustc_hir as hir;
 use rustc_lint::builtin::MISSING_DOCS;
 use rustc_middle::lint::LintLevelSource;
 use rustc_session::lint;
@@ -13,7 +15,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::ops;
 
-crate const CALCULATE_DOC_COVERAGE: Pass = Pass {
+pub(crate) const CALCULATE_DOC_COVERAGE: Pass = Pass {
     name: "calculate-doc-coverage",
     run: calculate_doc_coverage,
     description: "counts the number of items with and without documentation",
@@ -21,7 +23,7 @@ crate const CALCULATE_DOC_COVERAGE: Pass = Pass {
 
 fn calculate_doc_coverage(krate: clean::Crate, ctx: &mut DocContext<'_>) -> clean::Crate {
     let mut calc = CoverageCalculator { items: Default::default(), ctx };
-    let krate = calc.fold_crate(krate);
+    calc.visit_crate(&krate);
 
     calc.print_results();
 
@@ -119,7 +121,7 @@ impl<'a, 'b> CoverageCalculator<'a, 'b> {
             &self
                 .items
                 .iter()
-                .map(|(k, v)| (k.to_string(), v))
+                .map(|(k, v)| (k.prefer_local().to_string(), v))
                 .collect::<BTreeMap<String, &ItemCount>>(),
         )
         .expect("failed to convert JSON data to string")
@@ -159,7 +161,7 @@ impl<'a, 'b> CoverageCalculator<'a, 'b> {
         for (file, &count) in &self.items {
             if let Some(percentage) = count.percentage() {
                 print_table_record(
-                    &limit_filename_len(file.to_string()),
+                    &limit_filename_len(file.prefer_local().to_string_lossy().into()),
                     count,
                     percentage,
                     count.examples_percentage().unwrap_or(0.),
@@ -180,17 +182,18 @@ impl<'a, 'b> CoverageCalculator<'a, 'b> {
     }
 }
 
-impl<'a, 'b> fold::DocFolder for CoverageCalculator<'a, 'b> {
-    fn fold_item(&mut self, i: clean::Item) -> Option<clean::Item> {
+impl<'a, 'b> DocVisitor for CoverageCalculator<'a, 'b> {
+    fn visit_item(&mut self, i: &clean::Item) {
+        if !i.item_id.is_local() {
+            // non-local items are skipped because they can be out of the users control,
+            // especially in the case of trait impls, which rustdoc eagerly inlines
+            return;
+        }
+
         match *i.kind {
-            _ if !i.def_id.is_local() => {
-                // non-local items are skipped because they can be out of the users control,
-                // especially in the case of trait impls, which rustdoc eagerly inlines
-                return Some(i);
-            }
             clean::StrippedItem(..) => {
                 // don't count items in stripped modules
-                return Some(i);
+                return;
             }
             // docs on `use` and `extern crate` statements are not displayed, so they're not
             // worth counting
@@ -211,24 +214,58 @@ impl<'a, 'b> fold::DocFolder for CoverageCalculator<'a, 'b> {
                     None,
                 );
 
-                let filename = i.span.filename(self.ctx.sess());
                 let has_doc_example = tests.found_tests != 0;
-                let hir_id = self.ctx.tcx.hir().local_def_id_to_hir_id(i.def_id.expect_local());
+                let hir_id = DocContext::as_local_hir_id(self.ctx.tcx, i.item_id).unwrap();
                 let (level, source) = self.ctx.tcx.lint_level_at_node(MISSING_DOCS, hir_id);
+
+                // In case we have:
+                //
+                // ```
+                // enum Foo { Bar(u32) }
+                // // or:
+                // struct Bar(u32);
+                // ```
+                //
+                // there is no need to require documentation on the fields of tuple variants and
+                // tuple structs.
+                let should_be_ignored = i
+                    .item_id
+                    .as_def_id()
+                    .and_then(|def_id| self.ctx.tcx.opt_parent(def_id))
+                    .and_then(|def_id| self.ctx.tcx.hir().get_if_local(def_id))
+                    .map(|node| {
+                        matches!(
+                            node,
+                            hir::Node::Variant(hir::Variant {
+                                data: hir::VariantData::Tuple(_, _, _),
+                                ..
+                            }) | hir::Node::Item(hir::Item {
+                                kind: hir::ItemKind::Struct(hir::VariantData::Tuple(_, _, _), _),
+                                ..
+                            })
+                        )
+                    })
+                    .unwrap_or(false);
+
                 // `missing_docs` is allow-by-default, so don't treat this as ignoring the item
-                // unless the user had an explicit `allow`
-                let should_have_docs =
-                    level != lint::Level::Allow || matches!(source, LintLevelSource::Default);
-                debug!("counting {:?} {:?} in {}", i.type_(), i.name, filename);
-                self.items.entry(filename).or_default().count_item(
-                    has_docs,
-                    has_doc_example,
-                    should_have_doc_example(self.ctx, &i),
-                    should_have_docs,
-                );
+                // unless the user had an explicit `allow`.
+                //
+                let should_have_docs = !should_be_ignored
+                    && (level != lint::Level::Allow || matches!(source, LintLevelSource::Default));
+
+                if let Some(span) = i.span(self.ctx.tcx) {
+                    let filename = span.filename(self.ctx.sess());
+                    debug!("counting {:?} {:?} in {:?}", i.type_(), i.name, filename);
+                    self.items.entry(filename).or_default().count_item(
+                        has_docs,
+                        has_doc_example,
+                        should_have_doc_example(self.ctx, i),
+                        should_have_docs,
+                    );
+                }
             }
         }
 
-        Some(self.fold_item_recur(i))
+        self.visit_item_recur(i)
     }
 }

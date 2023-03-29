@@ -1,5 +1,4 @@
-use crate::consts::{constant, Constant};
-use crate::rustc_target::abi::LayoutOf;
+use clippy_utils::consts::{constant, Constant};
 use clippy_utils::diagnostics::span_lint_and_sugg;
 use clippy_utils::higher;
 use clippy_utils::source::snippet_with_applicability;
@@ -8,34 +7,38 @@ use if_chain::if_chain;
 use rustc_errors::Applicability;
 use rustc_hir::{BorrowKind, Expr, ExprKind, Mutability};
 use rustc_lint::{LateContext, LateLintPass};
+use rustc_middle::ty::layout::LayoutOf;
 use rustc_middle::ty::{self, Ty};
 use rustc_session::{declare_tool_lint, impl_lint_pass};
 use rustc_span::source_map::Span;
 
-#[allow(clippy::module_name_repetitions)]
+#[expect(clippy::module_name_repetitions)]
 #[derive(Copy, Clone)]
 pub struct UselessVec {
     pub too_large_for_stack: u64,
 }
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for usage of `&vec![..]` when using `&[..]` would
+    /// ### What it does
+    /// Checks for usage of `&vec![..]` when using `&[..]` would
     /// be possible.
     ///
-    /// **Why is this bad?** This is less efficient.
+    /// ### Why is this bad?
+    /// This is less efficient.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
+    /// ### Example
     /// ```rust
-    /// # fn foo(my_vec: &[u8]) {}
+    /// fn foo(_x: &[u8]) {}
     ///
-    /// // Bad
     /// foo(&vec![1, 2]);
+    /// ```
     ///
-    /// // Good
+    /// Use instead:
+    /// ```rust
+    /// # fn foo(_x: &[u8]) {}
     /// foo(&[1, 2]);
     /// ```
+    #[clippy::version = "pre 1.29.0"]
     pub USELESS_VEC,
     perf,
     "useless `vec!`"
@@ -50,7 +53,7 @@ impl<'tcx> LateLintPass<'tcx> for UselessVec {
             if let ty::Ref(_, ty, _) = cx.typeck_results().expr_ty_adjusted(expr).kind();
             if let ty::Slice(..) = ty.kind();
             if let ExprKind::AddrOf(BorrowKind::Ref, mutability, addressee) = expr.kind;
-            if let Some(vec_args) = higher::vec_macro(cx, addressee);
+            if let Some(vec_args) = higher::VecArgs::hir(cx, addressee);
             then {
                 self.check_vec_macro(cx, &vec_args, mutability, expr.span);
             }
@@ -58,18 +61,12 @@ impl<'tcx> LateLintPass<'tcx> for UselessVec {
 
         // search for `for _ in vec![…]`
         if_chain! {
-            if let Some((_, arg, _, _)) = higher::for_loop(expr);
-            if let Some(vec_args) = higher::vec_macro(cx, arg);
+            if let Some(higher::ForLoop { arg, .. }) = higher::ForLoop::hir(expr);
+            if let Some(vec_args) = higher::VecArgs::hir(cx, arg);
             if is_copy(cx, vec_type(cx.typeck_results().expr_ty_adjusted(arg)));
             then {
                 // report the error around the `vec!` not inside `<std macros>:`
-                let span = arg.span
-                    .ctxt()
-                    .outer_expn_data()
-                    .call_site
-                    .ctxt()
-                    .outer_expn_data()
-                    .call_site;
+                let span = arg.span.ctxt().outer_expn_data().call_site;
                 self.check_vec_macro(cx, &vec_args, Mutability::Not, span);
             }
         }
@@ -88,7 +85,7 @@ impl UselessVec {
         let snippet = match *vec_args {
             higher::VecArgs::Repeat(elem, len) => {
                 if let Some((Constant::Int(len_constant), _)) = constant(cx, cx.typeck_results(), len) {
-                    #[allow(clippy::cast_possible_truncation)]
+                    #[expect(clippy::cast_possible_truncation)]
                     if len_constant as u64 * size_of(cx, elem) > self.too_large_for_stack {
                         return;
                     }
@@ -115,7 +112,6 @@ impl UselessVec {
             },
             higher::VecArgs::Vec(args) => {
                 if let Some(last) = args.iter().last() {
-                    #[allow(clippy::cast_possible_truncation)]
                     if args.len() as u64 * size_of(cx, last) > self.too_large_for_stack {
                         return;
                     }

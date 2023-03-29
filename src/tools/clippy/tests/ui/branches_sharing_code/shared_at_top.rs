@@ -1,5 +1,6 @@
-#![allow(dead_code, clippy::eval_order_dependence)]
-#![deny(clippy::if_same_then_else, clippy::branches_sharing_code)]
+#![deny(clippy::branches_sharing_code, clippy::if_same_then_else)]
+#![allow(dead_code)]
+#![allow(clippy::mixed_read_write_in_expression, clippy::uninlined_format_args)]
 
 // This tests the branches_sharing_code lint at the start of blocks
 
@@ -98,6 +99,17 @@ fn check_if_same_than_else_mask() {
     } else {
         println!("This should trigger `IS_SAME_THAN_ELSE` as usual");
     }
+}
+
+#[allow(clippy::vec_init_then_push)]
+fn pf_local_with_inferred_type_issue7053() {
+    if true {
+        let mut v = Vec::new();
+        v.push(0);
+    } else {
+        let mut v = Vec::new();
+        v.push("");
+    };
 }
 
 fn main() {}

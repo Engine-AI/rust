@@ -1,6 +1,7 @@
 use crate::fmt;
 use crate::io::prelude::*;
-use crate::io::{ErrorKind, IoSlice, IoSliceMut};
+use crate::io::{BorrowedBuf, ErrorKind, IoSlice, IoSliceMut};
+use crate::mem::MaybeUninit;
 use crate::net::test::{next_test_ip4, next_test_ip6};
 use crate::net::*;
 use crate::sync::mpsc::channel;
@@ -142,8 +143,7 @@ fn write_close() {
                     e.kind() == ErrorKind::ConnectionReset
                         || e.kind() == ErrorKind::BrokenPipe
                         || e.kind() == ErrorKind::ConnectionAborted,
-                    "unknown error: {}",
-                    e
+                    "unknown error: {e}"
                 );
             }
         }
@@ -281,6 +281,31 @@ fn partial_read() {
 }
 
 #[test]
+fn read_buf() {
+    each_ip(&mut |addr| {
+        let srv = t!(TcpListener::bind(&addr));
+        let t = thread::spawn(move || {
+            let mut s = t!(TcpStream::connect(&addr));
+            s.write_all(&[1, 2, 3, 4]).unwrap();
+        });
+
+        let mut s = t!(srv.accept()).0;
+        let mut buf: [MaybeUninit<u8>; 128] = MaybeUninit::uninit_array();
+        let mut buf = BorrowedBuf::from(buf.as_mut_slice());
+        t!(s.read_buf(buf.unfilled()));
+        assert_eq!(buf.filled(), &[1, 2, 3, 4]);
+
+        // FIXME: sgx uses default_read_buf that initializes the buffer.
+        if cfg!(not(target_env = "sgx")) {
+            // TcpStream::read_buf should omit buffer initialization.
+            assert_eq!(buf.init_len(), 4);
+        }
+
+        t.join().ok().expect("thread panicked");
+    })
+}
+
+#[test]
 fn read_vectored() {
     each_ip(&mut |addr| {
         let srv = t!(TcpListener::bind(&addr));
@@ -342,7 +367,7 @@ fn double_bind() {
             Err(e) => {
                 assert!(
                     e.kind() == ErrorKind::ConnectionRefused
-                        || e.kind() == ErrorKind::Other
+                        || e.kind() == ErrorKind::Uncategorized
                         || e.kind() == ErrorKind::AddrInUse,
                     "unknown error: {} {:?}",
                     e,
@@ -508,7 +533,7 @@ fn close_readwrite_smoke() {
 }
 
 #[test]
-#[cfg(unix)] // test doesn't work on Windows, see #31657
+#[cfg_attr(target_env = "sgx", ignore)]
 fn close_read_wakes_up() {
     each_ip(&mut |addr| {
         let a = t!(TcpListener::bind(&addr));
@@ -655,7 +680,7 @@ fn debug() {
         inner_name,
         render_inner(&listener)
     );
-    assert_eq!(format!("{:?}", listener), compare);
+    assert_eq!(format!("{listener:?}"), compare);
 
     let stream = t!(TcpStream::connect(&("localhost", socket_addr.port())));
     let compare = format!(
@@ -665,13 +690,16 @@ fn debug() {
         inner_name,
         render_inner(&stream)
     );
-    assert_eq!(format!("{:?}", stream), compare);
+    assert_eq!(format!("{stream:?}"), compare);
 }
 
 // FIXME: re-enabled openbsd tests once their socket timeout code
 //        no longer has rounding errors.
 // VxWorks ignores SO_SNDTIMEO.
-#[cfg_attr(any(target_os = "netbsd", target_os = "openbsd", target_os = "vxworks"), ignore)]
+#[cfg_attr(
+    any(target_os = "netbsd", target_os = "openbsd", target_os = "vxworks", target_os = "nto"),
+    ignore
+)]
 #[cfg_attr(target_env = "sgx", ignore)] // FIXME: https://github.com/fortanix/rust-sgx/issues/31
 #[test]
 fn timeouts() {
@@ -769,6 +797,21 @@ fn test_timeout_zero_duration() {
 
 #[test]
 #[cfg_attr(target_env = "sgx", ignore)]
+fn linger() {
+    let addr = next_test_ip4();
+    let _listener = t!(TcpListener::bind(&addr));
+
+    let stream = t!(TcpStream::connect(&("localhost", addr.port())));
+
+    assert_eq!(None, t!(stream.linger()));
+    t!(stream.set_linger(Some(Duration::from_secs(1))));
+    assert_eq!(Some(Duration::from_secs(1)), t!(stream.linger()));
+    t!(stream.set_linger(None));
+    assert_eq!(None, t!(stream.linger()));
+}
+
+#[test]
+#[cfg_attr(target_env = "sgx", ignore)]
 fn nodelay() {
     let addr = next_test_ip4();
     let _listener = t!(TcpListener::bind(&addr));
@@ -817,7 +860,7 @@ fn set_nonblocking() {
     match stream.read(&mut buf) {
         Ok(_) => panic!("expected error"),
         Err(ref e) if e.kind() == ErrorKind::WouldBlock => {}
-        Err(e) => panic!("unexpected error {}", e),
+        Err(e) => panic!("unexpected error {e}"),
     }
 }
 
@@ -847,7 +890,7 @@ fn peek() {
         match c.peek(&mut b) {
             Ok(_) => panic!("expected error"),
             Err(ref e) if e.kind() == ErrorKind::WouldBlock => {}
-            Err(e) => panic!("unexpected error {}", e),
+            Err(e) => panic!("unexpected error {e}"),
         }
         t!(txdone.send(()));
     })

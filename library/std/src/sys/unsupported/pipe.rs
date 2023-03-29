@@ -1,35 +1,42 @@
-use crate::io::{self, IoSlice, IoSliceMut};
-use crate::sys::Void;
+use crate::io::{self, BorrowedCursor, IoSlice, IoSliceMut};
 
-pub struct AnonPipe(Void);
+pub struct AnonPipe(!);
 
 impl AnonPipe {
     pub fn read(&self, _buf: &mut [u8]) -> io::Result<usize> {
-        match self.0 {}
+        self.0
+    }
+
+    pub fn read_buf(&self, _buf: BorrowedCursor<'_>) -> io::Result<()> {
+        self.0
     }
 
     pub fn read_vectored(&self, _bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
-        match self.0 {}
+        self.0
     }
 
     pub fn is_read_vectored(&self) -> bool {
-        match self.0 {}
+        self.0
+    }
+
+    pub fn read_to_end(&self, _buf: &mut Vec<u8>) -> io::Result<usize> {
+        self.0
     }
 
     pub fn write(&self, _buf: &[u8]) -> io::Result<usize> {
-        match self.0 {}
+        self.0
     }
 
     pub fn write_vectored(&self, _bufs: &[IoSlice<'_>]) -> io::Result<usize> {
-        match self.0 {}
+        self.0
     }
 
     pub fn is_write_vectored(&self) -> bool {
-        match self.0 {}
+        self.0
     }
 
     pub fn diverge(&self) -> ! {
-        match self.0 {}
+        self.0
     }
 }
 

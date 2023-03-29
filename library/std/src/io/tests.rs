@@ -1,7 +1,8 @@
-use super::{repeat, Cursor, SeekFrom};
+use super::{repeat, BorrowedBuf, Cursor, SeekFrom};
 use crate::cmp::{self, min};
 use crate::io::{self, IoSlice, IoSliceMut};
 use crate::io::{BufRead, BufReader, Read, Seek, Write};
+use crate::mem::MaybeUninit;
 use crate::ops::Deref;
 
 #[test]
@@ -72,6 +73,16 @@ fn lines() {
 }
 
 #[test]
+fn buf_read_has_data_left() {
+    let mut buf = Cursor::new(&b"abcd"[..]);
+    assert!(buf.has_data_left().unwrap());
+    buf.read_exact(&mut [0; 2]).unwrap();
+    assert!(buf.has_data_left().unwrap());
+    buf.read_exact(&mut [0; 2]).unwrap();
+    assert!(!buf.has_data_left().unwrap());
+}
+
+#[test]
 fn read_to_end() {
     let mut c = Cursor::new(&b""[..]);
     let mut v = Vec::new();
@@ -83,7 +94,7 @@ fn read_to_end() {
     assert_eq!(c.read_to_end(&mut v).unwrap(), 1);
     assert_eq!(v, b"1");
 
-    let cap = 1024 * 1024;
+    let cap = if cfg!(miri) { 1024 } else { 1024 * 1024 };
     let data = (0..cap).map(|i| (i / 3) as u8).collect::<Vec<_>>();
     let mut v = Vec::new();
     let (a, b) = data.split_at(data.len() / 2);
@@ -147,17 +158,39 @@ fn read_exact_slice() {
 }
 
 #[test]
+fn read_buf_exact() {
+    let buf: &mut [_] = &mut [0; 4];
+    let mut buf: BorrowedBuf<'_> = buf.into();
+
+    let mut c = Cursor::new(&b""[..]);
+    assert_eq!(c.read_buf_exact(buf.unfilled()).unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+
+    let mut c = Cursor::new(&b"123456789"[..]);
+    c.read_buf_exact(buf.unfilled()).unwrap();
+    assert_eq!(buf.filled(), b"1234");
+
+    buf.clear();
+
+    c.read_buf_exact(buf.unfilled()).unwrap();
+    assert_eq!(buf.filled(), b"5678");
+
+    buf.clear();
+
+    assert_eq!(c.read_buf_exact(buf.unfilled()).unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+}
+
+#[test]
 fn take_eof() {
     struct R;
 
     impl Read for R {
         fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
-            Err(io::Error::new_const(io::ErrorKind::Other, &""))
+            Err(io::const_io_error!(io::ErrorKind::Other, ""))
         }
     }
     impl BufRead for R {
         fn fill_buf(&mut self) -> io::Result<&[u8]> {
-            Err(io::Error::new_const(io::ErrorKind::Other, &""))
+            Err(io::const_io_error!(io::ErrorKind::Other, ""))
         }
         fn consume(&mut self, _amt: usize) {}
     }
@@ -225,6 +258,24 @@ fn empty_size_hint() {
 }
 
 #[test]
+fn slice_size_hint() {
+    let size_hint = (&[1, 2, 3]).bytes().size_hint();
+    assert_eq!(size_hint, (3, Some(3)));
+}
+
+#[test]
+fn take_size_hint() {
+    let size_hint = (&[1, 2, 3]).take(2).bytes().size_hint();
+    assert_eq!(size_hint, (2, Some(2)));
+
+    let size_hint = (&[1, 2, 3]).take(4).bytes().size_hint();
+    assert_eq!(size_hint, (3, Some(3)));
+
+    let size_hint = io::repeat(0).take(3).bytes().size_hint();
+    assert_eq!(size_hint, (3, Some(3)));
+}
+
+#[test]
 fn chain_empty_size_hint() {
     let chain = io::empty().chain(io::empty());
     let size_hint = chain.bytes().size_hint();
@@ -242,7 +293,7 @@ fn chain_size_hint() {
 
     let chain = buf_reader_1.chain(buf_reader_2);
     let size_hint = chain.bytes().size_hint();
-    assert_eq!(size_hint, (testdata.len(), None));
+    assert_eq!(size_hint, (testdata.len(), Some(testdata.len())));
 }
 
 #[test]
@@ -258,11 +309,12 @@ fn chain_zero_length_read_is_not_eof() {
 
 #[bench]
 #[cfg_attr(target_os = "emscripten", ignore)]
+#[cfg_attr(miri, ignore)] // Miri isn't fast...
 fn bench_read_to_end(b: &mut test::Bencher) {
     b.iter(|| {
         let mut lr = repeat(1).take(10000000);
         let mut vec = Vec::with_capacity(1024);
-        super::read_to_end(&mut lr, &mut vec)
+        super::default_read_to_end(&mut lr, &mut vec)
     });
 }
 
@@ -308,6 +360,10 @@ fn seek_position() -> io::Result<()> {
     assert_eq!(c.stream_position()?, 8);
     assert_eq!(c.stream_position()?, 8);
 
+    c.rewind()?;
+    assert_eq!(c.stream_position()?, 0);
+    assert_eq!(c.stream_position()?, 0);
+
     Ok(())
 }
 
@@ -330,30 +386,18 @@ impl<'a> Read for ExampleSliceReader<'a> {
 fn test_read_to_end_capacity() -> io::Result<()> {
     let input = &b"foo"[..];
 
-    // read_to_end() generally needs to over-allocate, both for efficiency
-    // and so that it can distinguish EOF. Assert that this is the case
-    // with this simple ExampleSliceReader struct, which uses the default
-    // implementation of read_to_end. Even though vec1 is allocated with
-    // exactly enough capacity for the read, read_to_end will allocate more
-    // space here.
+    // read_to_end() takes care not to over-allocate when a buffer is the
+    // exact size needed.
     let mut vec1 = Vec::with_capacity(input.len());
     ExampleSliceReader { slice: input }.read_to_end(&mut vec1)?;
     assert_eq!(vec1.len(), input.len());
-    assert!(vec1.capacity() > input.len(), "allocated more");
-
-    // However, std::io::Take includes an implementation of read_to_end
-    // that will not allocate when the limit has already been reached. In
-    // this case, vec2 never grows.
-    let mut vec2 = Vec::with_capacity(input.len());
-    ExampleSliceReader { slice: input }.take(input.len() as u64).read_to_end(&mut vec2)?;
-    assert_eq!(vec2.len(), input.len());
-    assert_eq!(vec2.capacity(), input.len(), "did not allocate more");
+    assert_eq!(vec1.capacity(), input.len(), "did not allocate more");
 
     Ok(())
 }
 
 #[test]
-fn io_slice_mut_advance() {
+fn io_slice_mut_advance_slices() {
     let mut buf1 = [1; 8];
     let mut buf2 = [2; 16];
     let mut buf3 = [3; 8];
@@ -364,75 +408,75 @@ fn io_slice_mut_advance() {
     ][..];
 
     // Only in a single buffer..
-    bufs = IoSliceMut::advance(bufs, 1);
+    IoSliceMut::advance_slices(&mut bufs, 1);
     assert_eq!(bufs[0].deref(), [1; 7].as_ref());
     assert_eq!(bufs[1].deref(), [2; 16].as_ref());
     assert_eq!(bufs[2].deref(), [3; 8].as_ref());
 
     // Removing a buffer, leaving others as is.
-    bufs = IoSliceMut::advance(bufs, 7);
+    IoSliceMut::advance_slices(&mut bufs, 7);
     assert_eq!(bufs[0].deref(), [2; 16].as_ref());
     assert_eq!(bufs[1].deref(), [3; 8].as_ref());
 
     // Removing a buffer and removing from the next buffer.
-    bufs = IoSliceMut::advance(bufs, 18);
+    IoSliceMut::advance_slices(&mut bufs, 18);
     assert_eq!(bufs[0].deref(), [3; 6].as_ref());
 }
 
 #[test]
-fn io_slice_mut_advance_empty_slice() {
-    let empty_bufs = &mut [][..];
-    // Shouldn't panic.
-    IoSliceMut::advance(empty_bufs, 1);
+#[should_panic]
+fn io_slice_mut_advance_slices_empty_slice() {
+    let mut empty_bufs = &mut [][..];
+    IoSliceMut::advance_slices(&mut empty_bufs, 1);
 }
 
 #[test]
-fn io_slice_mut_advance_beyond_total_length() {
+#[should_panic]
+fn io_slice_mut_advance_slices_beyond_total_length() {
     let mut buf1 = [1; 8];
     let mut bufs = &mut [IoSliceMut::new(&mut buf1)][..];
 
-    // Going beyond the total length should be ok.
-    bufs = IoSliceMut::advance(bufs, 9);
+    IoSliceMut::advance_slices(&mut bufs, 9);
     assert!(bufs.is_empty());
 }
 
 #[test]
-fn io_slice_advance() {
+fn io_slice_advance_slices() {
     let buf1 = [1; 8];
     let buf2 = [2; 16];
     let buf3 = [3; 8];
     let mut bufs = &mut [IoSlice::new(&buf1), IoSlice::new(&buf2), IoSlice::new(&buf3)][..];
 
     // Only in a single buffer..
-    bufs = IoSlice::advance(bufs, 1);
+    IoSlice::advance_slices(&mut bufs, 1);
     assert_eq!(bufs[0].deref(), [1; 7].as_ref());
     assert_eq!(bufs[1].deref(), [2; 16].as_ref());
     assert_eq!(bufs[2].deref(), [3; 8].as_ref());
 
     // Removing a buffer, leaving others as is.
-    bufs = IoSlice::advance(bufs, 7);
+    IoSlice::advance_slices(&mut bufs, 7);
     assert_eq!(bufs[0].deref(), [2; 16].as_ref());
     assert_eq!(bufs[1].deref(), [3; 8].as_ref());
 
     // Removing a buffer and removing from the next buffer.
-    bufs = IoSlice::advance(bufs, 18);
+    IoSlice::advance_slices(&mut bufs, 18);
     assert_eq!(bufs[0].deref(), [3; 6].as_ref());
 }
 
 #[test]
-fn io_slice_advance_empty_slice() {
-    let empty_bufs = &mut [][..];
-    // Shouldn't panic.
-    IoSlice::advance(empty_bufs, 1);
+#[should_panic]
+fn io_slice_advance_slices_empty_slice() {
+    let mut empty_bufs = &mut [][..];
+    IoSlice::advance_slices(&mut empty_bufs, 1);
 }
 
 #[test]
-fn io_slice_advance_beyond_total_length() {
+#[should_panic]
+fn io_slice_advance_slices_beyond_total_length() {
     let buf1 = [1; 8];
     let mut bufs = &mut [IoSlice::new(&buf1)][..];
 
-    // Going beyond the total length should be ok.
-    bufs = IoSlice::advance(bufs, 9);
+    IoSlice::advance_slices(&mut bufs, 9);
     assert!(bufs.is_empty());
 }
 
@@ -538,4 +582,43 @@ fn test_write_all_vectored() {
             assert_eq!(&*writer.written, &*wanted);
         }
     }
+}
+
+// Issue 94981
+#[test]
+#[should_panic = "number of read bytes exceeds limit"]
+fn test_take_wrong_length() {
+    struct LieAboutSize(bool);
+
+    impl Read for LieAboutSize {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            // Lie about the read size at first time of read.
+            if core::mem::take(&mut self.0) { Ok(buf.len() + 1) } else { Ok(buf.len()) }
+        }
+    }
+
+    let mut buffer = vec![0; 4];
+    let mut reader = LieAboutSize(true).take(4);
+    // Primed the `Limit` by lying about the read size.
+    let _ = reader.read(&mut buffer[..]);
+}
+
+#[bench]
+fn bench_take_read(b: &mut test::Bencher) {
+    b.iter(|| {
+        let mut buf = [0; 64];
+
+        [255; 128].take(64).read(&mut buf).unwrap();
+    });
+}
+
+#[bench]
+fn bench_take_read_buf(b: &mut test::Bencher) {
+    b.iter(|| {
+        let buf: &mut [_] = &mut [MaybeUninit::uninit(); 64];
+
+        let mut buf: BorrowedBuf<'_> = buf.into();
+
+        [255; 128].take(64).read_buf(buf.unfilled()).unwrap();
+    });
 }

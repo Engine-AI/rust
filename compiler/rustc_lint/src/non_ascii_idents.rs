@@ -1,3 +1,7 @@
+use crate::lints::{
+    ConfusableIdentifierPair, IdentifierNonAsciiChar, IdentifierUncommonCodepoints,
+    MixedScriptConfusables,
+};
 use crate::{EarlyContext, EarlyLintPass, LintContext};
 use rustc_ast as ast;
 use rustc_data_structures::fx::FxHashMap;
@@ -10,7 +14,6 @@ declare_lint! {
     ///
     /// ```rust,compile_fail
     /// # #![allow(unused)]
-    /// #![feature(non_ascii_idents)]
     /// #![deny(non_ascii_idents)]
     /// fn main() {
     ///     let föö = 1;
@@ -21,14 +24,11 @@ declare_lint! {
     ///
     /// ### Explanation
     ///
-    /// Currently on stable Rust, identifiers must contain ASCII characters.
-    /// The [`non_ascii_idents`] nightly-only feature allows identifiers to
-    /// contain non-ASCII characters. This lint allows projects that wish to
-    /// retain the limit of only using ASCII characters to switch this lint to
-    /// "forbid" (for example to ease collaboration or for security reasons).
+    /// This lint allows projects that wish to retain the limit of only using
+    /// ASCII characters to switch this lint to "forbid" (for example to ease
+    /// collaboration or for security reasons).
     /// See [RFC 2457] for more details.
     ///
-    /// [`non_ascii_idents`]: https://doc.rust-lang.org/nightly/unstable-book/language-features/non-ascii-idents.html
     /// [RFC 2457]: https://github.com/rust-lang/rfcs/blob/master/text/2457-non-ascii-idents.md
     pub NON_ASCII_IDENTS,
     Allow,
@@ -44,7 +44,6 @@ declare_lint! {
     ///
     /// ```rust
     /// # #![allow(unused)]
-    /// #![feature(non_ascii_idents)]
     /// const µ: f64 = 0.000001;
     /// ```
     ///
@@ -52,10 +51,8 @@ declare_lint! {
     ///
     /// ### Explanation
     ///
-    /// With the [`non_ascii_idents`] nightly-only feature enabled,
-    /// identifiers are allowed to use non-ASCII characters. This lint warns
-    /// about using characters which are not commonly used, and may cause
-    /// visual confusion.
+    /// This lint warns about using characters which are not commonly used, and may
+    /// cause visual confusion.
     ///
     /// This lint is triggered by identifiers that contain a codepoint that is
     /// not part of the set of "Allowed" codepoints as described by [Unicode®
@@ -66,7 +63,6 @@ declare_lint! {
     /// that if you "forbid" this lint that existing code may fail in the
     /// future.
     ///
-    /// [`non_ascii_idents`]: https://doc.rust-lang.org/nightly/unstable-book/language-features/non-ascii-idents.html
     /// [TR39Allowed]: https://www.unicode.org/reports/tr39/#General_Security_Profile
     pub UNCOMMON_CODEPOINTS,
     Warn,
@@ -81,8 +77,6 @@ declare_lint! {
     /// ### Example
     ///
     /// ```rust
-    /// #![feature(non_ascii_idents)]
-    ///
     /// // Latin Capital Letter E With Caron
     /// pub const Ě: i32 = 1;
     /// // Latin Capital Letter E With Breve
@@ -93,10 +87,8 @@ declare_lint! {
     ///
     /// ### Explanation
     ///
-    /// With the [`non_ascii_idents`] nightly-only feature enabled,
-    /// identifiers are allowed to use non-ASCII characters. This lint warns
-    /// when different identifiers may appear visually similar, which can
-    /// cause confusion.
+    /// This lint warns when different identifiers may appear visually similar,
+    /// which can cause confusion.
     ///
     /// The confusable detection algorithm is based on [Unicode® Technical
     /// Standard #39 Unicode Security Mechanisms Section 4 Confusable
@@ -110,7 +102,6 @@ declare_lint! {
     /// Beware that if you "forbid" this lint that existing code may fail in
     /// the future.
     ///
-    /// [`non_ascii_idents`]: https://doc.rust-lang.org/nightly/unstable-book/language-features/non-ascii-idents.html
     /// [TR39Confusable]: https://www.unicode.org/reports/tr39/#Confusable_Detection
     pub CONFUSABLE_IDENTS,
     Warn,
@@ -127,8 +118,6 @@ declare_lint! {
     /// ### Example
     ///
     /// ```rust
-    /// #![feature(non_ascii_idents)]
-    ///
     /// // The Japanese katakana character エ can be confused with the Han character 工.
     /// const エ: &'static str = "アイウ";
     /// ```
@@ -137,10 +126,8 @@ declare_lint! {
     ///
     /// ### Explanation
     ///
-    /// With the [`non_ascii_idents`] nightly-only feature enabled,
-    /// identifiers are allowed to use non-ASCII characters. This lint warns
-    /// when characters between different scripts may appear visually similar,
-    /// which can cause confusion.
+    /// This lint warns when characters between different scripts may appear
+    /// visually similar, which can cause confusion.
     ///
     /// If the crate contains other identifiers in the same script that have
     /// non-confusable characters, then this lint will *not* be issued. For
@@ -152,8 +139,6 @@ declare_lint! {
     /// Note that the set of confusable characters may change over time.
     /// Beware that if you "forbid" this lint that existing code may fail in
     /// the future.
-    ///
-    /// [`non_ascii_idents`]: https://doc.rust-lang.org/nightly/unstable-book/language-features/non-ascii-idents.html
     pub MIXED_SCRIPT_CONFUSABLES,
     Warn,
     "detects Unicode scripts whose mixed script confusables codepoints are solely used",
@@ -185,7 +170,7 @@ impl EarlyLintPass for NonAsciiIdents {
         }
 
         let mut has_non_ascii_idents = false;
-        let symbols = cx.sess.parse_sess.symbol_gallery.symbols.lock();
+        let symbols = cx.sess().parse_sess.symbol_gallery.symbols.lock();
 
         // Sort by `Span` so that error messages make sense with respect to the
         // order of identifier locations in the code.
@@ -198,15 +183,11 @@ impl EarlyLintPass for NonAsciiIdents {
                 continue;
             }
             has_non_ascii_idents = true;
-            cx.struct_span_lint(NON_ASCII_IDENTS, sp, |lint| {
-                lint.build("identifier contains non-ASCII characters").emit()
-            });
+            cx.emit_spanned_lint(NON_ASCII_IDENTS, sp, IdentifierNonAsciiChar);
             if check_uncommon_codepoints
                 && !symbol_str.chars().all(GeneralSecurityProfile::identifier_allowed)
             {
-                cx.struct_span_lint(UNCOMMON_CODEPOINTS, sp, |lint| {
-                    lint.build("identifier contains uncommon Unicode codepoints").emit()
-                })
+                cx.emit_spanned_lint(UNCOMMON_CODEPOINTS, sp, IdentifierUncommonCodepoints);
             }
         }
 
@@ -234,18 +215,15 @@ impl EarlyLintPass for NonAsciiIdents {
                     .entry(skeleton_sym)
                     .and_modify(|(existing_symbol, existing_span, existing_is_ascii)| {
                         if !*existing_is_ascii || !is_ascii {
-                            cx.struct_span_lint(CONFUSABLE_IDENTS, sp, |lint| {
-                                lint.build(&format!(
-                                    "identifier pair considered confusable between `{}` and `{}`",
-                                    existing_symbol.as_str(),
-                                    symbol.as_str()
-                                ))
-                                .span_label(
-                                    *existing_span,
-                                    "this is where the previous identifier occurred",
-                                )
-                                .emit();
-                            });
+                            cx.emit_spanned_lint(
+                                CONFUSABLE_IDENTS,
+                                sp,
+                                ConfusableIdentifierPair {
+                                    existing_sym: *existing_symbol,
+                                    sym: symbol,
+                                    label: *existing_span,
+                                },
+                            );
                         }
                         if *existing_is_ascii && !is_ascii {
                             *existing_symbol = symbol;
@@ -321,10 +299,7 @@ impl EarlyLintPass for NonAsciiIdents {
                     BTreeMap::new();
 
                 'outerloop: for (augment_script_set, usage) in script_states {
-                    let (mut ch_list, sp) = match usage {
-                        ScriptSetUsage::Verified => continue,
-                        ScriptSetUsage::Suspicious(ch_list, sp) => (ch_list, sp),
-                    };
+                    let ScriptSetUsage::Suspicious(mut ch_list, sp) = usage else { continue };
 
                     if augment_script_set.is_all() {
                         continue;
@@ -348,21 +323,19 @@ impl EarlyLintPass for NonAsciiIdents {
                 }
 
                 for ((sp, ch_list), script_set) in lint_reports {
-                    cx.struct_span_lint(MIXED_SCRIPT_CONFUSABLES, sp, |lint| {
-                        let message = format!(
-                            "The usage of Script Group `{}` in this crate consists solely of mixed script confusables",
-                            script_set);
-                        let mut note = "The usage includes ".to_string();
-                        for (idx, ch) in ch_list.into_iter().enumerate() {
-                            if idx != 0 {
-                                note += ", ";
-                            }
-                            let char_info = format!("'{}' (U+{:04X})", ch, ch as u32);
-                            note += &char_info;
+                    let mut includes = String::new();
+                    for (idx, ch) in ch_list.into_iter().enumerate() {
+                        if idx != 0 {
+                            includes += ", ";
                         }
-                        note += ".";
-                        lint.build(&message).note(&note).note("Please recheck to make sure their usages are indeed what you want.").emit()
-                    });
+                        let char_info = format!("'{}' (U+{:04X})", ch, ch as u32);
+                        includes += &char_info;
+                    }
+                    cx.emit_spanned_lint(
+                        MIXED_SCRIPT_CONFUSABLES,
+                        sp,
+                        MixedScriptConfusables { set: script_set.to_string(), includes },
+                    );
                 }
             }
         }

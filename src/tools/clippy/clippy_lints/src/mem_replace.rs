@@ -1,29 +1,29 @@
 use clippy_utils::diagnostics::{span_lint_and_help, span_lint_and_sugg, span_lint_and_then};
-use clippy_utils::is_diagnostic_assoc_item;
+use clippy_utils::msrvs::{self, Msrv};
 use clippy_utils::source::{snippet, snippet_with_applicability};
-use clippy_utils::{in_macro, match_def_path, match_qpath, meets_msrv, paths};
+use clippy_utils::ty::is_non_aggregate_primitive_type;
+use clippy_utils::{is_default_equivalent, is_res_lang_ctor, path_res};
 use if_chain::if_chain;
 use rustc_errors::Applicability;
-use rustc_hir::def_id::DefId;
+use rustc_hir::LangItem::OptionNone;
 use rustc_hir::{BorrowKind, Expr, ExprKind, Mutability, QPath};
-use rustc_lint::{LateContext, LateLintPass, LintContext};
+use rustc_lint::{LateContext, LateLintPass};
 use rustc_middle::lint::in_external_macro;
-use rustc_semver::RustcVersion;
 use rustc_session::{declare_tool_lint, impl_lint_pass};
 use rustc_span::source_map::Span;
 use rustc_span::symbol::sym;
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for `mem::replace()` on an `Option` with
+    /// ### What it does
+    /// Checks for `mem::replace()` on an `Option` with
     /// `None`.
     ///
-    /// **Why is this bad?** `Option` already has the method `take()` for
+    /// ### Why is this bad?
+    /// `Option` already has the method `take()` for
     /// taking its current value (Some(..) or None) and replacing it with
     /// `None`.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
+    /// ### Example
     /// ```rust
     /// use std::mem;
     ///
@@ -35,23 +35,23 @@ declare_clippy_lint! {
     /// let mut an_option = Some(0);
     /// let taken = an_option.take();
     /// ```
+    #[clippy::version = "1.31.0"]
     pub MEM_REPLACE_OPTION_WITH_NONE,
     style,
     "replacing an `Option` with `None` instead of `take()`"
 }
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for `mem::replace(&mut _, mem::uninitialized())`
+    /// ### What it does
+    /// Checks for `mem::replace(&mut _, mem::uninitialized())`
     /// and `mem::replace(&mut _, mem::zeroed())`.
     ///
-    /// **Why is this bad?** This will lead to undefined behavior even if the
+    /// ### Why is this bad?
+    /// This will lead to undefined behavior even if the
     /// value is overwritten later, because the uninitialized value may be
     /// observed in the case of a panic.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
-    ///
+    /// ### Example
     /// ```
     /// use std::mem;
     ///# fn may_panic(v: Vec<i32>) -> Vec<i32> { v }
@@ -67,21 +67,22 @@ declare_clippy_lint! {
     /// The [take_mut](https://docs.rs/take_mut) crate offers a sound solution,
     /// at the cost of either lazily creating a replacement value or aborting
     /// on panic, to ensure that the uninitialized value cannot be observed.
+    #[clippy::version = "1.39.0"]
     pub MEM_REPLACE_WITH_UNINIT,
     correctness,
     "`mem::replace(&mut _, mem::uninitialized())` or `mem::replace(&mut _, mem::zeroed())`"
 }
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for `std::mem::replace` on a value of type
+    /// ### What it does
+    /// Checks for `std::mem::replace` on a value of type
     /// `T` with `T::default()`.
     ///
-    /// **Why is this bad?** `std::mem` module already has the method `take` to
+    /// ### Why is this bad?
+    /// `std::mem` module already has the method `take` to
     /// take the current value and replace it with the default value of that type.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
+    /// ### Example
     /// ```rust
     /// let mut text = String::from("foo");
     /// let replaced = std::mem::replace(&mut text, String::default());
@@ -91,6 +92,7 @@ declare_clippy_lint! {
     /// let mut text = String::from("foo");
     /// let taken = std::mem::take(&mut text);
     /// ```
+    #[clippy::version = "1.42.0"]
     pub MEM_REPLACE_WITH_DEFAULT,
     style,
     "replacing a value of type `T` with `T::default()` instead of using `std::mem::take`"
@@ -100,40 +102,38 @@ impl_lint_pass!(MemReplace =>
     [MEM_REPLACE_OPTION_WITH_NONE, MEM_REPLACE_WITH_UNINIT, MEM_REPLACE_WITH_DEFAULT]);
 
 fn check_replace_option_with_none(cx: &LateContext<'_>, src: &Expr<'_>, dest: &Expr<'_>, expr_span: Span) {
-    if let ExprKind::Path(ref replacement_qpath) = src.kind {
-        // Check that second argument is `Option::None`
-        if match_qpath(replacement_qpath, &paths::OPTION_NONE) {
-            // Since this is a late pass (already type-checked),
-            // and we already know that the second argument is an
-            // `Option`, we do not need to check the first
-            // argument's type. All that's left is to get
-            // replacee's path.
-            let replaced_path = match dest.kind {
-                ExprKind::AddrOf(BorrowKind::Ref, Mutability::Mut, replaced) => {
-                    if let ExprKind::Path(QPath::Resolved(None, replaced_path)) = replaced.kind {
-                        replaced_path
-                    } else {
-                        return;
-                    }
-                },
-                ExprKind::Path(QPath::Resolved(None, replaced_path)) => replaced_path,
-                _ => return,
-            };
+    // Check that second argument is `Option::None`
+    if is_res_lang_ctor(cx, path_res(cx, src), OptionNone) {
+        // Since this is a late pass (already type-checked),
+        // and we already know that the second argument is an
+        // `Option`, we do not need to check the first
+        // argument's type. All that's left is to get
+        // replacee's path.
+        let replaced_path = match dest.kind {
+            ExprKind::AddrOf(BorrowKind::Ref, Mutability::Mut, replaced) => {
+                if let ExprKind::Path(QPath::Resolved(None, replaced_path)) = replaced.kind {
+                    replaced_path
+                } else {
+                    return;
+                }
+            },
+            ExprKind::Path(QPath::Resolved(None, replaced_path)) => replaced_path,
+            _ => return,
+        };
 
-            let mut applicability = Applicability::MachineApplicable;
-            span_lint_and_sugg(
-                cx,
-                MEM_REPLACE_OPTION_WITH_NONE,
-                expr_span,
-                "replacing an `Option` with `None`",
-                "consider `Option::take()` instead",
-                format!(
-                    "{}.take()",
-                    snippet_with_applicability(cx, replaced_path.span, "", &mut applicability)
-                ),
-                applicability,
-            );
-        }
+        let mut applicability = Applicability::MachineApplicable;
+        span_lint_and_sugg(
+            cx,
+            MEM_REPLACE_OPTION_WITH_NONE,
+            expr_span,
+            "replacing an `Option` with `None`",
+            "consider `Option::take()` instead",
+            format!(
+                "{}.take()",
+                snippet_with_applicability(cx, replaced_path.span, "", &mut applicability)
+            ),
+            applicability,
+        );
     }
 }
 
@@ -161,8 +161,7 @@ fn check_replace_with_uninit(cx: &LateContext<'_>, src: &Expr<'_>, dest: &Expr<'
     }
 
     if_chain! {
-        if let ExprKind::Call(repl_func, repl_args) = src.kind;
-        if repl_args.is_empty();
+        if let ExprKind::Call(repl_func, []) = src.kind;
         if let ExprKind::Path(ref repl_func_qpath) = repl_func.kind;
         if let Some(repl_def_id) = cx.qpath_res(repl_func_qpath, repl_func.hir_id).opt_def_id();
         then {
@@ -195,76 +194,45 @@ fn check_replace_with_uninit(cx: &LateContext<'_>, src: &Expr<'_>, dest: &Expr<'
     }
 }
 
-/// Returns true if the `def_id` associated with the `path` is recognized as a "default-equivalent"
-/// constructor from the std library
-fn is_default_equivalent_ctor(cx: &LateContext<'_>, def_id: DefId, path: &QPath<'_>) -> bool {
-    let std_types_symbols = &[
-        sym::string_type,
-        sym::vec_type,
-        sym::vecdeque_type,
-        sym::LinkedList,
-        sym::hashmap_type,
-        sym::BTreeMap,
-        sym::hashset_type,
-        sym::BTreeSet,
-        sym::BinaryHeap,
-    ];
-
-    if std_types_symbols
-        .iter()
-        .any(|symbol| is_diagnostic_assoc_item(cx, def_id, *symbol))
-    {
-        if let QPath::TypeRelative(_, method) = path {
-            if method.ident.name == sym::new {
-                return true;
-            }
-        }
-    }
-
-    false
-}
-
 fn check_replace_with_default(cx: &LateContext<'_>, src: &Expr<'_>, dest: &Expr<'_>, expr_span: Span) {
-    if_chain! {
-        if let ExprKind::Call(repl_func, _) = src.kind;
-        if !in_external_macro(cx.tcx.sess, expr_span);
-        if let ExprKind::Path(ref repl_func_qpath) = repl_func.kind;
-        if let Some(repl_def_id) = cx.qpath_res(repl_func_qpath, repl_func.hir_id).opt_def_id();
-        if is_diagnostic_assoc_item(cx, repl_def_id, sym::Default)
-            || is_default_equivalent_ctor(cx, repl_def_id, repl_func_qpath);
+    // disable lint for primitives
+    let expr_type = cx.typeck_results().expr_ty_adjusted(src);
+    if is_non_aggregate_primitive_type(expr_type) {
+        return;
+    }
+    // disable lint for Option since it is covered in another lint
+    if is_res_lang_ctor(cx, path_res(cx, src), OptionNone) {
+        return;
+    }
+    if is_default_equivalent(cx, src) && !in_external_macro(cx.tcx.sess, expr_span) {
+        span_lint_and_then(
+            cx,
+            MEM_REPLACE_WITH_DEFAULT,
+            expr_span,
+            "replacing a value of type `T` with `T::default()` is better expressed using `std::mem::take`",
+            |diag| {
+                if !expr_span.from_expansion() {
+                    let suggestion = format!("std::mem::take({})", snippet(cx, dest.span, ""));
 
-        then {
-            span_lint_and_then(
-                cx,
-                MEM_REPLACE_WITH_DEFAULT,
-                expr_span,
-                "replacing a value of type `T` with `T::default()` is better expressed using `std::mem::take`",
-                |diag| {
-                    if !in_macro(expr_span) {
-                        let suggestion = format!("std::mem::take({})", snippet(cx, dest.span, ""));
-
-                        diag.span_suggestion(
-                            expr_span,
-                            "consider using",
-                            suggestion,
-                            Applicability::MachineApplicable
-                        );
-                    }
+                    diag.span_suggestion(
+                        expr_span,
+                        "consider using",
+                        suggestion,
+                        Applicability::MachineApplicable,
+                    );
                 }
-            );
-        }
+            },
+        );
     }
 }
-
-const MEM_REPLACE_WITH_DEFAULT_MSRV: RustcVersion = RustcVersion::new(1, 40, 0);
 
 pub struct MemReplace {
-    msrv: Option<RustcVersion>,
+    msrv: Msrv,
 }
 
 impl MemReplace {
     #[must_use]
-    pub fn new(msrv: Option<RustcVersion>) -> Self {
+    pub fn new(msrv: Msrv) -> Self {
         Self { msrv }
     }
 }
@@ -273,15 +241,14 @@ impl<'tcx> LateLintPass<'tcx> for MemReplace {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>) {
         if_chain! {
             // Check that `expr` is a call to `mem::replace()`
-            if let ExprKind::Call(func, func_args) = expr.kind;
+            if let ExprKind::Call(func, [dest, src]) = expr.kind;
             if let ExprKind::Path(ref func_qpath) = func.kind;
             if let Some(def_id) = cx.qpath_res(func_qpath, func.hir_id).opt_def_id();
-            if match_def_path(cx, def_id, &paths::MEM_REPLACE);
-            if let [dest, src] = func_args;
+            if cx.tcx.is_diagnostic_item(sym::mem_replace, def_id);
             then {
                 check_replace_option_with_none(cx, src, dest, expr.span);
                 check_replace_with_uninit(cx, src, dest, expr.span);
-                if meets_msrv(self.msrv.as_ref(), &MEM_REPLACE_WITH_DEFAULT_MSRV) {
+                if self.msrv.meets(msrvs::MEM_TAKE) {
                     check_replace_with_default(cx, src, dest, expr.span);
                 }
             }

@@ -17,8 +17,9 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 pub mod alloc;
+#[path = "../unsupported/args.rs"]
 pub mod args;
-#[path = "../unsupported/cmath.rs"]
+#[path = "../unix/cmath.rs"]
 pub mod cmath;
 pub mod env;
 #[path = "../unsupported/fs.rs"]
@@ -29,17 +30,16 @@ pub mod io;
 pub mod net;
 #[path = "../unsupported/os.rs"]
 pub mod os;
+#[path = "../unix/os_str.rs"]
+pub mod os_str;
 #[path = "../unix/path.rs"]
 pub mod path;
 #[path = "../unsupported/pipe.rs"]
 pub mod pipe;
 #[path = "../unsupported/process.rs"]
 pub mod process;
-#[path = "../unsupported/stack_overflow.rs"]
-pub mod stack_overflow;
 #[path = "../unsupported/stdio.rs"]
 pub mod stdio;
-pub mod thread;
 #[path = "../unsupported/thread_local_dtor.rs"]
 pub mod thread_local_dtor;
 #[path = "../unsupported/thread_local_key.rs"]
@@ -47,25 +47,29 @@ pub mod thread_local_key;
 #[path = "../unsupported/time.rs"]
 pub mod time;
 
-pub use crate::sys_common::os_str_bytes as os_str;
-
 cfg_if::cfg_if! {
     if #[cfg(target_feature = "atomics")] {
-        #[path = "condvar_atomics.rs"]
-        pub mod condvar;
-        #[path = "mutex_atomics.rs"]
-        pub mod mutex;
-        #[path = "rwlock_atomics.rs"]
-        pub mod rwlock;
-        #[path = "futex_atomics.rs"]
+        #[path = "../unix/locks"]
+        pub mod locks {
+            #![allow(unsafe_op_in_unsafe_fn)]
+            mod futex_condvar;
+            mod futex_mutex;
+            mod futex_rwlock;
+            pub(crate) use futex_condvar::Condvar;
+            pub(crate) use futex_mutex::Mutex;
+            pub(crate) use futex_rwlock::RwLock;
+        }
+        #[path = "atomics/futex.rs"]
         pub mod futex;
+        #[path = "atomics/thread.rs"]
+        pub mod thread;
     } else {
-        #[path = "../unsupported/condvar.rs"]
-        pub mod condvar;
-        #[path = "../unsupported/mutex.rs"]
-        pub mod mutex;
-        #[path = "../unsupported/rwlock.rs"]
-        pub mod rwlock;
+        #[path = "../unsupported/locks/mod.rs"]
+        pub mod locks;
+        #[path = "../unsupported/once.rs"]
+        pub mod once;
+        #[path = "../unsupported/thread.rs"]
+        pub mod thread;
     }
 }
 

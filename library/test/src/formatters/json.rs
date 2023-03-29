@@ -2,7 +2,7 @@ use std::{borrow::Cow, io, io::prelude::Write};
 
 use super::OutputFormatter;
 use crate::{
-    console::{ConsoleTestState, OutputLocation},
+    console::{ConsoleTestDiscoveryState, ConsoleTestState, OutputLocation},
     test_result::TestResult,
     time,
     types::TestDesc,
@@ -40,35 +40,89 @@ impl<T: Write> JsonFormatter<T> {
         extra: Option<&str>,
     ) -> io::Result<()> {
         // A doc test's name includes a filename which must be escaped for correct json.
-        self.write_message(&*format!(
+        self.write_message(&format!(
             r#"{{ "type": "{}", "name": "{}", "event": "{}""#,
             ty,
             EscapedString(name),
             evt
         ))?;
         if let Some(exec_time) = exec_time {
-            self.write_message(&*format!(r#", "exec_time": {}"#, exec_time.0.as_secs_f64()))?;
+            self.write_message(&format!(r#", "exec_time": {}"#, exec_time.0.as_secs_f64()))?;
         }
         if let Some(stdout) = stdout {
-            self.write_message(&*format!(r#", "stdout": "{}""#, EscapedString(stdout)))?;
+            self.write_message(&format!(r#", "stdout": "{}""#, EscapedString(stdout)))?;
         }
         if let Some(extra) = extra {
-            self.write_message(&*format!(r#", {}"#, extra))?;
+            self.write_message(&format!(r#", {extra}"#))?;
         }
         self.writeln_message(" }")
     }
 }
 
 impl<T: Write> OutputFormatter for JsonFormatter<T> {
-    fn write_run_start(&mut self, test_count: usize) -> io::Result<()> {
-        self.writeln_message(&*format!(
-            r#"{{ "type": "suite", "event": "started", "test_count": {} }}"#,
-            test_count
+    fn write_discovery_start(&mut self) -> io::Result<()> {
+        self.writeln_message(&format!(r#"{{ "type": "suite", "event": "discovery" }}"#))
+    }
+
+    fn write_test_discovered(&mut self, desc: &TestDesc, test_type: &str) -> io::Result<()> {
+        let TestDesc {
+            name,
+            ignore,
+            ignore_message,
+            #[cfg(not(bootstrap))]
+            source_file,
+            #[cfg(not(bootstrap))]
+            start_line,
+            #[cfg(not(bootstrap))]
+            start_col,
+            #[cfg(not(bootstrap))]
+            end_line,
+            #[cfg(not(bootstrap))]
+            end_col,
+            ..
+        } = desc;
+
+        #[cfg(bootstrap)]
+        let source_file = "";
+        #[cfg(bootstrap)]
+        let start_line = 0;
+        #[cfg(bootstrap)]
+        let start_col = 0;
+        #[cfg(bootstrap)]
+        let end_line = 0;
+        #[cfg(bootstrap)]
+        let end_col = 0;
+
+        self.writeln_message(&format!(
+            r#"{{ "type": "{test_type}", "event": "discovered", "name": "{}", "ignore": {ignore}, "ignore_message": "{}", "source_path": "{}", "start_line": {start_line}, "start_col": {start_col}, "end_line": {end_line}, "end_col": {end_col} }}"#,
+            EscapedString(name.as_slice()),
+            ignore_message.unwrap_or(""),
+            EscapedString(source_file),
+        ))
+    }
+
+    fn write_discovery_finish(&mut self, state: &ConsoleTestDiscoveryState) -> io::Result<()> {
+        let ConsoleTestDiscoveryState { tests, benchmarks, ignored, .. } = state;
+
+        let total = tests + benchmarks;
+        self.writeln_message(&format!(
+            r#"{{ "type": "suite", "event": "completed", "tests": {tests}, "benchmarks": {benchmarks}, "total": {total}, "ignored": {ignored} }}"#
+        ))
+    }
+
+    fn write_run_start(&mut self, test_count: usize, shuffle_seed: Option<u64>) -> io::Result<()> {
+        let shuffle_seed_json = if let Some(shuffle_seed) = shuffle_seed {
+            format!(r#", "shuffle_seed": {shuffle_seed}"#)
+        } else {
+            String::new()
+        };
+        self.writeln_message(&format!(
+            r#"{{ "type": "suite", "event": "started", "test_count": {test_count}{shuffle_seed_json} }}"#
         ))
     }
 
     fn write_test_start(&mut self, desc: &TestDesc) -> io::Result<()> {
-        self.writeln_message(&*format!(
+        self.writeln_message(&format!(
             r#"{{ "type": "test", "event": "started", "name": "{}" }}"#,
             EscapedString(desc.name.as_slice())
         ))
@@ -115,17 +169,15 @@ impl<T: Write> OutputFormatter for JsonFormatter<T> {
                 Some(&*format!(r#""message": "{}""#, EscapedString(m))),
             ),
 
-            TestResult::TrIgnored => {
-                self.write_event("test", desc.name.as_slice(), "ignored", exec_time, stdout, None)
-            }
-
-            TestResult::TrAllowedFail => self.write_event(
+            TestResult::TrIgnored => self.write_event(
                 "test",
                 desc.name.as_slice(),
-                "allowed_failure",
+                "ignored",
                 exec_time,
                 stdout,
-                None,
+                desc.ignore_message
+                    .map(|msg| format!(r#""message": "{}""#, EscapedString(msg)))
+                    .as_deref(),
             ),
 
             TestResult::TrBench(ref bs) => {
@@ -149,32 +201,30 @@ impl<T: Write> OutputFormatter for JsonFormatter<T> {
                     mbps
                 );
 
-                self.writeln_message(&*line)
+                self.writeln_message(&line)
             }
         }
     }
 
     fn write_timeout(&mut self, desc: &TestDesc) -> io::Result<()> {
-        self.writeln_message(&*format!(
+        self.writeln_message(&format!(
             r#"{{ "type": "test", "event": "timeout", "name": "{}" }}"#,
             EscapedString(desc.name.as_slice())
         ))
     }
 
     fn write_run_finish(&mut self, state: &ConsoleTestState) -> io::Result<bool> {
-        self.write_message(&*format!(
+        self.write_message(&format!(
             "{{ \"type\": \"suite\", \
              \"event\": \"{}\", \
              \"passed\": {}, \
              \"failed\": {}, \
-             \"allowed_fail\": {}, \
              \"ignored\": {}, \
              \"measured\": {}, \
              \"filtered_out\": {}",
             if state.failed == 0 { "ok" } else { "failed" },
             state.passed,
-            state.failed + state.allowed_fail,
-            state.allowed_fail,
+            state.failed,
             state.ignored,
             state.measured,
             state.filtered_out,

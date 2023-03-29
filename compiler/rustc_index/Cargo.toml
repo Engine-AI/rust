@@ -1,13 +1,16 @@
 [package]
-authors = ["The Rust Project Developers"]
 name = "rustc_index"
 version = "0.0.0"
-edition = "2018"
+edition = "2021"
 
 [lib]
-doctest = false
 
 [dependencies]
-arrayvec = { version = "0.5.1", default-features = false }
-rustc_serialize = { path = "../rustc_serialize" }
-rustc_macros = { path = "../rustc_macros" }
+arrayvec = { version = "0.7", default-features = false }
+rustc_serialize = { path = "../rustc_serialize", optional = true }
+rustc_macros = { path = "../rustc_macros", optional = true }
+smallvec = "1.8.1"
+
+[features]
+default = ["nightly"]
+nightly = ["rustc_serialize", "rustc_macros"]

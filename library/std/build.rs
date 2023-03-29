@@ -6,6 +6,9 @@ fn main() {
     if target.contains("freebsd") {
         if env::var("RUST_STD_FREEBSD_12_ABI").is_ok() {
             println!("cargo:rustc-cfg=freebsd12");
+        } else if env::var("RUST_STD_FREEBSD_13_ABI").is_ok() {
+            println!("cargo:rustc-cfg=freebsd12");
+            println!("cargo:rustc-cfg=freebsd13");
         }
     } else if target.contains("linux")
         || target.contains("netbsd")
@@ -15,6 +18,7 @@ fn main() {
         || target.contains("illumos")
         || target.contains("apple-darwin")
         || target.contains("apple-ios")
+        || target.contains("apple-watchos")
         || target.contains("uwp")
         || target.contains("windows")
         || target.contains("fuchsia")
@@ -25,7 +29,12 @@ fn main() {
         || target.contains("haiku")
         || target.contains("vxworks")
         || target.contains("wasm32")
+        || target.contains("wasm64")
         || target.contains("asmjs")
+        || target.contains("espidf")
+        || target.contains("solid")
+        || target.contains("nintendo-3ds")
+        || target.contains("nto")
     {
         // These platforms don't have any special requirements.
     } else {

@@ -1,25 +1,23 @@
 use clippy_utils::diagnostics::{span_lint, span_lint_and_sugg};
+use clippy_utils::is_trait_method;
+use clippy_utils::msrvs::{self, Msrv};
 use clippy_utils::source::snippet;
-use clippy_utils::{is_trait_method, meets_msrv};
 use rustc_errors::Applicability;
 use rustc_hir as hir;
 use rustc_lint::LateContext;
-use rustc_semver::RustcVersion;
 use rustc_span::sym;
 
 use super::FILTER_MAP_NEXT;
-
-const FILTER_MAP_NEXT_MSRV: RustcVersion = RustcVersion::new(1, 30, 0);
 
 pub(super) fn check<'tcx>(
     cx: &LateContext<'tcx>,
     expr: &'tcx hir::Expr<'_>,
     recv: &'tcx hir::Expr<'_>,
     arg: &'tcx hir::Expr<'_>,
-    msrv: Option<&RustcVersion>,
+    msrv: &Msrv,
 ) {
     if is_trait_method(cx, expr, sym::Iterator) {
-        if !meets_msrv(msrv, &FILTER_MAP_NEXT_MSRV) {
+        if !msrv.meets(msrvs::ITERATOR_FIND_MAP) {
             return;
         }
 
@@ -34,7 +32,7 @@ pub(super) fn check<'tcx>(
                 expr.span,
                 msg,
                 "try this",
-                format!("{}.find_map({})", iter_snippet, filter_snippet),
+                format!("{iter_snippet}.find_map({filter_snippet})"),
                 Applicability::MachineApplicable,
             );
         } else {

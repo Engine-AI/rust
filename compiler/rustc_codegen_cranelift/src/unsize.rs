@@ -24,41 +24,64 @@ pub(crate) fn unsized_info<'tcx>(
         (&ty::Array(_, len), &ty::Slice(_)) => fx
             .bcx
             .ins()
-            .iconst(fx.pointer_type, len.eval_usize(fx.tcx, ParamEnv::reveal_all()) as i64),
-        (&ty::Dynamic(..), &ty::Dynamic(..)) => {
-            // For now, upcasts are limited to changes in marker
-            // traits, and hence never actually require an actual
-            // change to the vtable.
-            old_info.expect("unsized_info: missing old info for trait upcast")
+            .iconst(fx.pointer_type, len.eval_target_usize(fx.tcx, ParamEnv::reveal_all()) as i64),
+        (
+            &ty::Dynamic(ref data_a, _, src_dyn_kind),
+            &ty::Dynamic(ref data_b, _, target_dyn_kind),
+        ) if src_dyn_kind == target_dyn_kind => {
+            let old_info =
+                old_info.expect("unsized_info: missing old info for trait upcasting coercion");
+            if data_a.principal_def_id() == data_b.principal_def_id() {
+                // A NOP cast that doesn't actually change anything, should be allowed even with invalid vtables.
+                return old_info;
+            }
+
+            // trait upcasting coercion
+            let vptr_entry_idx =
+                fx.tcx.vtable_trait_upcasting_coercion_new_vptr_slot((source, target));
+
+            if let Some(entry_idx) = vptr_entry_idx {
+                let entry_idx = u32::try_from(entry_idx).unwrap();
+                let entry_offset = entry_idx * fx.pointer_type.bytes();
+                let vptr_ptr = Pointer::new(old_info).offset_i64(fx, entry_offset.into()).load(
+                    fx,
+                    fx.pointer_type,
+                    crate::vtable::vtable_memflags(),
+                );
+                vptr_ptr
+            } else {
+                old_info
+            }
         }
-        (_, &ty::Dynamic(ref data, ..)) => {
-            crate::vtable::get_vtable(fx, fx.layout_of(source), data.principal())
-        }
+        (_, ty::Dynamic(data, ..)) => crate::vtable::get_vtable(fx, source, data.principal()),
         _ => bug!("unsized_info: invalid unsizing {:?} -> {:?}", source, target),
     }
 }
 
-/// Coerce `src` to `dst_ty`. `src_ty` must be a thin pointer.
-fn unsize_thin_ptr<'tcx>(
+/// Coerce `src` to `dst_ty`.
+fn unsize_ptr<'tcx>(
     fx: &mut FunctionCx<'_, '_, 'tcx>,
     src: Value,
     src_layout: TyAndLayout<'tcx>,
     dst_layout: TyAndLayout<'tcx>,
+    old_info: Option<Value>,
 ) -> (Value, Value) {
     match (&src_layout.ty.kind(), &dst_layout.ty.kind()) {
         (&ty::Ref(_, a, _), &ty::Ref(_, b, _))
         | (&ty::Ref(_, a, _), &ty::RawPtr(ty::TypeAndMut { ty: b, .. }))
         | (&ty::RawPtr(ty::TypeAndMut { ty: a, .. }), &ty::RawPtr(ty::TypeAndMut { ty: b, .. })) => {
-            assert!(!fx.layout_of(a).is_unsized());
-            (src, unsized_info(fx, a, b, None))
+            (src, unsized_info(fx, *a, *b, old_info))
         }
         (&ty::Adt(def_a, _), &ty::Adt(def_b, _)) if def_a.is_box() && def_b.is_box() => {
             let (a, b) = (src_layout.ty.boxed_ty(), dst_layout.ty.boxed_ty());
-            assert!(!fx.layout_of(a).is_unsized());
-            (src, unsized_info(fx, a, b, None))
+            (src, unsized_info(fx, a, b, old_info))
         }
         (&ty::Adt(def_a, _), &ty::Adt(def_b, _)) => {
             assert_eq!(def_a, def_b);
+
+            if src_layout == dst_layout {
+                return (src, old_info.unwrap());
+            }
 
             let mut result = None;
             for i in 0..src_layout.fields.count() {
@@ -73,12 +96,27 @@ fn unsize_thin_ptr<'tcx>(
                 let dst_f = dst_layout.field(fx, i);
                 assert_ne!(src_f.ty, dst_f.ty);
                 assert_eq!(result, None);
-                result = Some(unsize_thin_ptr(fx, src, src_f, dst_f));
+                result = Some(unsize_ptr(fx, src, src_f, dst_f, old_info));
             }
             result.unwrap()
         }
-        _ => bug!("unsize_thin_ptr: called on bad types"),
+        _ => bug!("unsize_ptr: called on bad types"),
     }
+}
+
+/// Coerces `src` to `dst_ty` which is guaranteed to be a `dyn*` type.
+pub(crate) fn cast_to_dyn_star<'tcx>(
+    fx: &mut FunctionCx<'_, '_, 'tcx>,
+    src: Value,
+    src_ty_and_layout: TyAndLayout<'tcx>,
+    dst_ty: Ty<'tcx>,
+    old_info: Option<Value>,
+) -> (Value, Value) {
+    assert!(
+        matches!(dst_ty.kind(), ty::Dynamic(_, _, ty::DynStar)),
+        "destination type must be a dyn*"
+    );
+    (src, unsized_info(fx, src_ty_and_layout.ty, dst_ty, old_info))
 }
 
 /// Coerce `src`, which is a reference to a value of type `src_ty`,
@@ -93,12 +131,11 @@ pub(crate) fn coerce_unsized_into<'tcx>(
     let mut coerce_ptr = || {
         let (base, info) =
             if fx.layout_of(src.layout().ty.builtin_deref(true).unwrap().ty).is_unsized() {
-                // fat-ptr to fat-ptr unsize preserves the vtable
-                // i.e., &'a fmt::Debug+Send => &'a fmt::Debug
-                src.load_scalar_pair(fx)
+                let (old_base, old_info) = src.load_scalar_pair(fx);
+                unsize_ptr(fx, old_base, src.layout(), dst.layout(), Some(old_info))
             } else {
                 let base = src.load_scalar(fx);
-                unsize_thin_ptr(fx, base, src.layout(), dst.layout())
+                unsize_ptr(fx, base, src.layout(), dst.layout(), None)
             };
         dst.write_cvalue(fx, CValue::by_val_pair(base, info, dst.layout()));
     };
@@ -109,7 +146,7 @@ pub(crate) fn coerce_unsized_into<'tcx>(
         (&ty::Adt(def_a, _), &ty::Adt(def_b, _)) => {
             assert_eq!(def_a, def_b);
 
-            for i in 0..def_a.variants[VariantIdx::new(0)].fields.len() {
+            for i in 0..def_a.variant(FIRST_VARIANT).fields.len() {
                 let src_f = src.value_field(fx, mir::Field::new(i));
                 let dst_f = dst.place_field(fx, mir::Field::new(i));
 
@@ -128,6 +165,24 @@ pub(crate) fn coerce_unsized_into<'tcx>(
     }
 }
 
+pub(crate) fn coerce_dyn_star<'tcx>(
+    fx: &mut FunctionCx<'_, '_, 'tcx>,
+    src: CValue<'tcx>,
+    dst: CPlace<'tcx>,
+) {
+    let (data, extra) = if let ty::Dynamic(_, _, ty::DynStar) = src.layout().ty.kind() {
+        let (data, vtable) = src.load_scalar_pair(fx);
+        (data, Some(vtable))
+    } else {
+        let data = src.load_scalar(fx);
+        (data, None)
+    };
+
+    let (data, vtable) = cast_to_dyn_star(fx, data, src.layout(), dst.layout().ty, extra);
+
+    dst.write_cvalue(fx, CValue::by_val_pair(data, vtable, dst.layout()));
+}
+
 // Adapted from https://github.com/rust-lang/rust/blob/2a663555ddf36f6b041445894a8c175cd1bc718c/src/librustc_codegen_ssa/glue.rs
 
 pub(crate) fn size_and_align_of_dst<'tcx>(
@@ -135,11 +190,7 @@ pub(crate) fn size_and_align_of_dst<'tcx>(
     layout: TyAndLayout<'tcx>,
     info: Value,
 ) -> (Value, Value) {
-    if !layout.is_unsized() {
-        let size = fx.bcx.ins().iconst(fx.pointer_type, layout.size.bytes() as i64);
-        let align = fx.bcx.ins().iconst(fx.pointer_type, layout.align.abi.bytes() as i64);
-        return (size, align);
-    }
+    assert!(layout.is_unsized() || layout.abi == Abi::Uninhabited);
     match layout.ty.kind() {
         ty::Dynamic(..) => {
             // load size/align from vtable
@@ -182,7 +233,7 @@ pub(crate) fn size_and_align_of_dst<'tcx>(
 
             // Packed types ignore the alignment of their fields.
             if let ty::Adt(def, _) = layout.ty.kind() {
-                if def.repr.packed() {
+                if def.repr().packed() {
                     unsized_align = sized_align;
                 }
             }

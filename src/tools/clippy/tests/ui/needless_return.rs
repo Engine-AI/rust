@@ -1,13 +1,17 @@
 // run-rustfix
 
+#![feature(lint_reasons)]
+#![feature(yeet_expr)]
 #![allow(unused)]
 #![allow(
     clippy::if_same_then_else,
     clippy::single_match,
-    clippy::branches_sharing_code,
-    clippy::needless_bool
+    clippy::needless_bool,
+    clippy::equatable_if_let
 )]
 #![warn(clippy::needless_return)]
+
+use std::cell::RefCell;
 
 macro_rules! the_answer {
     () => {
@@ -25,6 +29,16 @@ fn test_end_of_fn() -> bool {
 
 fn test_no_semicolon() -> bool {
     return true;
+}
+
+#[rustfmt::skip]
+fn test_multiple_semicolon() -> bool {
+    return true;;;
+}
+
+#[rustfmt::skip]
+fn test_multiple_semicolon_with_spaces() -> bool {
+    return true;; ; ;
 }
 
 fn test_if_block() -> bool {
@@ -74,17 +88,26 @@ fn test_void_match(x: u32) {
     }
 }
 
-fn read_line() -> String {
-    use std::io::BufRead;
-    let stdin = ::std::io::stdin();
-    return stdin.lock().lines().next().unwrap().unwrap();
+fn test_nested_match(x: u32) {
+    match x {
+        0 => (),
+        1 => {
+            let _ = 42;
+            return;
+        },
+        _ => return,
+    }
+}
+
+fn temporary_outlives_local() -> String {
+    let x = RefCell::<String>::default();
+    return x.borrow().clone();
 }
 
 fn borrows_but_not_last(value: bool) -> String {
     if value {
-        use std::io::BufRead;
-        let stdin = ::std::io::stdin();
-        let _a = stdin.lock().lines().next().unwrap().unwrap();
+        let x = RefCell::<String>::default();
+        let _a = x.borrow().clone();
         return String::from("test");
     } else {
         return String::new();
@@ -107,6 +130,7 @@ fn test_return_in_macro() {
 }
 
 mod issue6501 {
+    #[allow(clippy::unnecessary_lazy_evaluations)]
     fn foo(bar: Result<(), ()>) {
         bar.unwrap_or_else(|_| return)
     }
@@ -125,10 +149,172 @@ mod issue6501 {
     }
 }
 
-fn main() {
-    let _ = test_end_of_fn();
-    let _ = test_no_semicolon();
-    let _ = test_if_block();
-    let _ = test_match(true);
-    test_closure();
+async fn async_test_end_of_fn() -> bool {
+    if true {
+        // no error!
+        return true;
+    }
+    return true;
 }
+
+async fn async_test_no_semicolon() -> bool {
+    return true;
+}
+
+async fn async_test_if_block() -> bool {
+    if true {
+        return true;
+    } else {
+        return false;
+    }
+}
+
+async fn async_test_match(x: bool) -> bool {
+    match x {
+        true => return false,
+        false => {
+            return true;
+        },
+    }
+}
+
+async fn async_test_closure() {
+    let _ = || {
+        return true;
+    };
+    let _ = || return true;
+}
+
+async fn async_test_macro_call() -> i32 {
+    return the_answer!();
+}
+
+async fn async_test_void_fun() {
+    return;
+}
+
+async fn async_test_void_if_fun(b: bool) {
+    if b {
+        return;
+    } else {
+        return;
+    }
+}
+
+async fn async_test_void_match(x: u32) {
+    match x {
+        0 => (),
+        _ => return,
+    }
+}
+
+async fn async_temporary_outlives_local() -> String {
+    let x = RefCell::<String>::default();
+    return x.borrow().clone();
+}
+
+async fn async_borrows_but_not_last(value: bool) -> String {
+    if value {
+        let x = RefCell::<String>::default();
+        let _a = x.borrow().clone();
+        return String::from("test");
+    } else {
+        return String::new();
+    }
+}
+
+async fn async_test_return_in_macro() {
+    needed_return!(10);
+    needed_return!(0);
+}
+
+fn let_else() {
+    let Some(1) = Some(1) else { return };
+}
+
+fn needless_return_macro() -> String {
+    let _ = "foo";
+    let _ = "bar";
+    return format!("Hello {}", "world!");
+}
+
+fn issue_9361() -> i32 {
+    #[allow(clippy::integer_arithmetic)]
+    return 1 + 2;
+}
+
+fn issue8336(x: i32) -> bool {
+    if x > 0 {
+        println!("something");
+        return true;
+    } else {
+        return false;
+    };
+}
+
+fn issue8156(x: u8) -> u64 {
+    match x {
+        80 => {
+            return 10;
+        },
+        _ => {
+            return 100;
+        },
+    };
+}
+
+// Ideally the compiler should throw `unused_braces` in this case
+fn issue9192() -> i32 {
+    {
+        return 0;
+    };
+}
+
+fn issue9503(x: usize) -> isize {
+    unsafe {
+        if x > 12 {
+            return *(x as *const isize);
+        } else {
+            return !*(x as *const isize);
+        };
+    };
+}
+
+mod issue9416 {
+    pub fn with_newline() {
+        let _ = 42;
+
+        return;
+    }
+
+    #[rustfmt::skip]
+    pub fn oneline() {
+        let _ = 42; return;
+    }
+}
+
+fn issue9947() -> Result<(), String> {
+    do yeet "hello";
+}
+
+// without anyhow, but triggers the same bug I believe
+#[expect(clippy::useless_format)]
+fn issue10051() -> Result<String, String> {
+    if true {
+        return Ok(format!("ok!"));
+    } else {
+        return Err(format!("err!"));
+    }
+}
+
+mod issue10049 {
+    fn single() -> u32 {
+        return if true { 1 } else { 2 };
+    }
+
+    fn multiple(b1: bool, b2: bool, b3: bool) -> u32 {
+        return if b1 { 0 } else { 1 } | if b2 { 2 } else { 3 } | if b3 { 4 } else { 5 };
+    }
+}
+
+fn main() {}

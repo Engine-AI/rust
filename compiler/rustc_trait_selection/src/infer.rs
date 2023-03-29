@@ -1,50 +1,48 @@
-use crate::traits::query::outlives_bounds::InferCtxtExt as _;
-use crate::traits::{self, TraitEngine, TraitEngineExt};
+use crate::traits::query::evaluate_obligation::InferCtxtExt as _;
+use crate::traits::{self, ObligationCtxt};
 
-use rustc_hir as hir;
+use rustc_hir::def_id::DefId;
 use rustc_hir::lang_items::LangItem;
-use rustc_infer::infer::outlives::env::OutlivesEnvironment;
-use rustc_infer::traits::ObligationCause;
 use rustc_middle::arena::ArenaAllocatable;
-use rustc_middle::infer::canonical::{Canonical, CanonicalizedQueryResponse, QueryResponse};
+use rustc_middle::infer::canonical::{Canonical, CanonicalQueryResponse, QueryResponse};
 use rustc_middle::traits::query::Fallible;
-use rustc_middle::ty::{self, Ty, TypeFoldable};
-use rustc_span::{Span, DUMMY_SP};
+use rustc_middle::ty::{self, Ty, TyCtxt, TypeFoldable, TypeVisitableExt};
+use rustc_middle::ty::{GenericArg, ToPredicate};
+use rustc_span::DUMMY_SP;
 
 use std::fmt::Debug;
 
 pub use rustc_infer::infer::*;
 
 pub trait InferCtxtExt<'tcx> {
-    fn type_is_copy_modulo_regions(
-        &self,
-        param_env: ty::ParamEnv<'tcx>,
-        ty: Ty<'tcx>,
-        span: Span,
-    ) -> bool;
+    fn type_is_copy_modulo_regions(&self, param_env: ty::ParamEnv<'tcx>, ty: Ty<'tcx>) -> bool;
 
-    fn partially_normalize_associated_types_in<T>(
+    fn type_is_sized_modulo_regions(&self, param_env: ty::ParamEnv<'tcx>, ty: Ty<'tcx>) -> bool;
+
+    /// Check whether a `ty` implements given trait(trait_def_id).
+    /// The inputs are:
+    ///
+    /// - the def-id of the trait
+    /// - the type parameters of the trait, including the self-type
+    /// - the parameter environment
+    ///
+    /// Invokes `evaluate_obligation`, so in the event that evaluating
+    /// `Ty: Trait` causes overflow, EvaluatedToRecur (or EvaluatedToUnknown)
+    /// will be returned.
+    fn type_implements_trait(
         &self,
-        span: Span,
-        body_id: hir::HirId,
+        trait_def_id: DefId,
+        params: impl IntoIterator<Item: Into<GenericArg<'tcx>>>,
         param_env: ty::ParamEnv<'tcx>,
-        value: T,
-    ) -> InferOk<'tcx, T>
-    where
-        T: TypeFoldable<'tcx>;
+    ) -> traits::EvaluationResult;
 }
 
-impl<'cx, 'tcx> InferCtxtExt<'tcx> for InferCtxt<'cx, 'tcx> {
-    fn type_is_copy_modulo_regions(
-        &self,
-        param_env: ty::ParamEnv<'tcx>,
-        ty: Ty<'tcx>,
-        span: Span,
-    ) -> bool {
+impl<'tcx> InferCtxtExt<'tcx> for InferCtxt<'tcx> {
+    fn type_is_copy_modulo_regions(&self, param_env: ty::ParamEnv<'tcx>, ty: Ty<'tcx>) -> bool {
         let ty = self.resolve_vars_if_possible(ty);
 
         if !(param_env, ty).needs_infer() {
-            return ty.is_copy_modulo_regions(self.tcx.at(span), param_env);
+            return ty.is_copy_modulo_regions(self.tcx, param_env);
         }
 
         let copy_def_id = self.tcx.require_lang_item(LangItem::Copy, None);
@@ -53,31 +51,30 @@ impl<'cx, 'tcx> InferCtxtExt<'tcx> for InferCtxt<'cx, 'tcx> {
         // rightly refuses to work with inference variables, but
         // moves_by_default has a cache, which we want to use in other
         // cases.
-        traits::type_known_to_meet_bound_modulo_regions(self, param_env, ty, copy_def_id, span)
+        traits::type_known_to_meet_bound_modulo_regions(self, param_env, ty, copy_def_id)
     }
 
-    /// Normalizes associated types in `value`, potentially returning
-    /// new obligations that must further be processed.
-    fn partially_normalize_associated_types_in<T>(
+    fn type_is_sized_modulo_regions(&self, param_env: ty::ParamEnv<'tcx>, ty: Ty<'tcx>) -> bool {
+        let lang_item = self.tcx.require_lang_item(LangItem::Sized, None);
+        traits::type_known_to_meet_bound_modulo_regions(self, param_env, ty, lang_item)
+    }
+
+    #[instrument(level = "debug", skip(self, params), ret)]
+    fn type_implements_trait(
         &self,
-        span: Span,
-        body_id: hir::HirId,
+        trait_def_id: DefId,
+        params: impl IntoIterator<Item: Into<GenericArg<'tcx>>>,
         param_env: ty::ParamEnv<'tcx>,
-        value: T,
-    ) -> InferOk<'tcx, T>
-    where
-        T: TypeFoldable<'tcx>,
-    {
-        debug!("partially_normalize_associated_types_in(value={:?})", value);
-        let mut selcx = traits::SelectionContext::new(self);
-        let cause = ObligationCause::misc(span, body_id);
-        let traits::Normalized { value, obligations } =
-            traits::normalize(&mut selcx, param_env, cause, value);
-        debug!(
-            "partially_normalize_associated_types_in: result={:?} predicates={:?}",
-            value, obligations
-        );
-        InferOk { value, obligations }
+    ) -> traits::EvaluationResult {
+        let trait_ref = self.tcx.mk_trait_ref(trait_def_id, params);
+
+        let obligation = traits::Obligation {
+            cause: traits::ObligationCause::dummy(),
+            param_env,
+            recursion_depth: 0,
+            predicate: ty::Binder::dummy(trait_ref).without_const().to_predicate(self.tcx),
+        };
+        self.evaluate_obligation(&obligation).unwrap_or(traits::EvaluationResult::EvaluatedToErr)
     }
 }
 
@@ -85,11 +82,11 @@ pub trait InferCtxtBuilderExt<'tcx> {
     fn enter_canonical_trait_query<K, R>(
         &mut self,
         canonical_key: &Canonical<'tcx, K>,
-        operation: impl FnOnce(&InferCtxt<'_, 'tcx>, &mut dyn TraitEngine<'tcx>, K) -> Fallible<R>,
-    ) -> Fallible<CanonicalizedQueryResponse<'tcx, R>>
+        operation: impl FnOnce(&ObligationCtxt<'_, 'tcx>, K) -> Fallible<R>,
+    ) -> Fallible<CanonicalQueryResponse<'tcx, R>>
     where
-        K: TypeFoldable<'tcx>,
-        R: Debug + TypeFoldable<'tcx>,
+        K: TypeFoldable<TyCtxt<'tcx>>,
+        R: Debug + TypeFoldable<TyCtxt<'tcx>>,
         Canonical<'tcx, QueryResponse<'tcx, R>>: ArenaAllocatable<'tcx>;
 }
 
@@ -109,74 +106,21 @@ impl<'tcx> InferCtxtBuilderExt<'tcx> for InferCtxtBuilder<'tcx> {
     /// In part because we would need a `for<'tcx>` sort of
     /// bound for the closure and in part because it is convenient to
     /// have `'tcx` be free on this function so that we can talk about
-    /// `K: TypeFoldable<'tcx>`.)
+    /// `K: TypeFoldable<TyCtxt<'tcx>>`.)
     fn enter_canonical_trait_query<K, R>(
         &mut self,
         canonical_key: &Canonical<'tcx, K>,
-        operation: impl FnOnce(&InferCtxt<'_, 'tcx>, &mut dyn TraitEngine<'tcx>, K) -> Fallible<R>,
-    ) -> Fallible<CanonicalizedQueryResponse<'tcx, R>>
+        operation: impl FnOnce(&ObligationCtxt<'_, 'tcx>, K) -> Fallible<R>,
+    ) -> Fallible<CanonicalQueryResponse<'tcx, R>>
     where
-        K: TypeFoldable<'tcx>,
-        R: Debug + TypeFoldable<'tcx>,
+        K: TypeFoldable<TyCtxt<'tcx>>,
+        R: Debug + TypeFoldable<TyCtxt<'tcx>>,
         Canonical<'tcx, QueryResponse<'tcx, R>>: ArenaAllocatable<'tcx>,
     {
-        self.enter_with_canonical(
-            DUMMY_SP,
-            canonical_key,
-            |ref infcx, key, canonical_inference_vars| {
-                let mut fulfill_cx = <dyn TraitEngine<'_>>::new(infcx.tcx);
-                let value = operation(infcx, &mut *fulfill_cx, key)?;
-                infcx.make_canonicalized_query_response(
-                    canonical_inference_vars,
-                    value,
-                    &mut *fulfill_cx,
-                )
-            },
-        )
-    }
-}
-
-pub trait OutlivesEnvironmentExt<'tcx> {
-    fn add_implied_bounds(
-        &mut self,
-        infcx: &InferCtxt<'a, 'tcx>,
-        fn_sig_tys: &[Ty<'tcx>],
-        body_id: hir::HirId,
-        span: Span,
-    );
-}
-
-impl<'tcx> OutlivesEnvironmentExt<'tcx> for OutlivesEnvironment<'tcx> {
-    /// This method adds "implied bounds" into the outlives environment.
-    /// Implied bounds are outlives relationships that we can deduce
-    /// on the basis that certain types must be well-formed -- these are
-    /// either the types that appear in the function signature or else
-    /// the input types to an impl. For example, if you have a function
-    /// like
-    ///
-    /// ```
-    /// fn foo<'a, 'b, T>(x: &'a &'b [T]) { }
-    /// ```
-    ///
-    /// we can assume in the caller's body that `'b: 'a` and that `T:
-    /// 'b` (and hence, transitively, that `T: 'a`). This method would
-    /// add those assumptions into the outlives-environment.
-    ///
-    /// Tests: `src/test/ui/regions/regions-free-region-ordering-*.rs`
-    fn add_implied_bounds(
-        &mut self,
-        infcx: &InferCtxt<'a, 'tcx>,
-        fn_sig_tys: &[Ty<'tcx>],
-        body_id: hir::HirId,
-        span: Span,
-    ) {
-        debug!("add_implied_bounds()");
-
-        for &ty in fn_sig_tys {
-            let ty = infcx.resolve_vars_if_possible(ty);
-            debug!("add_implied_bounds: ty = {}", ty);
-            let implied_bounds = infcx.implied_outlives_bounds(self.param_env, body_id, ty, span);
-            self.add_outlives_bounds(Some(infcx), implied_bounds)
-        }
+        let (infcx, key, canonical_inference_vars) =
+            self.build_with_canonical(DUMMY_SP, canonical_key);
+        let ocx = ObligationCtxt::new(&infcx);
+        let value = operation(&ocx, key)?;
+        ocx.make_canonicalized_query_response(canonical_inference_vars, value)
     }
 }

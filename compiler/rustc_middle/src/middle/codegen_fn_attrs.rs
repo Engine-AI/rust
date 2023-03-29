@@ -22,12 +22,14 @@ pub struct CodegenFnAttrs {
     /// imported function has in the dynamic library. Note that this must not
     /// be set when `link_name` is set. This is for foreign items with the
     /// "raw-dylib" kind.
-    pub link_ordinal: Option<usize>,
+    pub link_ordinal: Option<u16>,
     /// The `#[target_feature(enable = "...")]` attribute and the enabled
     /// features (only enabled features are supported right now).
     pub target_features: Vec<Symbol>,
-    /// The `#[linkage = "..."]` attribute and the value we found.
+    /// The `#[linkage = "..."]` attribute on Rust-defined items and the value we found.
     pub linkage: Option<Linkage>,
+    /// The `#[linkage = "..."]` attribute on foreign items and the value we found.
+    pub import_linkage: Option<Linkage>,
     /// The `#[link_section = "..."]` attribute, or what executable section this
     /// should be placed in.
     pub link_section: Option<Symbol>,
@@ -50,15 +52,11 @@ bitflags! {
         /// the hot path.
         const COLD                      = 1 << 0;
         /// `#[rustc_allocator]`: a hint to LLVM that the pointer returned from this
-        /// function is never null.
+        /// function is never null and the function has no side effects other than allocating.
         const ALLOCATOR                 = 1 << 1;
-        /// `#[unwind]`: an indicator that this function may unwind despite what
-        /// its ABI signature may otherwise imply.
-        const UNWIND                    = 1 << 2;
-        /// `#[rust_allocator_nounwind]`, an indicator that an imported FFI
-        /// function will never unwind. Probably obsolete by recent changes with
-        /// #[unwind], but hasn't been removed/migrated yet
-        const RUSTC_ALLOCATOR_NOUNWIND  = 1 << 3;
+        /// An indicator that function will never unwind. Will become obsolete
+        /// once C-unwind is fully stabilized.
+        const NEVER_UNWIND              = 1 << 3;
         /// `#[naked]`: an indicator to LLVM that no function prologue/epilogue
         /// should be generated.
         const NAKED                     = 1 << 4;
@@ -89,11 +87,26 @@ bitflags! {
         /// #[cmse_nonsecure_entry]: with a TrustZone-M extension, declare a
         /// function as an entry function from Non-Secure code.
         const CMSE_NONSECURE_ENTRY      = 1 << 14;
+        /// `#[no_coverage]`: indicates that the function should be ignored by
+        /// the MIR `InstrumentCoverage` pass and not added to the coverage map
+        /// during codegen.
+        const NO_COVERAGE               = 1 << 15;
+        /// `#[used(linker)]`:
+        /// indicates that neither LLVM nor the linker will eliminate this function.
+        const USED_LINKER               = 1 << 16;
+        /// `#[rustc_deallocator]`: a hint to LLVM that the function only deallocates memory.
+        const DEALLOCATOR               = 1 << 17;
+        /// `#[rustc_reallocator]`: a hint to LLVM that the function only reallocates memory.
+        const REALLOCATOR               = 1 << 18;
+        /// `#[rustc_allocator_zeroed]`: a hint to LLVM that the function only allocates zeroed memory.
+        const ALLOCATOR_ZEROED          = 1 << 19;
     }
 }
 
 impl CodegenFnAttrs {
-    pub fn new() -> CodegenFnAttrs {
+    pub const EMPTY: &'static Self = &Self::new();
+
+    pub const fn new() -> CodegenFnAttrs {
         CodegenFnAttrs {
             flags: CodegenFnAttrFlags::empty(),
             inline: InlineAttr::None,
@@ -103,6 +116,7 @@ impl CodegenFnAttrs {
             link_ordinal: None,
             target_features: vec![],
             linkage: None,
+            import_linkage: None,
             link_section: None,
             no_sanitize: SanitizerSet::empty(),
             instruction_set: None,

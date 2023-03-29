@@ -1,6 +1,27 @@
 use crate::fmt::{Debug, Display, Formatter, LowerExp, Result, UpperExp};
 use crate::mem::MaybeUninit;
 use crate::num::flt2dec;
+use crate::num::fmt as numfmt;
+
+#[doc(hidden)]
+trait GeneralFormat: PartialOrd {
+    /// Determines if a value should use exponential based on its magnitude, given the precondition
+    /// that it will not be rounded any further before it is displayed.
+    fn already_rounded_value_should_use_exponential(&self) -> bool;
+}
+
+macro_rules! impl_general_format {
+    ($($t:ident)*) => {
+        $(impl GeneralFormat for $t {
+            fn already_rounded_value_should_use_exponential(&self) -> bool {
+                let abs = $t::abs_private(*self);
+                (abs != 0.0 && abs < 1e-4) || abs >= 1e+16
+            }
+        })*
+    }
+}
+
+impl_general_format! { f32 f64 }
 
 // Don't inline this so callers don't use the stack space this function
 // requires unless they have to.
@@ -15,7 +36,7 @@ where
     T: flt2dec::DecodableFloat,
 {
     let mut buf: [MaybeUninit<u8>; 1024] = MaybeUninit::uninit_array(); // enough for f32 and f64
-    let mut parts: [MaybeUninit<flt2dec::Part<'_>>; 4] = MaybeUninit::uninit_array();
+    let mut parts: [MaybeUninit<numfmt::Part<'_>>; 4] = MaybeUninit::uninit_array();
     let formatted = flt2dec::to_exact_fixed_str(
         flt2dec::strategy::grisu::format_exact,
         *num,
@@ -41,7 +62,7 @@ where
 {
     // enough for f32 and f64
     let mut buf: [MaybeUninit<u8>; flt2dec::MAX_SIG_DIGITS] = MaybeUninit::uninit_array();
-    let mut parts: [MaybeUninit<flt2dec::Part<'_>>; 4] = MaybeUninit::uninit_array();
+    let mut parts: [MaybeUninit<numfmt::Part<'_>>; 4] = MaybeUninit::uninit_array();
     let formatted = flt2dec::to_shortest_str(
         flt2dec::strategy::grisu::format_shortest,
         *num,
@@ -53,8 +74,7 @@ where
     fmt.pad_formatted_parts(&formatted)
 }
 
-// Common code of floating point Debug and Display.
-fn float_to_decimal_common<T>(fmt: &mut Formatter<'_>, num: &T, min_precision: usize) -> Result
+fn float_to_decimal_display<T>(fmt: &mut Formatter<'_>, num: &T) -> Result
 where
     T: flt2dec::DecodableFloat,
 {
@@ -67,6 +87,7 @@ where
     if let Some(precision) = fmt.precision {
         float_to_decimal_common_exact(fmt, num, sign, precision)
     } else {
+        let min_precision = 0;
         float_to_decimal_common_shortest(fmt, num, sign, min_precision)
     }
 }
@@ -85,7 +106,7 @@ where
     T: flt2dec::DecodableFloat,
 {
     let mut buf: [MaybeUninit<u8>; 1024] = MaybeUninit::uninit_array(); // enough for f32 and f64
-    let mut parts: [MaybeUninit<flt2dec::Part<'_>>; 6] = MaybeUninit::uninit_array();
+    let mut parts: [MaybeUninit<numfmt::Part<'_>>; 6] = MaybeUninit::uninit_array();
     let formatted = flt2dec::to_exact_exp_str(
         flt2dec::strategy::grisu::format_exact,
         *num,
@@ -112,7 +133,7 @@ where
 {
     // enough for f32 and f64
     let mut buf: [MaybeUninit<u8>; flt2dec::MAX_SIG_DIGITS] = MaybeUninit::uninit_array();
-    let mut parts: [MaybeUninit<flt2dec::Part<'_>>; 6] = MaybeUninit::uninit_array();
+    let mut parts: [MaybeUninit<numfmt::Part<'_>>; 6] = MaybeUninit::uninit_array();
     let formatted = flt2dec::to_shortest_exp_str(
         flt2dec::strategy::grisu::format_shortest,
         *num,
@@ -144,19 +165,44 @@ where
     }
 }
 
+fn float_to_general_debug<T>(fmt: &mut Formatter<'_>, num: &T) -> Result
+where
+    T: flt2dec::DecodableFloat + GeneralFormat,
+{
+    let force_sign = fmt.sign_plus();
+    let sign = match force_sign {
+        false => flt2dec::Sign::Minus,
+        true => flt2dec::Sign::MinusPlus,
+    };
+
+    if let Some(precision) = fmt.precision {
+        // this behavior of {:.PREC?} predates exponential formatting for {:?}
+        float_to_decimal_common_exact(fmt, num, sign, precision)
+    } else {
+        // since there is no precision, there will be no rounding
+        if num.already_rounded_value_should_use_exponential() {
+            let upper = false;
+            float_to_exponential_common_shortest(fmt, num, sign, upper)
+        } else {
+            let min_precision = 1;
+            float_to_decimal_common_shortest(fmt, num, sign, min_precision)
+        }
+    }
+}
+
 macro_rules! floating {
     ($ty:ident) => {
         #[stable(feature = "rust1", since = "1.0.0")]
         impl Debug for $ty {
             fn fmt(&self, fmt: &mut Formatter<'_>) -> Result {
-                float_to_decimal_common(fmt, self, 1)
+                float_to_general_debug(fmt, self)
             }
         }
 
         #[stable(feature = "rust1", since = "1.0.0")]
         impl Display for $ty {
             fn fmt(&self, fmt: &mut Formatter<'_>) -> Result {
-                float_to_decimal_common(fmt, self, 0)
+                float_to_decimal_display(fmt, self)
             }
         }
 

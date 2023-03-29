@@ -6,9 +6,7 @@ The tracking issue for this feature is: [#29597]
 
 
 This feature is part of "compiler plugins." It will often be used with the
-[`plugin_registrar`] and `rustc_private` features.
-
-[`plugin_registrar`]: plugin-registrar.md
+`rustc_private` feature.
 
 ------------------------
 
@@ -35,11 +33,10 @@ of a library.
 Plugins can extend [Rust's lint
 infrastructure](../../reference/attributes/diagnostics.md#lint-check-attributes) with
 additional checks for code style, safety, etc. Now let's write a plugin
-[`lint-plugin-test.rs`](https://github.com/rust-lang/rust/blob/master/src/test/ui-fulldeps/auxiliary/lint-plugin-test.rs)
+[`lint-plugin-test.rs`](https://github.com/rust-lang/rust/blob/master/tests/ui-fulldeps/auxiliary/lint-plugin-test.rs)
 that warns about any item named `lintme`.
 
 ```rust,ignore (requires-stage-2)
-#![feature(plugin_registrar)]
 #![feature(box_syntax, rustc_private)]
 
 extern crate rustc_ast;
@@ -68,8 +65,8 @@ impl EarlyLintPass for Pass {
     }
 }
 
-#[plugin_registrar]
-pub fn plugin_registrar(reg: &mut Registry) {
+#[no_mangle]
+fn __rustc_plugin_registrar(reg: &mut Registry) {
     reg.lint_store.register_lints(&[&TEST_LINT]);
     reg.lint_store.register_early_pass(|| box Pass);
 }
@@ -105,7 +102,7 @@ The components of a lint plugin are:
 
 Lint passes are syntax traversals, but they run at a late stage of compilation
 where type information is available. `rustc`'s [built-in
-lints](https://github.com/rust-lang/rust/blob/master/src/librustc_session/lint/builtin.rs)
+lints](https://github.com/rust-lang/rust/blob/master/compiler/rustc_lint_defs/src/builtin.rs)
 mostly use the same infrastructure as lint plugins, and provide examples of how
 to access type information.
 

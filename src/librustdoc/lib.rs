@@ -4,22 +4,23 @@
 )]
 #![feature(rustc_private)]
 #![feature(array_methods)]
+#![feature(assert_matches)]
 #![feature(box_patterns)]
-#![feature(box_syntax)]
-#![feature(in_band_lifetimes)]
-#![feature(nll)]
-#![cfg_attr(bootstrap, feature(or_patterns))]
+#![feature(drain_filter)]
+#![feature(is_terminal)]
+#![feature(let_chains)]
 #![feature(test)]
-#![feature(crate_visibility_modifier)]
 #![feature(never_type)]
 #![feature(once_cell)]
 #![feature(type_ascription)]
 #![feature(iter_intersperse)]
+#![feature(type_alias_impl_trait)]
 #![recursion_limit = "256"]
-#![deny(rustc::internal)]
+#![warn(rustc::internal)]
+#![allow(clippy::collapsible_if, clippy::collapsible_else_if)]
+#![allow(rustc::potential_query_instability)]
 
-#[macro_use]
-extern crate lazy_static;
+extern crate thin_vec;
 #[macro_use]
 extern crate tracing;
 
@@ -31,16 +32,18 @@ extern crate tracing;
 //
 // Dependencies listed in Cargo.toml do not need `extern crate`.
 
+extern crate pulldown_cmark;
 extern crate rustc_ast;
-extern crate rustc_ast_lowering;
 extern crate rustc_ast_pretty;
 extern crate rustc_attr;
+extern crate rustc_const_eval;
 extern crate rustc_data_structures;
 extern crate rustc_driver;
 extern crate rustc_errors;
 extern crate rustc_expand;
 extern crate rustc_feature;
 extern crate rustc_hir;
+extern crate rustc_hir_analysis;
 extern crate rustc_hir_pretty;
 extern crate rustc_index;
 extern crate rustc_infer;
@@ -48,47 +51,44 @@ extern crate rustc_interface;
 extern crate rustc_lexer;
 extern crate rustc_lint;
 extern crate rustc_lint_defs;
+extern crate rustc_macros;
 extern crate rustc_metadata;
 extern crate rustc_middle;
-extern crate rustc_mir;
 extern crate rustc_parse;
 extern crate rustc_passes;
 extern crate rustc_resolve;
+extern crate rustc_serialize;
 extern crate rustc_session;
-extern crate rustc_span as rustc_span;
+extern crate rustc_span;
 extern crate rustc_target;
 extern crate rustc_trait_selection;
-extern crate rustc_typeck;
-extern crate test as testing;
+extern crate test;
 
+// See docs in https://github.com/rust-lang/rust/blob/master/compiler/rustc/src/main.rs
+// about jemalloc.
 #[cfg(feature = "jemalloc")]
-extern crate tikv_jemalloc_sys;
-#[cfg(feature = "jemalloc")]
-use tikv_jemalloc_sys as jemalloc_sys;
-#[cfg(feature = "jemalloc")]
-extern crate tikv_jemallocator;
-#[cfg(feature = "jemalloc")]
-use tikv_jemallocator as jemallocator;
+extern crate jemalloc_sys;
 
 use std::default::Default;
-use std::env;
+use std::env::{self, VarError};
+use std::io::{self, IsTerminal};
 use std::process;
 
-use rustc_driver::{abort_on_err, describe_lints};
-use rustc_errors::ErrorReported;
+use rustc_driver::abort_on_err;
+use rustc_errors::ErrorGuaranteed;
 use rustc_interface::interface;
 use rustc_middle::ty::TyCtxt;
 use rustc_session::config::{make_crate_type_option, ErrorOutputType, RustcOptGroup};
 use rustc_session::getopts;
 use rustc_session::{early_error, early_warn};
 
-use crate::clean::utils::doc_rust_lang_org_channel;
+use crate::clean::utils::DOC_RUST_LANG_ORG_CHANNEL;
 
 /// A macro to create a FxHashMap.
 ///
 /// Example:
 ///
-/// ```
+/// ```ignore(cannot-test-this-because-non-exported-macro)
 /// let letters = map!{"a" => "b", "c" => "d"};
 /// ```
 ///
@@ -102,38 +102,30 @@ macro_rules! map {
     }}
 }
 
-#[macro_use]
-mod externalfiles;
-
 mod clean;
 mod config;
 mod core;
 mod docfs;
-mod doctree;
-#[macro_use]
-mod error;
 mod doctest;
+mod error;
+mod externalfiles;
 mod fold;
 mod formats;
 // used by the error-index generator, so it needs to be public
 pub mod html;
 mod json;
-crate mod lint;
+pub(crate) mod lint;
 mod markdown;
 mod passes;
+mod scrape_examples;
 mod theme;
+mod visit;
 mod visit_ast;
 mod visit_lib;
 
-// See docs in https://github.com/rust-lang/rust/blob/master/compiler/rustc/src/main.rs
-// about jemallocator
-#[cfg(feature = "jemalloc")]
-#[global_allocator]
-static ALLOC: jemallocator::Jemalloc = jemallocator::Jemalloc;
-
 pub fn main() {
     // See docs in https://github.com/rust-lang/rust/blob/master/compiler/rustc/src/main.rs
-    // about jemalloc-sys
+    // about jemalloc.
     #[cfg(feature = "jemalloc")]
     {
         use std::os::raw::{c_int, c_void};
@@ -152,10 +144,6 @@ pub fn main() {
         #[used]
         static _F6: unsafe extern "C" fn(*mut c_void) = jemalloc_sys::free;
 
-        // On OSX, jemalloc doesn't directly override malloc/free, but instead
-        // registers itself with the allocator's zone APIs in a ctor. However,
-        // the linker doesn't seem to consider ctors as "used" when statically
-        // linking, so we need to explicitly depend on the function.
         #[cfg(target_os = "macos")]
         {
             extern "C" {
@@ -167,7 +155,6 @@ pub fn main() {
         }
     }
 
-    rustc_driver::set_sigpipe_handler();
     rustc_driver::install_ice_hook();
 
     // When using CI artifacts (with `download_stage1 = true`), tracing is unconditionally built
@@ -184,53 +171,26 @@ pub fn main() {
 
     let exit_code = rustc_driver::catch_with_exit_code(|| match get_args() {
         Some(args) => main_args(&args),
-        _ => Err(ErrorReported),
+        _ => Err(ErrorGuaranteed::unchecked_claim_error_was_emitted()),
     });
     process::exit(exit_code);
 }
 
 fn init_logging() {
-    use std::io;
-
-    // FIXME remove these and use winapi 0.3 instead
-    // Duplicates: bootstrap/compile.rs, librustc_errors/emitter.rs, rustc_driver/lib.rs
-    #[cfg(unix)]
-    fn stdout_isatty() -> bool {
-        extern crate libc;
-        unsafe { libc::isatty(libc::STDOUT_FILENO) != 0 }
-    }
-
-    #[cfg(windows)]
-    fn stdout_isatty() -> bool {
-        extern crate winapi;
-        use winapi::um::consoleapi::GetConsoleMode;
-        use winapi::um::processenv::GetStdHandle;
-        use winapi::um::winbase::STD_OUTPUT_HANDLE;
-
-        unsafe {
-            let handle = GetStdHandle(STD_OUTPUT_HANDLE);
-            let mut out = 0;
-            GetConsoleMode(handle, &mut out) != 0
-        }
-    }
-
-    let color_logs = match std::env::var("RUSTDOC_LOG_COLOR") {
-        Ok(value) => match value.as_ref() {
-            "always" => true,
-            "never" => false,
-            "auto" => stdout_isatty(),
-            _ => early_error(
-                ErrorOutputType::default(),
-                &format!(
-                    "invalid log color value '{}': expected one of always, never, or auto",
-                    value
-                ),
-            ),
-        },
-        Err(std::env::VarError::NotPresent) => stdout_isatty(),
-        Err(std::env::VarError::NotUnicode(_value)) => early_error(
+    let color_logs = match std::env::var("RUSTDOC_LOG_COLOR").as_deref() {
+        Ok("always") => true,
+        Ok("never") => false,
+        Ok("auto") | Err(VarError::NotPresent) => io::stdout().is_terminal(),
+        Ok(value) => early_error(
             ErrorOutputType::default(),
-            "non-Unicode log color value: expected one of always, never, or auto",
+            &format!("invalid log color value '{}': expected one of always, never, or auto", value),
+        ),
+        Err(VarError::NotUnicode(value)) => early_error(
+            ErrorOutputType::default(),
+            &format!(
+                "invalid log color value '{}': expected one of always, never, or auto",
+                value.to_string_lossy()
+            ),
         ),
     };
     let filter = tracing_subscriber::EnvFilter::from_env("RUSTDOC_LOG");
@@ -271,14 +231,20 @@ fn opts() -> Vec<RustcOptGroup> {
     let stable: fn(_, fn(&mut getopts::Options) -> &mut _) -> _ = RustcOptGroup::stable;
     let unstable: fn(_, fn(&mut getopts::Options) -> &mut _) -> _ = RustcOptGroup::unstable;
     vec![
-        stable("h", |o| o.optflag("h", "help", "show this help message")),
-        stable("V", |o| o.optflag("V", "version", "print rustdoc's version")),
-        stable("v", |o| o.optflag("v", "verbose", "use verbose output")),
-        stable("r", |o| {
-            o.optopt("r", "input-format", "the input type of the specified file", "[rust]")
-        }),
+        stable("h", |o| o.optflagmulti("h", "help", "show this help message")),
+        stable("V", |o| o.optflagmulti("V", "version", "print rustdoc's version")),
+        stable("v", |o| o.optflagmulti("v", "verbose", "use verbose output")),
         stable("w", |o| o.optopt("w", "output-format", "the output type to write", "[html]")),
-        stable("o", |o| o.optopt("o", "output", "where to place the output", "PATH")),
+        stable("output", |o| {
+            o.optopt(
+                "",
+                "output",
+                "Which directory to place the output. \
+                 This option is deprecated, use --out-dir instead.",
+                "PATH",
+            )
+        }),
+        stable("o", |o| o.optopt("o", "out-dir", "which directory to place the output", "PATH")),
         stable("crate-name", |o| {
             o.optopt("", "crate-name", "specify the name of this crate", "NAME")
         }),
@@ -287,32 +253,34 @@ fn opts() -> Vec<RustcOptGroup> {
             o.optmulti("L", "library-path", "directory to add to crate search path", "DIR")
         }),
         stable("cfg", |o| o.optmulti("", "cfg", "pass a --cfg to rustc", "")),
+        unstable("check-cfg", |o| o.optmulti("", "check-cfg", "pass a --check-cfg to rustc", "")),
         stable("extern", |o| o.optmulti("", "extern", "pass an --extern to rustc", "NAME[=PATH]")),
         unstable("extern-html-root-url", |o| {
-            o.optmulti("", "extern-html-root-url", "base URL to use for dependencies", "NAME=URL")
+            o.optmulti(
+                "",
+                "extern-html-root-url",
+                "base URL to use for dependencies; for example, \
+                 \"std=/doc\" links std::vec::Vec to /doc/std/vec/struct.Vec.html",
+                "NAME=URL",
+            )
         }),
-        stable("plugin-path", |o| o.optmulti("", "plugin-path", "removed", "DIR")),
+        unstable("extern-html-root-takes-precedence", |o| {
+            o.optflagmulti(
+                "",
+                "extern-html-root-takes-precedence",
+                "give precedence to `--extern-html-root-url`, not `html_root_url`",
+            )
+        }),
         stable("C", |o| {
             o.optmulti("C", "codegen", "pass a codegen option to rustc", "OPT[=VALUE]")
         }),
-        stable("passes", |o| {
-            o.optmulti(
-                "",
-                "passes",
-                "list of passes to also run, you might want to pass it multiple times; a value of \
-                 `list` will print available passes",
-                "PASSES",
-            )
-        }),
-        stable("plugins", |o| o.optmulti("", "plugins", "removed", "PLUGINS")),
-        stable("no-default", |o| o.optflag("", "no-defaults", "don't run the default passes")),
         stable("document-private-items", |o| {
-            o.optflag("", "document-private-items", "document private items")
+            o.optflagmulti("", "document-private-items", "document private items")
         }),
         unstable("document-hidden-items", |o| {
-            o.optflag("", "document-hidden-items", "document items that have doc(hidden)")
+            o.optflagmulti("", "document-hidden-items", "document items that have doc(hidden)")
         }),
-        stable("test", |o| o.optflag("", "test", "run code examples as tests")),
+        stable("test", |o| o.optflagmulti("", "test", "run code examples as tests")),
         stable("test-args", |o| {
             o.optmulti("", "test-args", "arguments to pass to the test runner", "ARGS")
         }),
@@ -382,7 +350,7 @@ fn opts() -> Vec<RustcOptGroup> {
             o.optopt("", "markdown-playground-url", "URL to send code snippets to", "URL")
         }),
         stable("markdown-no-toc", |o| {
-            o.optflag("", "markdown-no-toc", "don't include table of contents")
+            o.optflagmulti("", "markdown-no-toc", "don't include table of contents")
         }),
         stable("e", |o| {
             o.optopt(
@@ -395,7 +363,7 @@ fn opts() -> Vec<RustcOptGroup> {
             )
         }),
         unstable("Z", |o| {
-            o.optmulti("Z", "", "internal and debugging options (only on nightly build)", "FLAG")
+            o.optmulti("Z", "", "unstable / perma-unstable options (only on nightly build)", "FLAG")
         }),
         stable("sysroot", |o| o.optopt("", "sysroot", "Override the system root", "PATH")),
         unstable("playground-url", |o| {
@@ -407,14 +375,18 @@ fn opts() -> Vec<RustcOptGroup> {
                 "URL",
             )
         }),
-        unstable("display-warnings", |o| {
-            o.optflag("", "display-warnings", "to print code warnings when testing doc")
+        unstable("display-doctest-warnings", |o| {
+            o.optflagmulti(
+                "",
+                "display-doctest-warnings",
+                "show warnings that originate in doctests",
+            )
         }),
         stable("crate-version", |o| {
             o.optopt("", "crate-version", "crate version to print into documentation", "VERSION")
         }),
         unstable("sort-modules-by-appearance", |o| {
-            o.optflag(
+            o.optflagmulti(
                 "",
                 "sort-modules-by-appearance",
                 "sort modules by where they appear in the program, rather than alphabetically",
@@ -487,16 +459,22 @@ fn opts() -> Vec<RustcOptGroup> {
                 "human|json|short",
             )
         }),
+        stable("diagnostic-width", |o| {
+            o.optopt(
+                "",
+                "diagnostic-width",
+                "Provide width of the output for truncated error messages",
+                "WIDTH",
+            )
+        }),
         stable("json", |o| {
             o.optopt("", "json", "Configure the structure of JSON diagnostics", "CONFIG")
         }),
-        unstable("disable-minification", |o| {
-            o.optflag("", "disable-minification", "Disable minification applied on JS files")
-        }),
-        stable("warn", |o| o.optmulti("W", "warn", "Set lint warnings", "OPT")),
-        stable("allow", |o| o.optmulti("A", "allow", "Set lint allowed", "OPT")),
-        stable("deny", |o| o.optmulti("D", "deny", "Set lint denied", "OPT")),
-        stable("forbid", |o| o.optmulti("F", "forbid", "Set lint forbidden", "OPT")),
+        stable("allow", |o| o.optmulti("A", "allow", "Set lint allowed", "LINT")),
+        stable("warn", |o| o.optmulti("W", "warn", "Set lint warnings", "LINT")),
+        stable("force-warn", |o| o.optmulti("", "force-warn", "Set lint force-warn", "LINT")),
+        stable("deny", |o| o.optmulti("D", "deny", "Set lint denied", "LINT")),
+        stable("forbid", |o| o.optmulti("F", "forbid", "Set lint forbidden", "LINT")),
         stable("cap-lints", |o| {
             o.optmulti(
                 "",
@@ -511,7 +489,7 @@ fn opts() -> Vec<RustcOptGroup> {
             o.optopt("", "index-page", "Markdown file to be used as index page", "PATH")
         }),
         unstable("enable-index-page", |o| {
-            o.optflag("", "enable-index-page", "To enable generation of the index page")
+            o.optflagmulti("", "enable-index-page", "To enable generation of the index page")
         }),
         unstable("static-root-path", |o| {
             o.optopt(
@@ -523,7 +501,7 @@ fn opts() -> Vec<RustcOptGroup> {
             )
         }),
         unstable("disable-per-crate-search", |o| {
-            o.optflag(
+            o.optflagmulti(
                 "",
                 "disable-per-crate-search",
                 "disables generating the crate selector on the search box",
@@ -538,14 +516,14 @@ fn opts() -> Vec<RustcOptGroup> {
             )
         }),
         unstable("show-coverage", |o| {
-            o.optflag(
+            o.optflagmulti(
                 "",
                 "show-coverage",
                 "calculate percentage of public items with documentation",
             )
         }),
         unstable("enable-per-target-ignores", |o| {
-            o.optflag(
+            o.optflagmulti(
                 "",
                 "enable-per-target-ignores",
                 "parse ignore-foo for ignoring doctests on a per-target basis",
@@ -570,16 +548,13 @@ fn opts() -> Vec<RustcOptGroup> {
         unstable("test-builder", |o| {
             o.optopt("", "test-builder", "The rustc-like binary to use as the test builder", "PATH")
         }),
-        unstable("check", |o| o.optflag("", "check", "Run rustdoc checks")),
+        unstable("check", |o| o.optflagmulti("", "check", "Run rustdoc checks")),
         unstable("generate-redirect-map", |o| {
-            o.optflag(
+            o.optflagmulti(
                 "",
                 "generate-redirect-map",
                 "Generate JSON file at the top level instead of generating HTML redirection files",
             )
-        }),
-        unstable("print", |o| {
-            o.optmulti("", "print", "Rustdoc information to print on stdout", "[unversioned-files]")
         }),
         unstable("emit", |o| {
             o.optmulti(
@@ -587,6 +562,95 @@ fn opts() -> Vec<RustcOptGroup> {
                 "emit",
                 "Comma separated list of types of output for rustdoc to emit",
                 "[unversioned-shared-resources,toolchain-shared-resources,invocation-specific]",
+            )
+        }),
+        unstable("no-run", |o| {
+            o.optflagmulti("", "no-run", "Compile doctests without running them")
+        }),
+        unstable("show-type-layout", |o| {
+            o.optflagmulti("", "show-type-layout", "Include the memory layout of types in the docs")
+        }),
+        unstable("nocapture", |o| {
+            o.optflag("", "nocapture", "Don't capture stdout and stderr of tests")
+        }),
+        unstable("generate-link-to-definition", |o| {
+            o.optflag(
+                "",
+                "generate-link-to-definition",
+                "Make the identifiers in the HTML source code pages navigable",
+            )
+        }),
+        unstable("scrape-examples-output-path", |o| {
+            o.optopt(
+                "",
+                "scrape-examples-output-path",
+                "",
+                "collect function call information and output at the given path",
+            )
+        }),
+        unstable("scrape-examples-target-crate", |o| {
+            o.optmulti(
+                "",
+                "scrape-examples-target-crate",
+                "",
+                "collect function call information for functions from the target crate",
+            )
+        }),
+        unstable("scrape-tests", |o| {
+            o.optflag("", "scrape-tests", "Include test code when scraping examples")
+        }),
+        unstable("with-examples", |o| {
+            o.optmulti(
+                "",
+                "with-examples",
+                "",
+                "path to function call information (for displaying examples in the documentation)",
+            )
+        }),
+        // deprecated / removed options
+        unstable("disable-minification", |o| o.optflagmulti("", "disable-minification", "removed")),
+        stable("plugin-path", |o| {
+            o.optmulti(
+                "",
+                "plugin-path",
+                "removed, see issue #44136 <https://github.com/rust-lang/rust/issues/44136> \
+                for more information",
+                "DIR",
+            )
+        }),
+        stable("passes", |o| {
+            o.optmulti(
+                "",
+                "passes",
+                "removed, see issue #44136 <https://github.com/rust-lang/rust/issues/44136> \
+                for more information",
+                "PASSES",
+            )
+        }),
+        stable("plugins", |o| {
+            o.optmulti(
+                "",
+                "plugins",
+                "removed, see issue #44136 <https://github.com/rust-lang/rust/issues/44136> \
+                for more information",
+                "PLUGINS",
+            )
+        }),
+        stable("no-default", |o| {
+            o.optflagmulti(
+                "",
+                "no-defaults",
+                "removed, see issue #44136 <https://github.com/rust-lang/rust/issues/44136> \
+                for more information",
+            )
+        }),
+        stable("r", |o| {
+            o.optopt(
+                "r",
+                "input-format",
+                "removed, see issue #44136 <https://github.com/rust-lang/rust/issues/44136> \
+                for more information",
+                "[rust]",
             )
         }),
     ]
@@ -600,13 +664,43 @@ fn usage(argv0: &str) {
     println!("{}", options.usage(&format!("{} [options] <input>", argv0)));
     println!("    @path               Read newline separated options from `path`\n");
     println!(
-        "More information available at https://doc.rust-lang.org/{}/rustdoc/what-is-rustdoc.html",
-        doc_rust_lang_org_channel()
+        "More information available at {}/rustdoc/what-is-rustdoc.html",
+        DOC_RUST_LANG_ORG_CHANNEL
     );
 }
 
 /// A result type used by several functions under `main()`.
-type MainResult = Result<(), ErrorReported>;
+type MainResult = Result<(), ErrorGuaranteed>;
+
+fn wrap_return(diag: &rustc_errors::Handler, res: Result<(), String>) -> MainResult {
+    match res {
+        Ok(()) => diag.has_errors().map_or(Ok(()), Err),
+        Err(err) => {
+            let reported = diag.struct_err(&err).emit();
+            Err(reported)
+        }
+    }
+}
+
+fn run_renderer<'tcx, T: formats::FormatRenderer<'tcx>>(
+    krate: clean::Crate,
+    renderopts: config::RenderOptions,
+    cache: formats::cache::Cache,
+    tcx: TyCtxt<'tcx>,
+) -> MainResult {
+    match formats::run_format::<T>(krate, renderopts, cache, tcx) {
+        Ok(_) => tcx.sess.has_errors().map_or(Ok(()), Err),
+        Err(e) => {
+            let mut msg =
+                tcx.sess.struct_err(&format!("couldn't generate documentation: {}", e.error));
+            let file = e.file.display().to_string();
+            if !file.is_empty() {
+                msg.note(&format!("failed to create or modify \"{}\"", file));
+            }
+            Err(msg.emit())
+        }
+    }
+}
 
 fn main_args(at_args: &[String]) -> MainResult {
     let args = rustc_driver::args::arg_expand_all(at_args);
@@ -624,61 +718,40 @@ fn main_args(at_args: &[String]) -> MainResult {
 
     // Note that we discard any distinction between different non-zero exit
     // codes from `from_matches` here.
-    let options = match config::Options::from_matches(&matches) {
+    let (options, render_options) = match config::Options::from_matches(&matches, args) {
         Ok(opts) => opts,
-        Err(code) => return if code == 0 { Ok(()) } else { Err(ErrorReported) },
-    };
-    rustc_interface::util::setup_callbacks_and_run_in_thread_pool_with_globals(
-        options.edition,
-        1, // this runs single-threaded, even in a parallel compiler
-        &None,
-        move || main_options(options),
-    )
-}
-
-fn wrap_return(diag: &rustc_errors::Handler, res: Result<(), String>) -> MainResult {
-    match res {
-        Ok(()) => Ok(()),
-        Err(err) => {
-            diag.struct_err(&err).emit();
-            Err(ErrorReported)
-        }
-    }
-}
-
-fn run_renderer<'tcx, T: formats::FormatRenderer<'tcx>>(
-    krate: clean::Crate,
-    renderopts: config::RenderOptions,
-    cache: formats::cache::Cache,
-    diag: &rustc_errors::Handler,
-    edition: rustc_span::edition::Edition,
-    tcx: TyCtxt<'tcx>,
-) -> MainResult {
-    match formats::run_format::<T>(krate, renderopts, cache, &diag, edition, tcx) {
-        Ok(_) => Ok(()),
-        Err(e) => {
-            let mut msg = diag.struct_err(&format!("couldn't generate documentation: {}", e.error));
-            let file = e.file.display().to_string();
-            if file.is_empty() {
-                msg.emit()
+        Err(code) => {
+            return if code == 0 {
+                Ok(())
             } else {
-                msg.note(&format!("failed to create or modify \"{}\"", file)).emit()
-            }
-            Err(ErrorReported)
+                Err(ErrorGuaranteed::unchecked_claim_error_was_emitted())
+            };
         }
-    }
-}
+    };
 
-fn main_options(options: config::Options) -> MainResult {
-    let diag = core::new_handler(options.error_format, None, &options.debugging_opts);
+    let diag = core::new_handler(
+        options.error_format,
+        None,
+        options.diagnostic_width,
+        &options.unstable_opts,
+    );
 
     match (options.should_test, options.markdown_input()) {
         (true, true) => return wrap_return(&diag, markdown::test(options)),
         (true, false) => return doctest::run(options),
         (false, true) => {
+            let input = options.input.clone();
+            let edition = options.edition;
+            let config = core::create_config(options, &render_options);
+
+            // `markdown::render` can invoke `doctest::make_test`, which
+            // requires session globals and a thread pool, so we use
+            // `run_compiler`.
             return wrap_return(
                 &diag,
-                markdown::render(&options.input, options.render_options, options.edition),
+                interface::run_compiler(config, |_compiler| {
+                    markdown::render(&input, render_options, edition)
+                }),
             );
         }
         (false, false) => {}
@@ -686,7 +759,6 @@ fn main_options(options: config::Options) -> MainResult {
 
     // need to move these items separately because we lose them by the time the closure is called,
     // but we can't create the Handler ahead of time because it's not Send
-    let diag_opts = (options.error_format, options.edition, options.debugging_opts.clone());
     let show_coverage = options.show_coverage;
     let run_check = options.run_check;
 
@@ -699,46 +771,49 @@ fn main_options(options: config::Options) -> MainResult {
     // plug/cleaning passes.
     let crate_version = options.crate_version.clone();
 
-    let default_passes = options.default_passes;
     let output_format = options.output_format;
-    // FIXME: fix this clone (especially render_options)
-    let manual_passes = options.manual_passes.clone();
-    let render_options = options.render_options.clone();
-    let config = core::create_config(options);
+    let scrape_examples_options = options.scrape_examples_options.clone();
+    let bin_crate = options.bin_crate;
 
-    interface::create_compiler_and_run(config, |compiler| {
+    let config = core::create_config(options, &render_options);
+
+    interface::run_compiler(config, |compiler| {
+        let sess = compiler.session();
+
+        if sess.opts.describe_lints {
+            let mut lint_store = rustc_lint::new_lint_store(sess.enable_internal_lints());
+            let registered_lints = if let Some(register_lints) = compiler.register_lints() {
+                register_lints(sess, &mut lint_store);
+                true
+            } else {
+                false
+            };
+            rustc_driver::describe_lints(sess, &lint_store, registered_lints);
+            return Ok(());
+        }
+
         compiler.enter(|queries| {
-            let sess = compiler.session();
-
-            if sess.opts.describe_lints {
-                let (_, lint_store) = &*queries.register_plugins()?.peek();
-                describe_lints(sess, lint_store, true);
-                return Ok(());
-            }
-
-            // We need to hold on to the complete resolver, so we cause everything to be
-            // cloned for the analysis passes to use. Suboptimal, but necessary in the
-            // current architecture.
-            let resolver = core::create_resolver(queries, &sess);
-
-            if sess.has_errors() {
+            let mut gcx = abort_on_err(queries.global_ctxt(), sess);
+            if sess.diagnostic().has_errors_or_lint_errors().is_some() {
                 sess.fatal("Compilation failed, aborting rustdoc");
             }
 
-            let mut global_ctxt = abort_on_err(queries.global_ctxt(), sess).peek_mut();
-
-            global_ctxt.enter(|tcx| {
+            gcx.enter(|tcx| {
                 let (krate, render_opts, mut cache) = sess.time("run_global_ctxt", || {
-                    core::run_global_ctxt(
-                        tcx,
-                        resolver,
-                        default_passes,
-                        manual_passes,
-                        render_options,
-                        output_format,
-                    )
+                    core::run_global_ctxt(tcx, show_coverage, render_options, output_format)
                 });
                 info!("finished with rustc");
+
+                if let Some(options) = scrape_examples_options {
+                    return scrape_examples::run(
+                        krate,
+                        render_opts,
+                        cache,
+                        tcx,
+                        options,
+                        bin_crate,
+                    );
+                }
 
                 cache.crate_version = crate_version;
 
@@ -752,28 +827,12 @@ fn main_options(options: config::Options) -> MainResult {
                 }
 
                 info!("going to format");
-                let (error_format, edition, debugging_options) = diag_opts;
-                let diag = core::new_handler(error_format, None, &debugging_options);
                 match output_format {
                     config::OutputFormat::Html => sess.time("render_html", || {
-                        run_renderer::<html::render::Context<'_>>(
-                            krate,
-                            render_opts,
-                            cache,
-                            &diag,
-                            edition,
-                            tcx,
-                        )
+                        run_renderer::<html::render::Context<'_>>(krate, render_opts, cache, tcx)
                     }),
                     config::OutputFormat::Json => sess.time("render_json", || {
-                        run_renderer::<json::JsonRenderer<'_>>(
-                            krate,
-                            render_opts,
-                            cache,
-                            &diag,
-                            edition,
-                            tcx,
-                        )
+                        run_renderer::<json::JsonRenderer<'_>>(krate, render_opts, cache, tcx)
                     }),
                 }
             })

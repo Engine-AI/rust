@@ -4,18 +4,19 @@ use crate::json::JsonEmitter;
 use rustc_span::source_map::{FilePathMapping, SourceMap};
 
 use crate::emitter::{ColorConfig, HumanReadableErrorType};
-use crate::Handler;
-use rustc_serialize::json::decode;
+use crate::{Handler, TerminalUrl};
 use rustc_span::{BytePos, Span};
 
 use std::str;
 
-#[derive(Decodable, Debug, PartialEq, Eq)]
+use serde::Deserialize;
+
+#[derive(Deserialize, Debug, PartialEq, Eq)]
 struct TestData {
     spans: Vec<SpanTestData>,
 }
 
-#[derive(Decodable, Debug, PartialEq, Eq)]
+#[derive(Deserialize, Debug, PartialEq, Eq)]
 struct SpanTestData {
     pub byte_start: u32,
     pub byte_end: u32,
@@ -39,28 +40,27 @@ impl<T: Write> Write for Shared<T> {
     }
 }
 
-fn with_default_session_globals(f: impl FnOnce()) {
-    let session_globals = rustc_span::SessionGlobals::new(rustc_span::edition::DEFAULT_EDITION);
-    rustc_span::SESSION_GLOBALS.set(&session_globals, f);
-}
-
 /// Test the span yields correct positions in JSON.
 fn test_positions(code: &str, span: (u32, u32), expected_output: SpanTestData) {
-    let expected_output = TestData { spans: vec![expected_output] };
-
-    with_default_session_globals(|| {
+    rustc_span::create_default_session_globals_then(|| {
         let sm = Lrc::new(SourceMap::new(FilePathMapping::empty()));
         sm.new_source_file(Path::new("test.rs").to_owned().into(), code.to_owned());
+        let fallback_bundle =
+            crate::fallback_fluent_bundle(vec![crate::DEFAULT_LOCALE_RESOURCE], false);
 
         let output = Arc::new(Mutex::new(Vec::new()));
         let je = JsonEmitter::new(
             Box::new(Shared { data: output.clone() }),
             None,
             sm,
+            None,
+            fallback_bundle,
             true,
             HumanReadableErrorType::Short(ColorConfig::Never),
             None,
             false,
+            false,
+            TerminalUrl::No,
         );
 
         let span = Span::with_root_ctxt(BytePos(span.0), BytePos(span.1));
@@ -69,9 +69,11 @@ fn test_positions(code: &str, span: (u32, u32), expected_output: SpanTestData) {
 
         let bytes = output.lock().unwrap();
         let actual_output = str::from_utf8(&bytes).unwrap();
-        let actual_output: TestData = decode(actual_output).unwrap();
+        let actual_output: TestData = serde_json::from_str(actual_output).unwrap();
+        let spans = actual_output.spans;
+        assert_eq!(spans.len(), 1);
 
-        assert_eq!(expected_output, actual_output)
+        assert_eq!(expected_output, spans[0])
     })
 }
 

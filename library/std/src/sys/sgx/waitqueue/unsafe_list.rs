@@ -1,3 +1,6 @@
+//! A doubly-linked list where callers are in charge of memory allocation
+//! of the nodes in the list.
+
 #[cfg(test)]
 mod tests;
 
@@ -20,6 +23,7 @@ impl<T> UnsafeListEntry<T> {
     }
 }
 
+// WARNING: self-referential struct!
 pub struct UnsafeList<T> {
     head_tail: NonNull<UnsafeListEntry<T>>,
     head_tail_entry: Option<UnsafeListEntry<T>>,

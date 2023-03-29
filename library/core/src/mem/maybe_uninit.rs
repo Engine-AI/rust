@@ -1,8 +1,9 @@
 use crate::any::type_name;
 use crate::fmt;
 use crate::intrinsics;
-use crate::mem::ManuallyDrop;
+use crate::mem::{self, ManuallyDrop};
 use crate::ptr;
+use crate::slice;
 
 /// A wrapper type to construct uninitialized instances of `T`.
 ///
@@ -10,7 +11,7 @@ use crate::ptr;
 ///
 /// The compiler, in general, assumes that a variable is properly initialized
 /// according to the requirements of the variable's type. For example, a variable of
-/// reference type must be aligned and non-NULL. This is an invariant that must
+/// reference type must be aligned and non-null. This is an invariant that must
 /// *always* be upheld, even in unsafe code. As a consequence, zero-initializing a
 /// variable of reference type causes instantaneous [undefined behavior][ub],
 /// no matter whether that reference ever gets used to access memory:
@@ -53,9 +54,6 @@ use crate::ptr;
 /// // The equivalent code with `MaybeUninit<i32>`:
 /// let x: i32 = unsafe { MaybeUninit::uninit().assume_init() }; // undefined behavior! ⚠️
 /// ```
-/// (Notice that the rules around uninitialized integers are not finalized yet, but
-/// until they are, it is advisable to avoid them.)
-///
 /// On top of that, remember that most types have additional invariants beyond merely
 /// being considered initialized at the type level. For example, a `1`-initialized [`Vec<T>`]
 /// is considered initialized (under the current implementation; this does not constitute
@@ -79,7 +77,7 @@ use crate::ptr;
 /// // a `MaybeUninit<T>` may be invalid, and hence this is not UB:
 /// let mut x = MaybeUninit::<&i32>::uninit();
 /// // Set it to a valid value.
-/// unsafe { x.as_mut_ptr().write(&0); }
+/// x.write(&0);
 /// // Extract the initialized data -- this is only allowed *after* properly
 /// // initializing `x`!
 /// let x = unsafe { x.assume_init() };
@@ -129,13 +127,10 @@ use crate::ptr;
 ///         MaybeUninit::uninit().assume_init()
 ///     };
 ///
-///     // Dropping a `MaybeUninit` does nothing. Thus using raw pointer
-///     // assignment instead of `ptr::write` does not cause the old
-///     // uninitialized value to be dropped. Also if there is a panic during
-///     // this loop, we have a memory leak, but there is no memory safety
-///     // issue.
+///     // Dropping a `MaybeUninit` does nothing, so if there is a panic during this loop,
+///     // we have a memory leak, but there is no memory safety issue.
 ///     for elem in &mut data[..] {
-///         *elem = MaybeUninit::new(vec![42]);
+///         elem.write(vec![42]);
 ///     }
 ///
 ///     // Everything is initialized. Transmute the array to the
@@ -151,7 +146,6 @@ use crate::ptr;
 ///
 /// ```
 /// use std::mem::MaybeUninit;
-/// use std::ptr;
 ///
 /// // Create an uninitialized array of `MaybeUninit`. The `assume_init` is
 /// // safe because the type we are claiming to have initialized here is a
@@ -161,13 +155,13 @@ use crate::ptr;
 /// let mut data_len: usize = 0;
 ///
 /// for elem in &mut data[0..500] {
-///     *elem = MaybeUninit::new(String::from("hello"));
+///     elem.write(String::from("hello"));
 ///     data_len += 1;
 /// }
 ///
 /// // For each item in the array, drop if we allocated it.
 /// for elem in &mut data[0..data_len] {
-///     unsafe { ptr::drop_in_place(elem.as_mut_ptr()); }
+///     unsafe { elem.assume_init_drop(); }
 /// }
 /// ```
 ///
@@ -291,6 +285,7 @@ impl<T> MaybeUninit<T> {
     /// [`assume_init`]: MaybeUninit::assume_init
     #[stable(feature = "maybe_uninit", since = "1.36.0")]
     #[rustc_const_stable(feature = "const_maybe_uninit", since = "1.36.0")]
+    #[must_use = "use `forget` to avoid running Drop code"]
     #[inline(always)]
     pub const fn new(val: T) -> MaybeUninit<T> {
         MaybeUninit { value: ManuallyDrop::new(val) }
@@ -312,6 +307,7 @@ impl<T> MaybeUninit<T> {
     /// ```
     #[stable(feature = "maybe_uninit", since = "1.36.0")]
     #[rustc_const_stable(feature = "const_maybe_uninit", since = "1.36.0")]
+    #[must_use]
     #[inline(always)]
     #[rustc_diagnostic_item = "maybe_uninit_uninit"]
     pub const fn uninit() -> MaybeUninit<T> {
@@ -328,7 +324,7 @@ impl<T> MaybeUninit<T> {
     /// # Examples
     ///
     /// ```no_run
-    /// #![feature(maybe_uninit_uninit_array, maybe_uninit_extra, maybe_uninit_slice)]
+    /// #![feature(maybe_uninit_uninit_array, maybe_uninit_slice)]
     ///
     /// use std::mem::MaybeUninit;
     ///
@@ -347,12 +343,13 @@ impl<T> MaybeUninit<T> {
     /// let mut buf: [MaybeUninit<u8>; 32] = MaybeUninit::uninit_array();
     /// let data = read(&mut buf);
     /// ```
-    #[unstable(feature = "maybe_uninit_uninit_array", issue = "none")]
-    #[rustc_const_unstable(feature = "maybe_uninit_uninit_array", issue = "none")]
+    #[unstable(feature = "maybe_uninit_uninit_array", issue = "96097")]
+    #[rustc_const_unstable(feature = "const_maybe_uninit_uninit_array", issue = "96097")]
+    #[must_use]
     #[inline(always)]
-    pub const fn uninit_array<const LEN: usize>() -> [Self; LEN] {
+    pub const fn uninit_array<const N: usize>() -> [Self; N] {
         // SAFETY: An uninitialized `[MaybeUninit<_>; LEN]` is valid.
-        unsafe { MaybeUninit::<[MaybeUninit<T>; LEN]>::uninit().assume_init() }
+        unsafe { MaybeUninit::<[MaybeUninit<T>; N]>::uninit().assume_init() }
     }
 
     /// Creates a new `MaybeUninit<T>` in an uninitialized state, with the memory being
@@ -391,9 +388,11 @@ impl<T> MaybeUninit<T> {
     /// // This is undefined behavior. ⚠️
     /// ```
     #[stable(feature = "maybe_uninit", since = "1.36.0")]
+    #[rustc_const_unstable(feature = "const_maybe_uninit_zeroed", issue = "91850")]
+    #[must_use]
     #[inline]
     #[rustc_diagnostic_item = "maybe_uninit_zeroed"]
-    pub fn zeroed() -> MaybeUninit<T> {
+    pub const fn zeroed() -> MaybeUninit<T> {
         let mut u = MaybeUninit::<T>::uninit();
         // SAFETY: `u.as_mut_ptr()` points to allocated memory.
         unsafe {
@@ -402,12 +401,89 @@ impl<T> MaybeUninit<T> {
         u
     }
 
-    /// Sets the value of the `MaybeUninit<T>`. This overwrites any previous value
-    /// without dropping it, so be careful not to use this twice unless you want to
-    /// skip running the destructor. For your convenience, this also returns a mutable
-    /// reference to the (now safely initialized) contents of `self`.
-    #[unstable(feature = "maybe_uninit_extra", issue = "63567")]
-    #[rustc_const_unstable(feature = "maybe_uninit_extra", issue = "63567")]
+    /// Sets the value of the `MaybeUninit<T>`.
+    ///
+    /// This overwrites any previous value without dropping it, so be careful
+    /// not to use this twice unless you want to skip running the destructor.
+    /// For your convenience, this also returns a mutable reference to the
+    /// (now safely initialized) contents of `self`.
+    ///
+    /// As the content is stored inside a `MaybeUninit`, the destructor is not
+    /// run for the inner data if the MaybeUninit leaves scope without a call to
+    /// [`assume_init`], [`assume_init_drop`], or similar. Code that receives
+    /// the mutable reference returned by this function needs to keep this in
+    /// mind. The safety model of Rust regards leaks as safe, but they are
+    /// usually still undesirable. This being said, the mutable reference
+    /// behaves like any other mutable reference would, so assigning a new value
+    /// to it will drop the old content.
+    ///
+    /// [`assume_init`]: Self::assume_init
+    /// [`assume_init_drop`]: Self::assume_init_drop
+    ///
+    /// # Examples
+    ///
+    /// Correct usage of this method:
+    ///
+    /// ```rust
+    /// use std::mem::MaybeUninit;
+    ///
+    /// let mut x = MaybeUninit::<Vec<u8>>::uninit();
+    ///
+    /// {
+    ///     let hello = x.write((&b"Hello, world!").to_vec());
+    ///     // Setting hello does not leak prior allocations, but drops them
+    ///     *hello = (&b"Hello").to_vec();
+    ///     hello[0] = 'h' as u8;
+    /// }
+    /// // x is initialized now:
+    /// let s = unsafe { x.assume_init() };
+    /// assert_eq!(b"hello", s.as_slice());
+    /// ```
+    ///
+    /// This usage of the method causes a leak:
+    ///
+    /// ```rust
+    /// use std::mem::MaybeUninit;
+    ///
+    /// let mut x = MaybeUninit::<String>::uninit();
+    ///
+    /// x.write("Hello".to_string());
+    /// // This leaks the contained string:
+    /// x.write("hello".to_string());
+    /// // x is initialized now:
+    /// let s = unsafe { x.assume_init() };
+    /// ```
+    ///
+    /// This method can be used to avoid unsafe in some cases. The example below
+    /// shows a part of an implementation of a fixed sized arena that lends out
+    /// pinned references.
+    /// With `write`, we can avoid the need to write through a raw pointer:
+    ///
+    /// ```rust
+    /// use core::pin::Pin;
+    /// use core::mem::MaybeUninit;
+    ///
+    /// struct PinArena<T> {
+    ///     memory: Box<[MaybeUninit<T>]>,
+    ///     len: usize,
+    /// }
+    ///
+    /// impl <T> PinArena<T> {
+    ///     pub fn capacity(&self) -> usize {
+    ///         self.memory.len()
+    ///     }
+    ///     pub fn push(&mut self, val: T) -> Pin<&mut T> {
+    ///         if self.len >= self.capacity() {
+    ///             panic!("Attempted to push to a full pin arena!");
+    ///         }
+    ///         let ref_ = self.memory[self.len].write(val);
+    ///         self.len += 1;
+    ///         unsafe { Pin::new_unchecked(ref_) }
+    ///     }
+    /// }
+    /// ```
+    #[stable(feature = "maybe_uninit_write", since = "1.55.0")]
+    #[rustc_const_unstable(feature = "const_maybe_uninit_write", issue = "63567")]
     #[inline(always)]
     pub const fn write(&mut self, val: T) -> &mut T {
         *self = MaybeUninit::new(val);
@@ -428,7 +504,7 @@ impl<T> MaybeUninit<T> {
     /// use std::mem::MaybeUninit;
     ///
     /// let mut x = MaybeUninit::<Vec<u32>>::uninit();
-    /// unsafe { x.as_mut_ptr().write(vec![0, 1, 2]); }
+    /// x.write(vec![0, 1, 2]);
     /// // Create a reference into the `MaybeUninit<T>`. This is okay because we initialized it.
     /// let x_vec = unsafe { &*x.as_ptr() };
     /// assert_eq!(x_vec.len(), 3);
@@ -447,7 +523,7 @@ impl<T> MaybeUninit<T> {
     /// (Notice that the rules around references to uninitialized data are not finalized yet, but
     /// until they are, it is advisable to avoid them.)
     #[stable(feature = "maybe_uninit", since = "1.36.0")]
-    #[rustc_const_unstable(feature = "const_maybe_uninit_as_ptr", issue = "75251")]
+    #[rustc_const_stable(feature = "const_maybe_uninit_as_ptr", since = "1.59.0")]
     #[inline(always)]
     pub const fn as_ptr(&self) -> *const T {
         // `MaybeUninit` and `ManuallyDrop` are both `repr(transparent)` so we can cast the pointer.
@@ -465,7 +541,7 @@ impl<T> MaybeUninit<T> {
     /// use std::mem::MaybeUninit;
     ///
     /// let mut x = MaybeUninit::<Vec<u32>>::uninit();
-    /// unsafe { x.as_mut_ptr().write(vec![0, 1, 2]); }
+    /// x.write(vec![0, 1, 2]);
     /// // Create a reference into the `MaybeUninit<Vec<u32>>`.
     /// // This is okay because we initialized it.
     /// let x_vec = unsafe { &mut *x.as_mut_ptr() };
@@ -486,7 +562,7 @@ impl<T> MaybeUninit<T> {
     /// (Notice that the rules around references to uninitialized data are not finalized yet, but
     /// until they are, it is advisable to avoid them.)
     #[stable(feature = "maybe_uninit", since = "1.36.0")]
-    #[rustc_const_unstable(feature = "const_maybe_uninit_as_ptr", issue = "75251")]
+    #[rustc_const_unstable(feature = "const_maybe_uninit_as_mut_ptr", issue = "75251")]
     #[inline(always)]
     pub const fn as_mut_ptr(&mut self) -> *mut T {
         // `MaybeUninit` and `ManuallyDrop` are both `repr(transparent)` so we can cast the pointer.
@@ -524,7 +600,7 @@ impl<T> MaybeUninit<T> {
     /// use std::mem::MaybeUninit;
     ///
     /// let mut x = MaybeUninit::<bool>::uninit();
-    /// unsafe { x.as_mut_ptr().write(true); }
+    /// x.write(true);
     /// let x_init = unsafe { x.assume_init() };
     /// assert_eq!(x_init, true);
     /// ```
@@ -539,9 +615,10 @@ impl<T> MaybeUninit<T> {
     /// // `x` had not been initialized yet, so this last line caused undefined behavior. ⚠️
     /// ```
     #[stable(feature = "maybe_uninit", since = "1.36.0")]
-    #[rustc_const_unstable(feature = "const_maybe_uninit_assume_init", issue = "none")]
+    #[rustc_const_stable(feature = "const_maybe_uninit_assume_init_by_value", since = "1.59.0")]
     #[inline(always)]
     #[rustc_diagnostic_item = "assume_init"]
+    #[track_caller]
     pub const unsafe fn assume_init(self) -> T {
         // SAFETY: the caller must guarantee that `self` is initialized.
         // This also means that `self` must be a `value` variant.
@@ -564,10 +641,12 @@ impl<T> MaybeUninit<T> {
     /// behavior. The [type-level documentation][inv] contains more information about
     /// this initialization invariant.
     ///
-    /// Moreover, this leaves a copy of the same data behind in the `MaybeUninit<T>`. When using
-    /// multiple copies of the data (by calling `assume_init_read` multiple times, or first
-    /// calling `assume_init_read` and then [`assume_init`]), it is your responsibility
-    /// to ensure that that data may indeed be duplicated.
+    /// Moreover, similar to the [`ptr::read`] function, this function creates a
+    /// bitwise copy of the contents, regardless whether the contained type
+    /// implements the [`Copy`] trait or not. When using multiple copies of the
+    /// data (by calling `assume_init_read` multiple times, or first calling
+    /// `assume_init_read` and then [`assume_init`]), it is your responsibility
+    /// to ensure that data may indeed be duplicated.
     ///
     /// [inv]: #initialization-invariant
     /// [`assume_init`]: MaybeUninit::assume_init
@@ -577,7 +656,6 @@ impl<T> MaybeUninit<T> {
     /// Correct usage of this method:
     ///
     /// ```rust
-    /// #![feature(maybe_uninit_extra)]
     /// use std::mem::MaybeUninit;
     ///
     /// let mut x = MaybeUninit::<u32>::uninit();
@@ -598,7 +676,6 @@ impl<T> MaybeUninit<T> {
     /// *Incorrect* usage of this method:
     ///
     /// ```rust,no_run
-    /// #![feature(maybe_uninit_extra)]
     /// use std::mem::MaybeUninit;
     ///
     /// let mut x = MaybeUninit::<Option<Vec<u32>>>::uninit();
@@ -608,9 +685,10 @@ impl<T> MaybeUninit<T> {
     /// // We now created two copies of the same vector, leading to a double-free ⚠️ when
     /// // they both get dropped!
     /// ```
-    #[unstable(feature = "maybe_uninit_extra", issue = "63567")]
-    #[rustc_const_unstable(feature = "maybe_uninit_extra", issue = "63567")]
+    #[stable(feature = "maybe_uninit_extra", since = "1.60.0")]
+    #[rustc_const_unstable(feature = "const_maybe_uninit_assume_init_read", issue = "63567")]
     #[inline(always)]
+    #[track_caller]
     pub const unsafe fn assume_init_read(&self) -> T {
         // SAFETY: the caller must guarantee that `self` is initialized.
         // Reading from `self.as_ptr()` is safe since `self` should be initialized.
@@ -622,7 +700,8 @@ impl<T> MaybeUninit<T> {
 
     /// Drops the contained value in place.
     ///
-    /// If you have ownership of the `MaybeUninit`, you can use [`assume_init`] instead.
+    /// If you have ownership of the `MaybeUninit`, you can also use
+    /// [`assume_init`] as an alternative.
     ///
     /// # Safety
     ///
@@ -632,15 +711,16 @@ impl<T> MaybeUninit<T> {
     ///
     /// On top of that, all additional invariants of the type `T` must be
     /// satisfied, as the `Drop` implementation of `T` (or its members) may
-    /// rely on this. For example, a `1`-initialized [`Vec<T>`] is considered
-    /// initialized (under the current implementation; this does not constitute
-    /// a stable guarantee) because the only requirement the compiler knows
-    /// about it is that the data pointer must be non-null. Dropping such a
-    /// `Vec<T>` however will cause undefined behaviour.
+    /// rely on this. For example, setting a [`Vec<T>`] to an invalid but
+    /// non-null address makes it initialized (under the current implementation;
+    /// this does not constitute a stable guarantee), because the only
+    /// requirement the compiler knows about it is that the data pointer must be
+    /// non-null. Dropping such a `Vec<T>` however will cause undefined
+    /// behaviour.
     ///
     /// [`assume_init`]: MaybeUninit::assume_init
     /// [`Vec<T>`]: ../../std/vec/struct.Vec.html
-    #[unstable(feature = "maybe_uninit_extra", issue = "63567")]
+    #[stable(feature = "maybe_uninit_extra", since = "1.60.0")]
     pub unsafe fn assume_init_drop(&mut self) {
         // SAFETY: the caller must guarantee that `self` is initialized and
         // satisfies all invariants of `T`.
@@ -665,12 +745,11 @@ impl<T> MaybeUninit<T> {
     /// ### Correct usage of this method:
     ///
     /// ```rust
-    /// #![feature(maybe_uninit_ref)]
     /// use std::mem::MaybeUninit;
     ///
     /// let mut x = MaybeUninit::<Vec<u32>>::uninit();
     /// // Initialize `x`:
-    /// unsafe { x.as_mut_ptr().write(vec![1, 2, 3]); }
+    /// x.write(vec![1, 2, 3]);
     /// // Now that our `MaybeUninit<_>` is known to be initialized, it is okay to
     /// // create a shared reference to it:
     /// let x: &Vec<u32> = unsafe {
@@ -683,7 +762,6 @@ impl<T> MaybeUninit<T> {
     /// ### *Incorrect* usages of this method:
     ///
     /// ```rust,no_run
-    /// #![feature(maybe_uninit_ref)]
     /// use std::mem::MaybeUninit;
     ///
     /// let x = MaybeUninit::<Vec<u32>>::uninit();
@@ -692,7 +770,6 @@ impl<T> MaybeUninit<T> {
     /// ```
     ///
     /// ```rust,no_run
-    /// #![feature(maybe_uninit_ref)]
     /// use std::{cell::Cell, mem::MaybeUninit};
     ///
     /// let b = MaybeUninit::<Cell<bool>>::uninit();
@@ -703,8 +780,8 @@ impl<T> MaybeUninit<T> {
     ///    // Reference to an uninitialized `Cell<bool>`: UB!
     /// }
     /// ```
-    #[unstable(feature = "maybe_uninit_ref", issue = "63568")]
-    #[rustc_const_unstable(feature = "const_maybe_uninit_assume_init", issue = "none")]
+    #[stable(feature = "maybe_uninit_ref", since = "1.55.0")]
+    #[rustc_const_stable(feature = "const_maybe_uninit_assume_init_ref", since = "1.59.0")]
     #[inline(always)]
     pub const unsafe fn assume_init_ref(&self) -> &T {
         // SAFETY: the caller must guarantee that `self` is initialized.
@@ -733,7 +810,7 @@ impl<T> MaybeUninit<T> {
     /// ### Correct usage of this method:
     ///
     /// ```rust
-    /// #![feature(maybe_uninit_ref)]
+    /// # #![allow(unexpected_cfgs)]
     /// use std::mem::MaybeUninit;
     ///
     /// # unsafe extern "C" fn initialize_buffer(buf: *mut [u8; 1024]) { *buf = [0; 1024] }
@@ -769,7 +846,6 @@ impl<T> MaybeUninit<T> {
     /// You cannot use `.assume_init_mut()` to initialize a value:
     ///
     /// ```rust,no_run
-    /// #![feature(maybe_uninit_ref)]
     /// use std::mem::MaybeUninit;
     ///
     /// let mut b = MaybeUninit::<bool>::uninit();
@@ -782,10 +858,9 @@ impl<T> MaybeUninit<T> {
     ///
     /// For instance, you cannot [`Read`] into an uninitialized buffer:
     ///
-    /// [`Read`]: https://doc.rust-lang.org/std/io/trait.Read.html
+    /// [`Read`]: ../../std/io/trait.Read.html
     ///
     /// ```rust,no_run
-    /// #![feature(maybe_uninit_ref)]
     /// use std::{io, mem::MaybeUninit};
     ///
     /// fn read_chunk (reader: &'_ mut dyn io::Read) -> io::Result<[u8; 64]>
@@ -802,7 +877,6 @@ impl<T> MaybeUninit<T> {
     /// Nor can you use direct field access to do field-by-field gradual initialization:
     ///
     /// ```rust,no_run
-    /// #![feature(maybe_uninit_ref)]
     /// use std::{mem::MaybeUninit, ptr};
     ///
     /// struct Foo {
@@ -823,10 +897,7 @@ impl<T> MaybeUninit<T> {
     ///     foo.assume_init()
     /// };
     /// ```
-    // FIXME(#76092): We currently rely on the above being incorrect, i.e., we have references
-    // to uninitialized data (e.g., in `libcore/fmt/float.rs`).  We should make
-    // a final decision about the rules before stabilization.
-    #[unstable(feature = "maybe_uninit_ref", issue = "63568")]
+    #[stable(feature = "maybe_uninit_ref", since = "1.55.0")]
     #[rustc_const_unstable(feature = "const_maybe_uninit_assume_init", issue = "none")]
     #[inline(always)]
     pub const unsafe fn assume_init_mut(&mut self) -> &mut T {
@@ -853,9 +924,9 @@ impl<T> MaybeUninit<T> {
     /// use std::mem::MaybeUninit;
     ///
     /// let mut array: [MaybeUninit<i32>; 3] = MaybeUninit::uninit_array();
-    /// array[0] = MaybeUninit::new(0);
-    /// array[1] = MaybeUninit::new(1);
-    /// array[2] = MaybeUninit::new(2);
+    /// array[0].write(0);
+    /// array[1].write(1);
+    /// array[2].write(2);
     ///
     /// // SAFETY: Now safe as we initialised all elements
     /// let array = unsafe {
@@ -864,18 +935,24 @@ impl<T> MaybeUninit<T> {
     ///
     /// assert_eq!(array, [0, 1, 2]);
     /// ```
-    #[unstable(feature = "maybe_uninit_array_assume_init", issue = "80908")]
+    #[unstable(feature = "maybe_uninit_array_assume_init", issue = "96097")]
+    #[rustc_const_unstable(feature = "const_maybe_uninit_array_assume_init", issue = "96097")]
     #[inline(always)]
-    pub unsafe fn array_assume_init<const N: usize>(array: [Self; N]) -> [T; N] {
+    #[track_caller]
+    pub const unsafe fn array_assume_init<const N: usize>(array: [Self; N]) -> [T; N] {
         // SAFETY:
         // * The caller guarantees that all elements of the array are initialized
         // * `MaybeUninit<T>` and T are guaranteed to have the same layout
-        // * MaybeUnint does not drop, so there are no double-frees
+        // * `MaybeUninit` does not drop, so there are no double-frees
         // And thus the conversion is safe
-        unsafe {
+        let ret = unsafe {
             intrinsics::assert_inhabited::<[T; N]>();
             (&array as *const _ as *const [T; N]).read()
-        }
+        };
+
+        // FIXME: required to avoid `~const Destruct` bound
+        super::forget(array);
+        ret
     }
 
     /// Assuming all the elements are initialized, get a slice to them.
@@ -890,11 +967,11 @@ impl<T> MaybeUninit<T> {
     ///
     /// [`assume_init_ref`]: MaybeUninit::assume_init_ref
     #[unstable(feature = "maybe_uninit_slice", issue = "63569")]
-    #[rustc_const_unstable(feature = "const_maybe_uninit_assume_init", issue = "none")]
+    #[rustc_const_unstable(feature = "maybe_uninit_slice", issue = "63569")]
     #[inline(always)]
     pub const unsafe fn slice_assume_init_ref(slice: &[Self]) -> &[T] {
-        // SAFETY: casting slice to a `*const [T]` is safe since the caller guarantees that
-        // `slice` is initialized, and`MaybeUninit` is guaranteed to have the same layout as `T`.
+        // SAFETY: casting `slice` to a `*const [T]` is safe since the caller guarantees that
+        // `slice` is initialized, and `MaybeUninit` is guaranteed to have the same layout as `T`.
         // The pointer obtained is valid since it refers to memory owned by `slice` which is a
         // reference and thus guaranteed to be valid for reads.
         unsafe { &*(slice as *const [Self] as *const [T]) }
@@ -936,7 +1013,7 @@ impl<T> MaybeUninit<T> {
         this.as_mut_ptr() as *mut T
     }
 
-    /// Copies the elements from `src` to `this`, returning a mutable reference to the now initalized contents of `this`.
+    /// Copies the elements from `src` to `this`, returning a mutable reference to the now initialized contents of `this`.
     ///
     /// If `T` does not implement `Copy`, use [`write_slice_cloned`]
     ///
@@ -961,7 +1038,7 @@ impl<T> MaybeUninit<T> {
     /// ```
     ///
     /// ```
-    /// #![feature(maybe_uninit_write_slice, vec_spare_capacity)]
+    /// #![feature(maybe_uninit_write_slice)]
     /// use std::mem::MaybeUninit;
     ///
     /// let mut vec = Vec::with_capacity(32);
@@ -989,12 +1066,12 @@ impl<T> MaybeUninit<T> {
 
         this.copy_from_slice(uninit_src);
 
-        // SAFETY: Valid elements have just been copied into `this` so it is initalized
+        // SAFETY: Valid elements have just been copied into `this` so it is initialized
         unsafe { MaybeUninit::slice_assume_init_mut(this) }
     }
 
-    /// Clones the elements from `src` to `this`, returning a mutable reference to the now initalized contents of `this`.
-    /// Any already initalized elements will not be dropped.
+    /// Clones the elements from `src` to `this`, returning a mutable reference to the now initialized contents of `this`.
+    /// Any already initialized elements will not be dropped.
     ///
     /// If `T` implements `Copy`, use [`write_slice`]
     ///
@@ -1021,7 +1098,7 @@ impl<T> MaybeUninit<T> {
     /// ```
     ///
     /// ```
-    /// #![feature(maybe_uninit_write_slice, vec_spare_capacity)]
+    /// #![feature(maybe_uninit_write_slice)]
     /// use std::mem::MaybeUninit;
     ///
     /// let mut vec = Vec::with_capacity(32);
@@ -1080,7 +1157,168 @@ impl<T> MaybeUninit<T> {
 
         super::forget(guard);
 
-        // SAFETY: Valid elements have just been written into `this` so it is initalized
+        // SAFETY: Valid elements have just been written into `this` so it is initialized
         unsafe { MaybeUninit::slice_assume_init_mut(this) }
+    }
+
+    /// Returns the contents of this `MaybeUninit` as a slice of potentially uninitialized bytes.
+    ///
+    /// Note that even if the contents of a `MaybeUninit` have been initialized, the value may still
+    /// contain padding bytes which are left uninitialized.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(maybe_uninit_as_bytes, maybe_uninit_slice)]
+    /// use std::mem::MaybeUninit;
+    ///
+    /// let val = 0x12345678_i32;
+    /// let uninit = MaybeUninit::new(val);
+    /// let uninit_bytes = uninit.as_bytes();
+    /// let bytes = unsafe { MaybeUninit::slice_assume_init_ref(uninit_bytes) };
+    /// assert_eq!(bytes, val.to_ne_bytes());
+    /// ```
+    #[unstable(feature = "maybe_uninit_as_bytes", issue = "93092")]
+    pub fn as_bytes(&self) -> &[MaybeUninit<u8>] {
+        // SAFETY: MaybeUninit<u8> is always valid, even for padding bytes
+        unsafe {
+            slice::from_raw_parts(self.as_ptr() as *const MaybeUninit<u8>, mem::size_of::<T>())
+        }
+    }
+
+    /// Returns the contents of this `MaybeUninit` as a mutable slice of potentially uninitialized
+    /// bytes.
+    ///
+    /// Note that even if the contents of a `MaybeUninit` have been initialized, the value may still
+    /// contain padding bytes which are left uninitialized.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(maybe_uninit_as_bytes)]
+    /// use std::mem::MaybeUninit;
+    ///
+    /// let val = 0x12345678_i32;
+    /// let mut uninit = MaybeUninit::new(val);
+    /// let uninit_bytes = uninit.as_bytes_mut();
+    /// if cfg!(target_endian = "little") {
+    ///     uninit_bytes[0].write(0xcd);
+    /// } else {
+    ///     uninit_bytes[3].write(0xcd);
+    /// }
+    /// let val2 = unsafe { uninit.assume_init() };
+    /// assert_eq!(val2, 0x123456cd);
+    /// ```
+    #[unstable(feature = "maybe_uninit_as_bytes", issue = "93092")]
+    pub fn as_bytes_mut(&mut self) -> &mut [MaybeUninit<u8>] {
+        // SAFETY: MaybeUninit<u8> is always valid, even for padding bytes
+        unsafe {
+            slice::from_raw_parts_mut(
+                self.as_mut_ptr() as *mut MaybeUninit<u8>,
+                mem::size_of::<T>(),
+            )
+        }
+    }
+
+    /// Returns the contents of this slice of `MaybeUninit` as a slice of potentially uninitialized
+    /// bytes.
+    ///
+    /// Note that even if the contents of a `MaybeUninit` have been initialized, the value may still
+    /// contain padding bytes which are left uninitialized.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(maybe_uninit_as_bytes, maybe_uninit_write_slice, maybe_uninit_slice)]
+    /// use std::mem::MaybeUninit;
+    ///
+    /// let uninit = [MaybeUninit::new(0x1234u16), MaybeUninit::new(0x5678u16)];
+    /// let uninit_bytes = MaybeUninit::slice_as_bytes(&uninit);
+    /// let bytes = unsafe { MaybeUninit::slice_assume_init_ref(&uninit_bytes) };
+    /// let val1 = u16::from_ne_bytes(bytes[0..2].try_into().unwrap());
+    /// let val2 = u16::from_ne_bytes(bytes[2..4].try_into().unwrap());
+    /// assert_eq!(&[val1, val2], &[0x1234u16, 0x5678u16]);
+    /// ```
+    #[unstable(feature = "maybe_uninit_as_bytes", issue = "93092")]
+    pub fn slice_as_bytes(this: &[MaybeUninit<T>]) -> &[MaybeUninit<u8>] {
+        // SAFETY: MaybeUninit<u8> is always valid, even for padding bytes
+        unsafe {
+            slice::from_raw_parts(
+                this.as_ptr() as *const MaybeUninit<u8>,
+                this.len() * mem::size_of::<T>(),
+            )
+        }
+    }
+
+    /// Returns the contents of this mutable slice of `MaybeUninit` as a mutable slice of
+    /// potentially uninitialized bytes.
+    ///
+    /// Note that even if the contents of a `MaybeUninit` have been initialized, the value may still
+    /// contain padding bytes which are left uninitialized.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(maybe_uninit_as_bytes, maybe_uninit_write_slice, maybe_uninit_slice)]
+    /// use std::mem::MaybeUninit;
+    ///
+    /// let mut uninit = [MaybeUninit::<u16>::uninit(), MaybeUninit::<u16>::uninit()];
+    /// let uninit_bytes = MaybeUninit::slice_as_bytes_mut(&mut uninit);
+    /// MaybeUninit::write_slice(uninit_bytes, &[0x12, 0x34, 0x56, 0x78]);
+    /// let vals = unsafe { MaybeUninit::slice_assume_init_ref(&uninit) };
+    /// if cfg!(target_endian = "little") {
+    ///     assert_eq!(vals, &[0x3412u16, 0x7856u16]);
+    /// } else {
+    ///     assert_eq!(vals, &[0x1234u16, 0x5678u16]);
+    /// }
+    /// ```
+    #[unstable(feature = "maybe_uninit_as_bytes", issue = "93092")]
+    pub fn slice_as_bytes_mut(this: &mut [MaybeUninit<T>]) -> &mut [MaybeUninit<u8>] {
+        // SAFETY: MaybeUninit<u8> is always valid, even for padding bytes
+        unsafe {
+            slice::from_raw_parts_mut(
+                this.as_mut_ptr() as *mut MaybeUninit<u8>,
+                this.len() * mem::size_of::<T>(),
+            )
+        }
+    }
+}
+
+impl<T, const N: usize> MaybeUninit<[T; N]> {
+    /// Transposes a `MaybeUninit<[T; N]>` into a `[MaybeUninit<T>; N]`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(maybe_uninit_uninit_array_transpose)]
+    /// # use std::mem::MaybeUninit;
+    ///
+    /// let data: [MaybeUninit<u8>; 1000] = MaybeUninit::uninit().transpose();
+    /// ```
+    #[unstable(feature = "maybe_uninit_uninit_array_transpose", issue = "96097")]
+    #[inline]
+    pub const fn transpose(self) -> [MaybeUninit<T>; N] {
+        // SAFETY: T and MaybeUninit<T> have the same layout
+        unsafe { super::transmute_copy(&ManuallyDrop::new(self)) }
+    }
+}
+
+impl<T, const N: usize> [MaybeUninit<T>; N] {
+    /// Transposes a `[MaybeUninit<T>; N]` into a `MaybeUninit<[T; N]>`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(maybe_uninit_uninit_array_transpose)]
+    /// # use std::mem::MaybeUninit;
+    ///
+    /// let data = [MaybeUninit::<u8>::uninit(); 1000];
+    /// let data: MaybeUninit<[u8; 1000]> = data.transpose();
+    /// ```
+    #[unstable(feature = "maybe_uninit_uninit_array_transpose", issue = "96097")]
+    #[inline]
+    pub const fn transpose(self) -> MaybeUninit<[T; N]> {
+        // SAFETY: T and MaybeUninit<T> have the same layout
+        unsafe { super::transmute_copy(&ManuallyDrop::new(self)) }
     }
 }

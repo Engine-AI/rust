@@ -1,18 +1,16 @@
-use crate::spec::{RelroLevel, TargetOptions};
+use crate::spec::{cvs, FramePointer, RelroLevel, TargetOptions};
 
 pub fn opts() -> TargetOptions {
     TargetOptions {
-        os: "openbsd".to_string(),
+        os: "openbsd".into(),
         dynamic_linking: true,
-        executables: true,
-        os_family: Some("unix".to_string()),
-        linker_is_gnu: true,
+        families: cvs!["unix"],
         has_rpath: true,
         abi_return_struct_as_int: true,
         position_independent_executables: true,
-        eliminate_frame_pointer: false, // FIXME 43575
+        frame_pointer: FramePointer::Always, // FIXME 43575: should be MayOmit...
         relro_level: RelroLevel::Full,
-        dwarf_version: Some(2),
+        default_dwarf_version: 2,
         ..Default::default()
     }
 }

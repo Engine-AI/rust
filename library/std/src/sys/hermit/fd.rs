@@ -1,35 +1,23 @@
 #![unstable(reason = "not public", issue = "none", feature = "fd")]
 
-use crate::io::{self, ErrorKind, Read};
-use crate::mem;
+use crate::io::{self, Read};
+use crate::os::hermit::io::{FromRawFd, OwnedFd, RawFd};
 use crate::sys::cvt;
 use crate::sys::hermit::abi;
-use crate::sys_common::AsInner;
+use crate::sys::unsupported;
+use crate::sys_common::{AsInner, FromInner, IntoInner};
+
+use crate::os::hermit::io::*;
 
 #[derive(Debug)]
 pub struct FileDesc {
-    fd: i32,
+    fd: OwnedFd,
 }
 
 impl FileDesc {
-    pub fn new(fd: i32) -> FileDesc {
-        FileDesc { fd }
-    }
-
-    pub fn raw(&self) -> i32 {
-        self.fd
-    }
-
-    /// Extracts the actual file descriptor without closing it.
-    pub fn into_raw(self) -> i32 {
-        let fd = self.fd;
-        mem::forget(self);
-        fd
-    }
-
     pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
-        let result = unsafe { abi::read(self.fd, buf.as_mut_ptr(), buf.len()) };
-        cvt(result as i32)
+        let result = cvt(unsafe { abi::read(self.fd.as_raw_fd(), buf.as_mut_ptr(), buf.len()) })?;
+        Ok(result as usize)
     }
 
     pub fn read_to_end(&self, buf: &mut Vec<u8>) -> io::Result<usize> {
@@ -38,15 +26,15 @@ impl FileDesc {
     }
 
     pub fn write(&self, buf: &[u8]) -> io::Result<usize> {
-        let result = unsafe { abi::write(self.fd, buf.as_ptr(), buf.len()) };
-        cvt(result as i32)
+        let result = cvt(unsafe { abi::write(self.fd.as_raw_fd(), buf.as_ptr(), buf.len()) })?;
+        Ok(result as usize)
     }
 
     pub fn duplicate(&self) -> io::Result<FileDesc> {
         self.duplicate_path(&[])
     }
     pub fn duplicate_path(&self, _path: &[u8]) -> io::Result<FileDesc> {
-        Err(io::Error::new_const(ErrorKind::Other, &"duplicate isn't supported"))
+        unsupported()
     }
 
     pub fn nonblocking(&self) -> io::Result<bool> {
@@ -54,11 +42,11 @@ impl FileDesc {
     }
 
     pub fn set_cloexec(&self) -> io::Result<()> {
-        Err(io::Error::new_const(ErrorKind::Other, &"cloexec isn't supported"))
+        unsupported()
     }
 
     pub fn set_nonblocking(&self, _nonblocking: bool) -> io::Result<()> {
-        Err(io::Error::new_const(ErrorKind::Other, &"nonblocking isn't supported"))
+        unsupported()
     }
 }
 
@@ -68,19 +56,45 @@ impl<'a> Read for &'a FileDesc {
     }
 }
 
-impl AsInner<i32> for FileDesc {
-    fn as_inner(&self) -> &i32 {
+impl IntoInner<OwnedFd> for FileDesc {
+    fn into_inner(self) -> OwnedFd {
+        self.fd
+    }
+}
+
+impl FromInner<OwnedFd> for FileDesc {
+    fn from_inner(owned_fd: OwnedFd) -> Self {
+        Self { fd: owned_fd }
+    }
+}
+
+impl FromRawFd for FileDesc {
+    unsafe fn from_raw_fd(raw_fd: RawFd) -> Self {
+        Self { fd: FromRawFd::from_raw_fd(raw_fd) }
+    }
+}
+
+impl AsInner<OwnedFd> for FileDesc {
+    fn as_inner(&self) -> &OwnedFd {
         &self.fd
     }
 }
 
-impl Drop for FileDesc {
-    fn drop(&mut self) {
-        // Note that errors are ignored when closing a file descriptor. The
-        // reason for this is that if an error occurs we don't actually know if
-        // the file descriptor was closed or not, and if we retried (for
-        // something like EINTR), we might close another valid file descriptor
-        // (opened after we closed ours.
-        let _ = unsafe { abi::close(self.fd) };
+impl AsFd for FileDesc {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.fd.as_fd()
+    }
+}
+
+impl AsRawFd for FileDesc {
+    #[inline]
+    fn as_raw_fd(&self) -> RawFd {
+        self.fd.as_raw_fd()
+    }
+}
+
+impl IntoRawFd for FileDesc {
+    fn into_raw_fd(self) -> RawFd {
+        self.fd.into_raw_fd()
     }
 }

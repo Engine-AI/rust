@@ -1,5 +1,8 @@
-use crate::iter::adapters::{zip::try_get_unchecked, SourceIter, TrustedRandomAccess};
+use crate::iter::adapters::{
+    zip::try_get_unchecked, SourceIter, TrustedRandomAccess, TrustedRandomAccessNoCoerce,
+};
 use crate::iter::{FusedIterator, InPlaceIterable, TrustedLen};
+use crate::num::NonZeroUsize;
 use crate::ops::Try;
 
 /// An iterator that yields the current count and the element during iteration.
@@ -71,7 +74,7 @@ where
     where
         Self: Sized,
         Fold: FnMut(Acc, Self::Item) -> R,
-        R: Try<Ok = Acc>,
+        R: Try<Output = Acc>,
     {
         #[inline]
         fn enumerate<'a, T, Acc, R>(
@@ -110,10 +113,23 @@ where
         self.iter.fold(init, enumerate(self.count, fold))
     }
 
+    #[inline]
     #[rustc_inherit_overflow_checks]
+    fn advance_by(&mut self, n: usize) -> Result<(), NonZeroUsize> {
+        let remaining = self.iter.advance_by(n);
+        let advanced = match remaining {
+            Ok(()) => n,
+            Err(rem) => n - rem.get(),
+        };
+        self.count += advanced;
+        remaining
+    }
+
+    #[rustc_inherit_overflow_checks]
+    #[inline]
     unsafe fn __iterator_get_unchecked(&mut self, idx: usize) -> <Self as Iterator>::Item
     where
-        Self: TrustedRandomAccess,
+        Self: TrustedRandomAccessNoCoerce,
     {
         // SAFETY: the caller must uphold the contract for
         // `Iterator::__iterator_get_unchecked`.
@@ -150,7 +166,7 @@ where
     where
         Self: Sized,
         Fold: FnMut(Acc, Self::Item) -> R,
-        R: Try<Ok = Acc>,
+        R: Try<Output = Acc>,
     {
         // Can safely add and subtract the count, as `ExactSizeIterator` promises
         // that the number of elements fits into a `usize`.
@@ -188,6 +204,13 @@ where
         let count = self.count + self.iter.len();
         self.iter.rfold(init, enumerate(count, fold))
     }
+
+    #[inline]
+    fn advance_back_by(&mut self, n: usize) -> Result<(), NonZeroUsize> {
+        // we do not need to update the count since that only tallies the number of items
+        // consumed from the front. consuming items from the back can never reduce that.
+        self.iter.advance_back_by(n)
+    }
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -206,9 +229,13 @@ where
 
 #[doc(hidden)]
 #[unstable(feature = "trusted_random_access", issue = "none")]
-unsafe impl<I> TrustedRandomAccess for Enumerate<I>
+unsafe impl<I> TrustedRandomAccess for Enumerate<I> where I: TrustedRandomAccess {}
+
+#[doc(hidden)]
+#[unstable(feature = "trusted_random_access", issue = "none")]
+unsafe impl<I> TrustedRandomAccessNoCoerce for Enumerate<I>
 where
-    I: TrustedRandomAccess,
+    I: TrustedRandomAccessNoCoerce,
 {
     const MAY_HAVE_SIDE_EFFECT: bool = I::MAY_HAVE_SIDE_EFFECT;
 }
@@ -220,14 +247,14 @@ impl<I> FusedIterator for Enumerate<I> where I: FusedIterator {}
 unsafe impl<I> TrustedLen for Enumerate<I> where I: TrustedLen {}
 
 #[unstable(issue = "none", feature = "inplace_iteration")]
-unsafe impl<S: Iterator, I: Iterator> SourceIter for Enumerate<I>
+unsafe impl<I> SourceIter for Enumerate<I>
 where
-    I: SourceIter<Source = S>,
+    I: SourceIter,
 {
-    type Source = S;
+    type Source = I::Source;
 
     #[inline]
-    unsafe fn as_inner(&mut self) -> &mut S {
+    unsafe fn as_inner(&mut self) -> &mut I::Source {
         // SAFETY: unsafe function forwarding to unsafe function with the same requirements
         unsafe { SourceIter::as_inner(&mut self.iter) }
     }
@@ -235,3 +262,17 @@ where
 
 #[unstable(issue = "none", feature = "inplace_iteration")]
 unsafe impl<I: InPlaceIterable> InPlaceIterable for Enumerate<I> {}
+
+#[stable(feature = "default_iters", since = "CURRENT_RUSTC_VERSION")]
+impl<I: Default> Default for Enumerate<I> {
+    /// Creates an `Enumerate` iterator from the default value of `I`
+    /// ```
+    /// # use core::slice;
+    /// # use std::iter::Enumerate;
+    /// let iter: Enumerate<slice::Iter<'_, u8>> = Default::default();
+    /// assert_eq!(iter.len(), 0);
+    /// ```
+    fn default() -> Self {
+        Enumerate::new(Default::default())
+    }
+}

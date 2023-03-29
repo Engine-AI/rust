@@ -1,7 +1,7 @@
 use crate::tests::{matches_codepattern, string_to_stream, with_error_checking_parse};
 
 use rustc_ast::ptr::P;
-use rustc_ast::token::{self, Token};
+use rustc_ast::token::{self, Delimiter, Token};
 use rustc_ast::tokenstream::{DelimSpan, TokenStream, TokenTree};
 use rustc_ast::visit;
 use rustc_ast::{self as ast, PatKind};
@@ -10,15 +10,18 @@ use rustc_errors::PResult;
 use rustc_parse::new_parser_from_source_str;
 use rustc_parse::parser::ForceCollect;
 use rustc_session::parse::ParseSess;
+use rustc_span::create_default_session_globals_then;
 use rustc_span::source_map::FilePathMapping;
 use rustc_span::symbol::{kw, sym, Symbol};
-use rustc_span::with_default_session_globals;
 use rustc_span::{BytePos, FileName, Pos, Span};
 
 use std::path::PathBuf;
 
 fn sess() -> ParseSess {
-    ParseSess::new(FilePathMapping::empty())
+    ParseSess::new(
+        vec![crate::DEFAULT_LOCALE_RESOURCE, rustc_parse::DEFAULT_LOCALE_RESOURCE],
+        FilePathMapping::empty(),
+    )
 }
 
 /// Parses an item.
@@ -51,7 +54,7 @@ fn string_to_item(source_str: String) -> Option<P<ast::Item>> {
 #[should_panic]
 #[test]
 fn bad_path_expr_1() {
-    with_default_session_globals(|| {
+    create_default_session_globals_then(|| {
         string_to_expr("::abc::def::return".to_string());
     })
 }
@@ -59,30 +62,41 @@ fn bad_path_expr_1() {
 // Checks the token-tree-ization of macros.
 #[test]
 fn string_to_tts_macro() {
-    with_default_session_globals(|| {
+    create_default_session_globals_then(|| {
         let tts: Vec<_> =
-            string_to_stream("macro_rules! zip (($a)=>($a))".to_string()).trees().collect();
+            string_to_stream("macro_rules! zip (($a)=>($a))".to_string()).into_trees().collect();
         let tts: &[TokenTree] = &tts[..];
 
         match tts {
-            [TokenTree::Token(Token { kind: token::Ident(name_macro_rules, false), .. }), TokenTree::Token(Token { kind: token::Not, .. }), TokenTree::Token(Token { kind: token::Ident(name_zip, false), .. }), TokenTree::Delimited(_, macro_delim, macro_tts)]
-                if name_macro_rules == &kw::MacroRules && name_zip.as_str() == "zip" =>
-            {
+            [
+                TokenTree::Token(Token { kind: token::Ident(name_macro_rules, false), .. }, _),
+                TokenTree::Token(Token { kind: token::Not, .. }, _),
+                TokenTree::Token(Token { kind: token::Ident(name_zip, false), .. }, _),
+                TokenTree::Delimited(_, macro_delim, macro_tts),
+            ] if name_macro_rules == &kw::MacroRules && name_zip.as_str() == "zip" => {
                 let tts = &macro_tts.trees().collect::<Vec<_>>();
                 match &tts[..] {
-                    [TokenTree::Delimited(_, first_delim, first_tts), TokenTree::Token(Token { kind: token::FatArrow, .. }), TokenTree::Delimited(_, second_delim, second_tts)]
-                        if macro_delim == &token::Paren =>
-                    {
+                    [
+                        TokenTree::Delimited(_, first_delim, first_tts),
+                        TokenTree::Token(Token { kind: token::FatArrow, .. }, _),
+                        TokenTree::Delimited(_, second_delim, second_tts),
+                    ] if macro_delim == &Delimiter::Parenthesis => {
                         let tts = &first_tts.trees().collect::<Vec<_>>();
                         match &tts[..] {
-                            [TokenTree::Token(Token { kind: token::Dollar, .. }), TokenTree::Token(Token { kind: token::Ident(name, false), .. })]
-                                if first_delim == &token::Paren && name.as_str() == "a" => {}
+                            [
+                                TokenTree::Token(Token { kind: token::Dollar, .. }, _),
+                                TokenTree::Token(Token { kind: token::Ident(name, false), .. }, _),
+                            ] if first_delim == &Delimiter::Parenthesis && name.as_str() == "a" => {
+                            }
                             _ => panic!("value 3: {:?} {:?}", first_delim, first_tts),
                         }
                         let tts = &second_tts.trees().collect::<Vec<_>>();
                         match &tts[..] {
-                            [TokenTree::Token(Token { kind: token::Dollar, .. }), TokenTree::Token(Token { kind: token::Ident(name, false), .. })]
-                                if second_delim == &token::Paren && name.as_str() == "a" => {}
+                            [
+                                TokenTree::Token(Token { kind: token::Dollar, .. }, _),
+                                TokenTree::Token(Token { kind: token::Ident(name, false), .. }, _),
+                            ] if second_delim == &Delimiter::Parenthesis
+                                && name.as_str() == "a" => {}
                             _ => panic!("value 4: {:?} {:?}", second_delim, second_tts),
                         }
                     }
@@ -96,33 +110,31 @@ fn string_to_tts_macro() {
 
 #[test]
 fn string_to_tts_1() {
-    with_default_session_globals(|| {
+    create_default_session_globals_then(|| {
         let tts = string_to_stream("fn a (b : i32) { b; }".to_string());
 
         let expected = TokenStream::new(vec![
-            TokenTree::token(token::Ident(kw::Fn, false), sp(0, 2)).into(),
-            TokenTree::token(token::Ident(Symbol::intern("a"), false), sp(3, 4)).into(),
+            TokenTree::token_alone(token::Ident(kw::Fn, false), sp(0, 2)),
+            TokenTree::token_alone(token::Ident(Symbol::intern("a"), false), sp(3, 4)),
             TokenTree::Delimited(
                 DelimSpan::from_pair(sp(5, 6), sp(13, 14)),
-                token::DelimToken::Paren,
+                Delimiter::Parenthesis,
                 TokenStream::new(vec![
-                    TokenTree::token(token::Ident(Symbol::intern("b"), false), sp(6, 7)).into(),
-                    TokenTree::token(token::Colon, sp(8, 9)).into(),
-                    TokenTree::token(token::Ident(sym::i32, false), sp(10, 13)).into(),
+                    TokenTree::token_alone(token::Ident(Symbol::intern("b"), false), sp(6, 7)),
+                    TokenTree::token_alone(token::Colon, sp(8, 9)),
+                    TokenTree::token_alone(token::Ident(sym::i32, false), sp(10, 13)),
                 ])
                 .into(),
-            )
-            .into(),
+            ),
             TokenTree::Delimited(
                 DelimSpan::from_pair(sp(15, 16), sp(20, 21)),
-                token::DelimToken::Brace,
+                Delimiter::Brace,
                 TokenStream::new(vec![
-                    TokenTree::token(token::Ident(Symbol::intern("b"), false), sp(17, 18)).into(),
-                    TokenTree::token(token::Semi, sp(18, 19)).into(),
+                    TokenTree::token_joint(token::Ident(Symbol::intern("b"), false), sp(17, 18)),
+                    TokenTree::token_alone(token::Semi, sp(18, 19)),
                 ])
                 .into(),
-            )
-            .into(),
+            ),
         ]);
 
         assert_eq!(tts, expected);
@@ -131,7 +143,7 @@ fn string_to_tts_1() {
 
 #[test]
 fn parse_use() {
-    with_default_session_globals(|| {
+    create_default_session_globals_then(|| {
         let use_s = "use foo::bar::baz;";
         let vitem = string_to_item(use_s.to_string()).unwrap();
         let vitem_s = item_to_string(&vitem);
@@ -146,7 +158,7 @@ fn parse_use() {
 
 #[test]
 fn parse_extern_crate() {
-    with_default_session_globals(|| {
+    create_default_session_globals_then(|| {
         let ex_s = "extern crate foo;";
         let vitem = string_to_item(ex_s.to_string()).unwrap();
         let vitem_s = item_to_string(&vitem);
@@ -167,9 +179,9 @@ fn get_spans_of_pat_idents(src: &str) -> Vec<Span> {
     }
     impl<'a> visit::Visitor<'a> for PatIdentVisitor {
         fn visit_pat(&mut self, p: &'a ast::Pat) {
-            match p.kind {
-                PatKind::Ident(_, ref ident, _) => {
-                    self.spans.push(ident.span.clone());
+            match &p.kind {
+                PatKind::Ident(_, ident, _) => {
+                    self.spans.push(ident.span);
                 }
                 _ => {
                     visit::walk_pat(self, p);
@@ -184,7 +196,7 @@ fn get_spans_of_pat_idents(src: &str) -> Vec<Span> {
 
 #[test]
 fn span_of_self_arg_pat_idents_are_correct() {
-    with_default_session_globals(|| {
+    create_default_session_globals_then(|| {
         let srcs = [
             "impl z { fn a (&self, &myarg: i32) {} }",
             "impl z { fn a (&mut self, &myarg: i32) {} }",
@@ -193,7 +205,7 @@ fn span_of_self_arg_pat_idents_are_correct() {
             "impl z { fn a (self: Foo, &myarg: i32) {} }",
         ];
 
-        for &src in &srcs {
+        for src in srcs {
             let spans = get_spans_of_pat_idents(src);
             let (lo, hi) = (spans[0].lo(), spans[0].hi());
             assert!(
@@ -208,7 +220,7 @@ fn span_of_self_arg_pat_idents_are_correct() {
 
 #[test]
 fn parse_exprs() {
-    with_default_session_globals(|| {
+    create_default_session_globals_then(|| {
         // just make sure that they parse....
         string_to_expr("3 + 4".to_string());
         string_to_expr("a::z.froob(b,&(987+3))".to_string());
@@ -217,7 +229,7 @@ fn parse_exprs() {
 
 #[test]
 fn attrs_fix_bug() {
-    with_default_session_globals(|| {
+    create_default_session_globals_then(|| {
         string_to_item(
             "pub fn mk_file_writer(path: &Path, flags: &[FileFlag])
                 -> Result<Box<Writer>, String> {
@@ -238,7 +250,7 @@ let mut fflags: c_int = wb();
 
 #[test]
 fn crlf_doc_comments() {
-    with_default_session_globals(|| {
+    create_default_session_globals_then(|| {
         let sess = sess();
 
         let name_1 = FileName::Custom("crlf_source_1".to_string());
@@ -272,7 +284,7 @@ fn ttdelim_span() {
         new_parser_from_source_str(sess, name, source).parse_expr()
     }
 
-    with_default_session_globals(|| {
+    create_default_session_globals_then(|| {
         let sess = sess();
         let expr = parse_expr_from_source_str(
             PathBuf::from("foo").into(),
@@ -281,10 +293,8 @@ fn ttdelim_span() {
         )
         .unwrap();
 
-        let tts: Vec<_> = match expr.kind {
-            ast::ExprKind::MacCall(ref mac) => mac.args.inner_tokens().trees().collect(),
-            _ => panic!("not a macro"),
-        };
+        let ast::ExprKind::MacCall(mac) = &expr.kind else { panic!("not a macro") };
+        let tts: Vec<_> = mac.args.tokens.clone().into_trees().collect();
 
         let span = tts.iter().rev().next().unwrap().span();
 
@@ -300,7 +310,7 @@ fn ttdelim_span() {
 // See `recurse_into_file_modules` in the parser.
 #[test]
 fn out_of_line_mod() {
-    with_default_session_globals(|| {
+    create_default_session_globals_then(|| {
         let item = parse_item_from_source_str(
             PathBuf::from("foo").into(),
             "mod foo { struct S; mod this_does_not_exist; }".to_owned(),
@@ -309,11 +319,8 @@ fn out_of_line_mod() {
         .unwrap()
         .unwrap();
 
-        if let ast::ItemKind::Mod(_, ref mod_kind) = item.kind {
-            assert!(matches!(mod_kind, ast::ModKind::Loaded(items, ..) if items.len() == 2));
-        } else {
-            panic!();
-        }
+        let ast::ItemKind::Mod(_, mod_kind) = &item.kind else { panic!() };
+        assert!(matches!(mod_kind, ast::ModKind::Loaded(items, ..) if items.len() == 2));
     });
 }
 

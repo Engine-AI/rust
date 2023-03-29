@@ -5,7 +5,7 @@ mod tests;
 
 use crate::fmt;
 use crate::io::{
-    self, BufRead, Initializer, IoSlice, IoSliceMut, Read, Seek, SeekFrom, SizeHint, Write,
+    self, BorrowedCursor, BufRead, IoSlice, IoSliceMut, Read, Seek, SeekFrom, SizeHint, Write,
 };
 
 /// A reader which is always at EOF.
@@ -13,13 +13,13 @@ use crate::io::{
 /// This struct is generally created by calling [`empty()`]. Please see
 /// the documentation of [`empty()`] for more details.
 #[stable(feature = "rust1", since = "1.0.0")]
-pub struct Empty {
-    _priv: (),
-}
+#[non_exhaustive]
+#[derive(Copy, Clone, Default)]
+pub struct Empty;
 
 /// Constructs a new handle to an empty reader.
 ///
-/// All reads from the returned reader will return [`Ok`]`(0)`.
+/// All reads from the returned reader will return <code>[Ok]\(0)</code>.
 ///
 /// # Examples
 ///
@@ -32,10 +32,11 @@ pub struct Empty {
 /// io::empty().read_to_string(&mut buffer).unwrap();
 /// assert!(buffer.is_empty());
 /// ```
+#[must_use]
 #[stable(feature = "rust1", since = "1.0.0")]
 #[rustc_const_unstable(feature = "const_io_structs", issue = "78812")]
 pub const fn empty() -> Empty {
-    Empty { _priv: () }
+    Empty
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -46,8 +47,8 @@ impl Read for Empty {
     }
 
     #[inline]
-    unsafe fn initializer(&self) -> Initializer {
-        Initializer::nop()
+    fn read_buf(&mut self, _cursor: BorrowedCursor<'_>) -> io::Result<()> {
+        Ok(())
     }
 }
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -78,11 +79,12 @@ impl Seek for Empty {
 #[stable(feature = "std_debug", since = "1.16.0")]
 impl fmt::Debug for Empty {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.pad("Empty { .. }")
+        f.debug_struct("Empty").finish_non_exhaustive()
     }
 }
 
 impl SizeHint for Empty {
+    #[inline]
     fn upper_bound(&self) -> Option<usize> {
         Some(0)
     }
@@ -111,6 +113,7 @@ pub struct Repeat {
 /// io::repeat(0b101).read_exact(&mut buffer).unwrap();
 /// assert_eq!(buffer, [0b101, 0b101, 0b101]);
 /// ```
+#[must_use]
 #[stable(feature = "rust1", since = "1.0.0")]
 #[rustc_const_unstable(feature = "const_io_structs", issue = "78812")]
 pub const fn repeat(byte: u8) -> Repeat {
@@ -127,6 +130,22 @@ impl Read for Repeat {
         Ok(buf.len())
     }
 
+    fn read_buf(&mut self, mut buf: BorrowedCursor<'_>) -> io::Result<()> {
+        // SAFETY: No uninit bytes are being written
+        for slot in unsafe { buf.as_mut() } {
+            slot.write(self.byte);
+        }
+
+        let remaining = buf.capacity();
+
+        // SAFETY: the entire unfilled portion of buf has been initialized
+        unsafe {
+            buf.advance(remaining);
+        }
+
+        Ok(())
+    }
+
     #[inline]
     fn read_vectored(&mut self, bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
         let mut nwritten = 0;
@@ -140,17 +159,24 @@ impl Read for Repeat {
     fn is_read_vectored(&self) -> bool {
         true
     }
+}
+
+impl SizeHint for Repeat {
+    #[inline]
+    fn lower_bound(&self) -> usize {
+        usize::MAX
+    }
 
     #[inline]
-    unsafe fn initializer(&self) -> Initializer {
-        Initializer::nop()
+    fn upper_bound(&self) -> Option<usize> {
+        None
     }
 }
 
 #[stable(feature = "std_debug", since = "1.16.0")]
 impl fmt::Debug for Repeat {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.pad("Repeat { .. }")
+        f.debug_struct("Repeat").finish_non_exhaustive()
     }
 }
 
@@ -159,9 +185,9 @@ impl fmt::Debug for Repeat {
 /// This struct is generally created by calling [`sink`]. Please
 /// see the documentation of [`sink()`] for more details.
 #[stable(feature = "rust1", since = "1.0.0")]
-pub struct Sink {
-    _priv: (),
-}
+#[non_exhaustive]
+#[derive(Copy, Clone, Default)]
+pub struct Sink;
 
 /// Creates an instance of a writer which will successfully consume all data.
 ///
@@ -179,10 +205,11 @@ pub struct Sink {
 /// let num_bytes = io::sink().write(&buffer).unwrap();
 /// assert_eq!(num_bytes, 5);
 /// ```
+#[must_use]
 #[stable(feature = "rust1", since = "1.0.0")]
 #[rustc_const_unstable(feature = "const_io_structs", issue = "78812")]
 pub const fn sink() -> Sink {
-    Sink { _priv: () }
+    Sink
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -236,6 +263,6 @@ impl Write for &Sink {
 #[stable(feature = "std_debug", since = "1.16.0")]
 impl fmt::Debug for Sink {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.pad("Sink { .. }")
+        f.debug_struct("Sink").finish_non_exhaustive()
     }
 }

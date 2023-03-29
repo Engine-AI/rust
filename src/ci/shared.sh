@@ -7,7 +7,7 @@
 
 export MIRRORS_BASE="https://ci-mirrors.rust-lang.org/rustc"
 
-# See http://unix.stackexchange.com/questions/82598
+# See https://unix.stackexchange.com/questions/82598
 # Duplicated in docker/dist-various-2/shared.sh
 function retry {
   echo "Attempting with retry:" "$@"
@@ -28,11 +28,7 @@ function retry {
 }
 
 function isCI {
-    [[ "${CI-false}" = "true" ]] || isAzurePipelines || isGitHubActions
-}
-
-function isAzurePipelines {
-    [[ "${TF_BUILD-False}" = "True" ]]
+    [[ "${CI-false}" = "true" ]] || isGitHubActions
 }
 
 function isGitHubActions {
@@ -63,9 +59,7 @@ function isCiBranch {
     fi
     name="$1"
 
-    if isAzurePipelines; then
-        [[ "${BUILD_SOURCEBRANCHNAME}" = "${name}" ]]
-    elif isGitHubActions; then
+    if isGitHubActions; then
         [[ "${GITHUB_REF}" = "refs/heads/${name}" ]]
     else
         echo "isCiBranch only works inside CI!"
@@ -73,10 +67,17 @@ function isCiBranch {
     fi
 }
 
+function ciBaseBranch {
+    if isGitHubActions; then
+        echo "${GITHUB_BASE_REF#refs/heads/}"
+    else
+        echo "ciBaseBranch only works inside CI!"
+        exit 1
+    fi
+}
+
 function ciCommit {
-    if isAzurePipelines; then
-        echo "${BUILD_SOURCEVERSION}"
-    elif isGitHubActions; then
+    if isGitHubActions; then
         echo "${GITHUB_SHA}"
     else
         echo "ciCommit only works inside CI!"
@@ -85,9 +86,7 @@ function ciCommit {
 }
 
 function ciCheckoutPath {
-    if isAzurePipelines; then
-        echo "${BUILD_SOURCESDIRECTORY}"
-    elif isGitHubActions; then
+    if isGitHubActions; then
         echo "${GITHUB_WORKSPACE}"
     else
         echo "ciCheckoutPath only works inside CI!"
@@ -102,9 +101,7 @@ function ciCommandAddPath {
     fi
     path="$1"
 
-    if isAzurePipelines; then
-        echo "##vso[task.prependpath]${path}"
-    elif isGitHubActions; then
+    if isGitHubActions; then
         echo "${path}" >> "${GITHUB_PATH}"
     else
         echo "ciCommandAddPath only works inside CI!"
@@ -120,12 +117,18 @@ function ciCommandSetEnv {
     name="$1"
     value="$2"
 
-    if isAzurePipelines; then
-        echo "##vso[task.setvariable variable=${name}]${value}"
-    elif isGitHubActions; then
+    if isGitHubActions; then
         echo "${name}=${value}" >> "${GITHUB_ENV}"
     else
         echo "ciCommandSetEnv only works inside CI!"
         exit 1
+    fi
+}
+
+function releaseChannel {
+    if [[ -z "${RUST_CI_OVERRIDE_RELEASE_CHANNEL+x}" ]]; then
+        cat "${ci_dir}/channel"
+    else
+        echo $RUST_CI_OVERRIDE_RELEASE_CHANNEL
     fi
 }

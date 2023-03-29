@@ -39,7 +39,7 @@ fn filter_map_fold<T, B, Acc>(
     }
 }
 
-fn filter_map_try_fold<'a, T, B, Acc, R: Try<Ok = Acc>>(
+fn filter_map_try_fold<'a, T, B, Acc, R: Try<Output = Acc>>(
     f: &'a mut impl FnMut(T) -> Option<B>,
     mut fold: impl FnMut(Acc, B) -> R + 'a,
 ) -> impl FnMut(Acc, T) -> R + 'a {
@@ -72,7 +72,7 @@ where
     where
         Self: Sized,
         Fold: FnMut(Acc, Self::Item) -> R,
-        R: Try<Ok = Acc>,
+        R: Try<Output = Acc>,
     {
         self.iter.try_fold(init, filter_map_try_fold(&mut self.f, fold))
     }
@@ -99,7 +99,7 @@ where
         ) -> impl FnMut((), T) -> ControlFlow<B> + '_ {
             move |(), x| match f(x) {
                 Some(x) => ControlFlow::Break(x),
-                None => ControlFlow::CONTINUE,
+                None => ControlFlow::Continue(()),
             }
         }
 
@@ -111,7 +111,7 @@ where
     where
         Self: Sized,
         Fold: FnMut(Acc, Self::Item) -> R,
-        R: Try<Ok = Acc>,
+        R: Try<Output = Acc>,
     {
         self.iter.try_rfold(init, filter_map_try_fold(&mut self.f, fold))
     }
@@ -129,15 +129,14 @@ where
 impl<B, I: FusedIterator, F> FusedIterator for FilterMap<I, F> where F: FnMut(I::Item) -> Option<B> {}
 
 #[unstable(issue = "none", feature = "inplace_iteration")]
-unsafe impl<S: Iterator, B, I: Iterator, F> SourceIter for FilterMap<I, F>
+unsafe impl<I, F> SourceIter for FilterMap<I, F>
 where
-    F: FnMut(I::Item) -> Option<B>,
-    I: SourceIter<Source = S>,
+    I: SourceIter,
 {
-    type Source = S;
+    type Source = I::Source;
 
     #[inline]
-    unsafe fn as_inner(&mut self) -> &mut S {
+    unsafe fn as_inner(&mut self) -> &mut I::Source {
         // SAFETY: unsafe function forwarding to unsafe function with the same requirements
         unsafe { SourceIter::as_inner(&mut self.iter) }
     }

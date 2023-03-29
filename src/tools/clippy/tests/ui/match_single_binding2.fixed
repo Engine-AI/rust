@@ -1,7 +1,7 @@
 // run-rustfix
-
 #![warn(clippy::match_single_binding)]
 #![allow(unused_variables)]
+#![allow(clippy::uninlined_format_args)]
 
 fn main() {
     // Lint (additional curly braces needed, see #6572)
@@ -30,8 +30,24 @@ fn main() {
         #[rustfmt::skip]
         Some((first, _second)) => {
             let (a, b) = get_tup();
-            println!("a {:?} and b {:?}", a, b);
+            println!("a {:?} and b {:?}", a, b)
         },
         None => println!("nothing"),
     }
+
+    fn side_effects() {}
+
+    // Lint (scrutinee has side effects)
+    // issue #7094
+    side_effects();
+    println!("Side effects");
+
+    // Lint (scrutinee has side effects)
+    // issue #7094
+    let x = 1;
+    match x {
+        0 => 1,
+        _ => 2,
+    };
+    println!("Single branch")
 }

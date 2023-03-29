@@ -28,6 +28,7 @@ pub struct Expression {
 /// only whitespace or comments). According to LLVM Code Coverage Mapping documentation, "A count
 /// for a gap area is only used as the line execution count if there are no other regions on a
 /// line."
+#[derive(Debug)]
 pub struct FunctionCoverage<'tcx> {
     instance: Instance<'tcx>,
     source_hash: u64,
@@ -49,9 +50,9 @@ impl<'tcx> FunctionCoverage<'tcx> {
     }
 
     fn create(tcx: TyCtxt<'tcx>, instance: Instance<'tcx>, is_used: bool) -> Self {
-        let coverageinfo = tcx.coverageinfo(instance.def_id());
+        let coverageinfo = tcx.coverageinfo(instance.def);
         debug!(
-            "FunctionCoverage::new(instance={:?}) has coverageinfo={:?}. is_used={}",
+            "FunctionCoverage::create(instance={:?}) has coverageinfo={:?}. is_used={}",
             instance, coverageinfo, is_used
         );
         Self {
@@ -113,6 +114,14 @@ impl<'tcx> FunctionCoverage<'tcx> {
             expression_id, lhs, op, rhs, region
         );
         let expression_index = self.expression_index(u32::from(expression_id));
+        debug_assert!(
+            expression_index.as_usize() < self.expressions.len(),
+            "expression_index {} is out of range for expressions.len() = {}
+            for {:?}",
+            expression_index.as_usize(),
+            self.expressions.len(),
+            self,
+        );
         if let Some(previous_expression) = self.expressions[expression_index].replace(Expression {
             lhs,
             op,
@@ -141,9 +150,9 @@ impl<'tcx> FunctionCoverage<'tcx> {
     /// Generate an array of CounterExpressions, and an iterator over all `Counter`s and their
     /// associated `Regions` (from which the LLVM-specific `CoverageMapGenerator` will create
     /// `CounterMappingRegion`s.
-    pub fn get_expressions_and_counter_regions<'a>(
-        &'a self,
-    ) -> (Vec<CounterExpression>, impl Iterator<Item = (Counter, &'a CodeRegion)>) {
+    pub fn get_expressions_and_counter_regions(
+        &self,
+    ) -> (Vec<CounterExpression>, impl Iterator<Item = (Counter, &CodeRegion)>) {
         assert!(
             self.source_hash != 0 || !self.is_used,
             "No counters provided the source_hash for used function: {:?}",
@@ -159,7 +168,7 @@ impl<'tcx> FunctionCoverage<'tcx> {
         (counter_expressions, counter_regions)
     }
 
-    fn counter_regions<'a>(&'a self) -> impl Iterator<Item = (Counter, &'a CodeRegion)> {
+    fn counter_regions(&self) -> impl Iterator<Item = (Counter, &CodeRegion)> {
         self.counters.iter_enumerated().filter_map(|(index, entry)| {
             // Option::map() will return None to filter out missing counters. This may happen
             // if, for example, a MIR-instrumented counter is removed during an optimization.
@@ -168,8 +177,8 @@ impl<'tcx> FunctionCoverage<'tcx> {
     }
 
     fn expressions_with_regions(
-        &'a self,
-    ) -> (Vec<CounterExpression>, impl Iterator<Item = (Counter, &'a CodeRegion)>) {
+        &self,
+    ) -> (Vec<CounterExpression>, impl Iterator<Item = (Counter, &CodeRegion)>) {
         let mut counter_expressions = Vec::with_capacity(self.expressions.len());
         let mut expression_regions = Vec::with_capacity(self.expressions.len());
         let mut new_indexes = IndexVec::from_elem_n(None, self.expressions.len());
@@ -327,7 +336,7 @@ impl<'tcx> FunctionCoverage<'tcx> {
         (counter_expressions, expression_regions.into_iter())
     }
 
-    fn unreachable_regions<'a>(&'a self) -> impl Iterator<Item = (Counter, &'a CodeRegion)> {
+    fn unreachable_regions(&self) -> impl Iterator<Item = (Counter, &CodeRegion)> {
         self.unreachable_regions.iter().map(|region| (Counter::zero(), region))
     }
 

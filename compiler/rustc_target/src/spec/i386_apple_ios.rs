@@ -1,19 +1,23 @@
-use super::apple_sdk_base::{opts, Arch};
+use super::apple_base::{ios_sim_llvm_target, opts, Arch};
 use crate::spec::{StackProbeType, Target, TargetOptions};
 
 pub fn target() -> Target {
-    let base = opts("ios", Arch::I386);
+    let arch = Arch::I386;
     Target {
-        llvm_target: "i386-apple-ios".to_string(),
+        // Clang automatically chooses a more specific target based on
+        // IPHONEOS_DEPLOYMENT_TARGET.
+        // This is required for the target to pick the right
+        // MACH-O commands, so we do too.
+        llvm_target: ios_sim_llvm_target(arch).into(),
         pointer_width: 32,
         data_layout: "e-m:o-p:32:32-p270:32:32-p271:32:32-p272:64:64-\
             f64:32:64-f80:128-n8:16:32-S128"
-            .to_string(),
-        arch: "x86".to_string(),
+            .into(),
+        arch: arch.target_arch(),
         options: TargetOptions {
             max_atomic_width: Some(64),
-            stack_probes: StackProbeType::InlineOrCall { min_llvm_version_for_inline: (11, 0, 1) },
-            ..base
+            stack_probes: StackProbeType::X86,
+            ..opts("ios", arch)
         },
     }
 }

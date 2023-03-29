@@ -6,17 +6,17 @@
 //!
 //! [rustc dev guide]: https://rustc-dev-guide.rust-lang.org/borrow_check.html
 
-use crate::ich::{NodeIdHashingMode, StableHashingContext};
 use crate::ty::TyCtxt;
+use rustc_data_structures::fx::{FxHashMap, FxIndexMap};
+use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
 use rustc_hir as hir;
 use rustc_hir::Node;
-
-use rustc_data_structures::fx::FxHashMap;
-use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
 use rustc_macros::HashStable;
+use rustc_query_system::ich::StableHashingContext;
 use rustc_span::{Span, DUMMY_SP};
 
 use std::fmt;
+use std::ops::Deref;
 
 /// Represents a statically-describable scope that can be used to
 /// bound the lifetime/region for values.
@@ -94,6 +94,7 @@ impl fmt::Debug for Scope {
             ScopeData::CallSite => write!(fmt, "CallSite({:?})", self.id),
             ScopeData::Arguments => write!(fmt, "Arguments({:?})", self.id),
             ScopeData::Destruction => write!(fmt, "Destruction({:?})", self.id),
+            ScopeData::IfThen => write!(fmt, "IfThen({:?})", self.id),
             ScopeData::Remainder(fsi) => write!(
                 fmt,
                 "Remainder {{ block: {:?}, first_statement_index: {}}}",
@@ -120,6 +121,10 @@ pub enum ScopeData {
     /// Scope of destructors for temporaries of node-id.
     Destruction,
 
+    /// Scope of the condition and then block of an if expression
+    /// Used for variables introduced in an if-let expression.
+    IfThen,
+
     /// Scope following a `let id = expr;` binding in a block.
     Remainder(FirstStatementIndex),
 }
@@ -142,16 +147,15 @@ rustc_index::newtype_index! {
     ///
     /// * The subscope with `first_statement_index == 1` is scope of `c`,
     ///   and thus does not include EXPR_2, but covers the `...`.
-    pub struct FirstStatementIndex {
-        derive [HashStable]
-    }
+    #[derive(HashStable)]
+    pub struct FirstStatementIndex {}
 }
 
 // compilation error if size of `ScopeData` is not the same as a `u32`
 static_assert_size!(ScopeData, 4);
 
 impl Scope {
-    /// Returns a item-local ID associated with this scope.
+    /// Returns an item-local ID associated with this scope.
     ///
     /// N.B., likely to be replaced as API is refined; e.g., pnkfelix
     /// anticipates `fn entry_node_id` and `fn each_exit_node_id`.
@@ -169,9 +173,8 @@ impl Scope {
     /// returned span may not correspond to the span of any `NodeId` in
     /// the AST.
     pub fn span(&self, tcx: TyCtxt<'_>, scope_tree: &ScopeTree) -> Span {
-        let hir_id = match self.hir_id(scope_tree) {
-            Some(hir_id) => hir_id,
-            None => return DUMMY_SP,
+        let Some(hir_id) = self.hir_id(scope_tree) else {
+            return DUMMY_SP;
         };
         let span = tcx.hir().span(hir_id);
         if let ScopeData::Remainder(first_statement_index) = self.data {
@@ -189,7 +192,7 @@ impl Scope {
                 // To avoid issues with macro-generated spans, the span
                 // of the statement must be nested in that of the block.
                 if span.lo() <= stmt_span.lo() && stmt_span.lo() <= span.hi() {
-                    return Span::new(stmt_span.lo(), span.hi(), span.ctxt());
+                    return span.with_lo(stmt_span.lo());
                 }
             }
         }
@@ -200,15 +203,10 @@ impl Scope {
 pub type ScopeDepth = u32;
 
 /// The region scope tree encodes information about region relationships.
-#[derive(Default, Debug)]
+#[derive(TyEncodable, TyDecodable, Default, Debug)]
 pub struct ScopeTree {
     /// If not empty, this body is the root of this region hierarchy.
     pub root_body: Option<hir::HirId>,
-
-    /// The parent of the root body owner, if the latter is an
-    /// an associated const or method, as impls/traits can also
-    /// have lifetime parameters free in this body.
-    pub root_parent: Option<hir::HirId>,
 
     /// Maps from a scope ID to the enclosing scope id;
     /// this is usually corresponding to the lexical nesting, though
@@ -216,36 +214,21 @@ pub struct ScopeTree {
     /// conditional expression or repeating block. (Note that the
     /// enclosing scope ID for the block associated with a closure is
     /// the closure itself.)
-    pub parent_map: FxHashMap<Scope, (Scope, ScopeDepth)>,
+    pub parent_map: FxIndexMap<Scope, (Scope, ScopeDepth)>,
 
     /// Maps from a variable or binding ID to the block in which that
     /// variable is declared.
-    var_map: FxHashMap<hir::ItemLocalId, Scope>,
+    var_map: FxIndexMap<hir::ItemLocalId, Scope>,
 
     /// Maps from a `NodeId` to the associated destruction scope (if any).
-    destruction_scopes: FxHashMap<hir::ItemLocalId, Scope>,
+    destruction_scopes: FxIndexMap<hir::ItemLocalId, Scope>,
 
-    /// `rvalue_scopes` includes entries for those expressions whose
-    /// cleanup scope is larger than the default. The map goes from the
-    /// expression ID to the cleanup scope id. For rvalues not present in
-    /// this table, the appropriate cleanup scope is the innermost
-    /// enclosing statement, conditional expression, or repeating
-    /// block (see `terminating_scopes`).
-    /// In constants, None is used to indicate that certain expressions
-    /// escape into 'static and should have no local cleanup scope.
-    rvalue_scopes: FxHashMap<hir::ItemLocalId, Option<Scope>>,
-
-    /// Encodes the hierarchy of fn bodies. Every fn body (including
-    /// closures) forms its own distinct region hierarchy, rooted in
-    /// the block that is the fn body. This map points from the ID of
-    /// that root block to the ID of the root block for the enclosing
-    /// fn, if any. Thus the map structures the fn bodies into a
-    /// hierarchy based on their lexical mapping. This is used to
-    /// handle the relationships between regions in a fn and in a
-    /// closure defined by that fn. See the "Modeling closures"
-    /// section of the README in infer::region_constraints for
-    /// more details.
-    closure_tree: FxHashMap<hir::ItemLocalId, hir::ItemLocalId>,
+    /// Identifies expressions which, if captured into a temporary, ought to
+    /// have a temporary whose lifetime extends to the end of the enclosing *block*,
+    /// and not the enclosing *statement*. Expressions that are not present in this
+    /// table are not rvalue candidates. The set of rvalue candidates is computed
+    /// during type check based on a traversal of the AST.
+    pub rvalue_candidates: FxHashMap<hir::HirId, RvalueCandidateType>,
 
     /// If there are any `yield` nested within a scope, this map
     /// stores the `Span` of the last one and its index in the
@@ -264,7 +247,8 @@ pub struct ScopeTree {
     /// ```
     ///
     /// With the HIR tree (calls numbered for expository purposes)
-    /// ```
+    ///
+    /// ```text
     ///     Call#0(foo, [Call#1(f), Yield(y), Call#2(bar, Call#3(g))])
     /// ```
     ///
@@ -320,12 +304,23 @@ pub struct ScopeTree {
     /// The reason is that semantically, until the `box` expression returns,
     /// the values are still owned by their containing expressions. So
     /// we'll see that `&x`.
-    pub yield_in_scope: FxHashMap<Scope, YieldData>,
+    pub yield_in_scope: FxHashMap<Scope, Vec<YieldData>>,
 
     /// The number of visit_expr and visit_pat calls done in the body.
     /// Used to sanity check visit_expr/visit_pat call count when
     /// calculating generator interiors.
     pub body_expr_count: FxHashMap<hir::BodyId, usize>,
+}
+
+/// Identifies the reason that a given expression is an rvalue candidate
+/// (see the `rvalue_candidates` field for more information what rvalue
+/// candidates in general). In constants, the `lifetime` field is None
+/// to indicate that certain expressions escape into 'static and
+/// should have no local cleanup scope.
+#[derive(Debug, Copy, Clone, TyEncodable, TyDecodable, HashStable)]
+pub enum RvalueCandidateType {
+    Borrow { target: hir::ItemLocalId, lifetime: Option<Scope> },
+    Pattern { target: hir::ItemLocalId, lifetime: Option<Scope> },
 }
 
 #[derive(Debug, Copy, Clone, TyEncodable, TyDecodable, HashStable)]
@@ -356,35 +351,26 @@ impl ScopeTree {
         self.destruction_scopes.get(&n).cloned()
     }
 
-    /// Records that `sub_closure` is defined within `sup_closure`. These IDs
-    /// should be the ID of the block that is the fn body, which is
-    /// also the root of the region hierarchy for that fn.
-    pub fn record_closure_parent(
-        &mut self,
-        sub_closure: hir::ItemLocalId,
-        sup_closure: hir::ItemLocalId,
-    ) {
-        debug!(
-            "record_closure_parent(sub_closure={:?}, sup_closure={:?})",
-            sub_closure, sup_closure
-        );
-        assert!(sub_closure != sup_closure);
-        let previous = self.closure_tree.insert(sub_closure, sup_closure);
-        assert!(previous.is_none());
-    }
-
     pub fn record_var_scope(&mut self, var: hir::ItemLocalId, lifetime: Scope) {
         debug!("record_var_scope(sub={:?}, sup={:?})", var, lifetime);
         assert!(var != lifetime.item_local_id());
         self.var_map.insert(var, lifetime);
     }
 
-    pub fn record_rvalue_scope(&mut self, var: hir::ItemLocalId, lifetime: Option<Scope>) {
-        debug!("record_rvalue_scope(sub={:?}, sup={:?})", var, lifetime);
-        if let Some(lifetime) = lifetime {
-            assert!(var != lifetime.item_local_id());
+    pub fn record_rvalue_candidate(
+        &mut self,
+        var: hir::HirId,
+        candidate_type: RvalueCandidateType,
+    ) {
+        debug!("record_rvalue_candidate(var={var:?}, type={candidate_type:?})");
+        match &candidate_type {
+            RvalueCandidateType::Borrow { lifetime: Some(lifetime), .. }
+            | RvalueCandidateType::Pattern { lifetime: Some(lifetime), .. } => {
+                assert!(var.local_id != lifetime.item_local_id())
+            }
+            _ => {}
         }
-        self.rvalue_scopes.insert(var, lifetime);
+        self.rvalue_candidates.insert(var, candidate_type);
     }
 
     /// Returns the narrowest scope that encloses `id`, if any.
@@ -392,40 +378,9 @@ impl ScopeTree {
         self.parent_map.get(&id).cloned().map(|(p, _)| p)
     }
 
-    /// Returns the lifetime of the local variable `var_id`
-    pub fn var_scope(&self, var_id: hir::ItemLocalId) -> Scope {
-        self.var_map
-            .get(&var_id)
-            .cloned()
-            .unwrap_or_else(|| bug!("no enclosing scope for id {:?}", var_id))
-    }
-
-    /// Returns the scope when the temp created by `expr_id` will be cleaned up.
-    pub fn temporary_scope(&self, expr_id: hir::ItemLocalId) -> Option<Scope> {
-        // Check for a designated rvalue scope.
-        if let Some(&s) = self.rvalue_scopes.get(&expr_id) {
-            debug!("temporary_scope({:?}) = {:?} [custom]", expr_id, s);
-            return s;
-        }
-
-        // Otherwise, locate the innermost terminating scope
-        // if there's one. Static items, for instance, won't
-        // have an enclosing scope, hence no scope will be
-        // returned.
-        let mut id = Scope { id: expr_id, data: ScopeData::Node };
-
-        while let Some(&(p, _)) = self.parent_map.get(&id) {
-            match p.data {
-                ScopeData::Destruction => {
-                    debug!("temporary_scope({:?}) = {:?} [enclosing]", expr_id, id);
-                    return Some(id);
-                }
-                _ => id = p,
-            }
-        }
-
-        debug!("temporary_scope({:?}) = None", expr_id);
-        None
+    /// Returns the lifetime of the local variable `var_id`, if any.
+    pub fn var_scope(&self, var_id: hir::ItemLocalId) -> Option<Scope> {
+        self.var_map.get(&var_id).cloned()
     }
 
     /// Returns `true` if `subscope` is equal to or is lexically nested inside `superscope`, and
@@ -452,8 +407,8 @@ impl ScopeTree {
 
     /// Checks whether the given scope contains a `yield`. If so,
     /// returns `Some(YieldData)`. If not, returns `None`.
-    pub fn yield_in_scope(&self, scope: Scope) -> Option<YieldData> {
-        self.yield_in_scope.get(&scope).cloned()
+    pub fn yield_in_scope(&self, scope: Scope) -> Option<&[YieldData]> {
+        self.yield_in_scope.get(&scope).map(Deref::deref)
     }
 
     /// Gives the number of expressions visited in a body.
@@ -468,27 +423,20 @@ impl<'a> HashStable<StableHashingContext<'a>> for ScopeTree {
     fn hash_stable(&self, hcx: &mut StableHashingContext<'a>, hasher: &mut StableHasher) {
         let ScopeTree {
             root_body,
-            root_parent,
             ref body_expr_count,
             ref parent_map,
             ref var_map,
             ref destruction_scopes,
-            ref rvalue_scopes,
-            ref closure_tree,
+            ref rvalue_candidates,
             ref yield_in_scope,
         } = *self;
 
-        hcx.with_node_id_hashing_mode(NodeIdHashingMode::HashDefPath, |hcx| {
-            root_body.hash_stable(hcx, hasher);
-            root_parent.hash_stable(hcx, hasher);
-        });
-
+        root_body.hash_stable(hcx, hasher);
         body_expr_count.hash_stable(hcx, hasher);
         parent_map.hash_stable(hcx, hasher);
         var_map.hash_stable(hcx, hasher);
         destruction_scopes.hash_stable(hcx, hasher);
-        rvalue_scopes.hash_stable(hcx, hasher);
-        closure_tree.hash_stable(hcx, hasher);
+        rvalue_candidates.hash_stable(hcx, hasher);
         yield_in_scope.hash_stable(hcx, hasher);
     }
 }

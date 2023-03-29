@@ -9,7 +9,7 @@ RUN apt-get update -y && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-
       curl \
       file \
       g++ \
-      gcc-arm-linux-gnueabihf \
+      g++-arm-linux-gnueabihf \
       git \
       libc6-dev \
       libc6-dev-armhf-cross \
@@ -58,7 +58,7 @@ RUN curl https://www.busybox.net/downloads/busybox-1.32.1.tar.bz2 | tar xjf - &&
 # Download the ubuntu rootfs, which we'll use as a chroot for all our tests.
 WORKDIR /tmp
 RUN mkdir rootfs/ubuntu
-RUN curl http://cdimage.ubuntu.com/ubuntu-base/releases/20.04/release/ubuntu-base-20.04.1-base-armhf.tar.gz | \
+RUN curl https://cdimage.ubuntu.com/ubuntu-base/releases/20.04/release/ubuntu-base-20.04.1-base-armhf.tar.gz | \
       tar xzf - -C rootfs/ubuntu && \
       cd rootfs && mkdir proc sys dev etc etc/init.d
 
@@ -77,6 +77,8 @@ RUN curl -O https://ci-mirrors.rust-lang.org/rustc/vexpress-v2p-ca15-tc1.dtb
 
 COPY scripts/sccache.sh /scripts/
 RUN sh /scripts/sccache.sh
+
+COPY static/gitconfig /etc/gitconfig
 
 ENV RUST_CONFIGURE_ARGS --qemu-armhf-rootfs=/tmp/rootfs
 ENV SCRIPT python3 ../x.py --stage 2 test --host='' --target arm-unknown-linux-gnueabihf

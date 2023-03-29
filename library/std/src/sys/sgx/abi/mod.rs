@@ -1,6 +1,7 @@
 #![cfg_attr(test, allow(unused))] // RT initialization logic is not compiled for test
 
 use crate::io::Write;
+use core::arch::global_asm;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 // runtime features
@@ -15,7 +16,7 @@ pub mod tls;
 pub mod usercalls;
 
 #[cfg(not(test))]
-global_asm!(include_str!("entry.S"));
+global_asm!(include_str!("entry.S"), options(att_syntax));
 
 #[repr(C)]
 struct EntryReturn(u64, u64);
@@ -62,10 +63,12 @@ unsafe extern "C" fn tcs_init(secondary: bool) {
 extern "C" fn entry(p1: u64, p2: u64, p3: u64, secondary: bool, p4: u64, p5: u64) -> EntryReturn {
     // FIXME: how to support TLS in library mode?
     let tls = Box::new(tls::Tls::new());
-    let _tls_guard = unsafe { tls.activate() };
+    let tls_guard = unsafe { tls.activate() };
 
     if secondary {
-        super::thread::Thread::entry();
+        let join_notifier = super::thread::Thread::entry();
+        drop(tls_guard);
+        drop(join_notifier);
 
         EntryReturn(0, 0)
     } else {
@@ -92,7 +95,7 @@ extern "C" fn entry(p1: u64, p2: u64, p3: u64, secondary: bool, p4: u64, p5: u64
 pub(super) fn exit_with_code(code: isize) -> ! {
     if code != 0 {
         if let Some(mut out) = panic::SgxPanicOutput::new() {
-            let _ = write!(out, "Exited with status code {}", code);
+            let _ = write!(out, "Exited with status code {code}");
         }
     }
     usercalls::exit(code != 0);

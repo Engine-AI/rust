@@ -3,7 +3,6 @@
 use rustc_macros::HashStable;
 use rustc_span::Symbol;
 
-use std::cmp::Ord;
 use std::fmt::{self, Debug, Formatter};
 
 rustc_index::newtype_index! {
@@ -11,19 +10,19 @@ rustc_index::newtype_index! {
     /// CounterValueReference.as_u32() (which ascend from 1) or an ExpressionOperandId.as_u32()
     /// (which _*descend*_ from u32::MAX). Id value `0` (zero) represents a virtual counter with a
     /// constant value of `0`.
+    #[derive(HashStable)]
+    #[max = 0xFFFF_FFFF]
+    #[debug_format = "ExpressionOperandId({})"]
     pub struct ExpressionOperandId {
-        derive [HashStable]
-        DEBUG_FORMAT = "ExpressionOperandId({})",
-        MAX = 0xFFFF_FFFF,
     }
 }
 
 impl ExpressionOperandId {
     /// An expression operand for a "zero counter", as described in the following references:
     ///
-    /// * <https://github.com/rust-lang/llvm-project/blob/rustc/11.0-2020-10-12/llvm/docs/CoverageMappingFormat.rst#counter>
-    /// * <https://github.com/rust-lang/llvm-project/blob/rustc/11.0-2020-10-12/llvm/docs/CoverageMappingFormat.rst#tag>
-    /// * <https://github.com/rust-lang/llvm-project/blob/rustc/11.0-2020-10-12/llvm/docs/CoverageMappingFormat.rst#counter-expressions>
+    /// * <https://github.com/rust-lang/llvm-project/blob/rustc/13.0-2021-09-30/llvm/docs/CoverageMappingFormat.rst#counter>
+    /// * <https://github.com/rust-lang/llvm-project/blob/rustc/13.0-2021-09-30/llvm/docs/CoverageMappingFormat.rst#tag>
+    /// * <https://github.com/rust-lang/llvm-project/blob/rustc/13.0-2021-09-30/llvm/docs/CoverageMappingFormat.rst#counter-expressions>
     ///
     /// This operand can be used to count two or more separate code regions with a single counter,
     /// if they run sequentially with no branches, by injecting the `Counter` in a `BasicBlock` for
@@ -33,11 +32,10 @@ impl ExpressionOperandId {
 }
 
 rustc_index::newtype_index! {
-    pub struct CounterValueReference {
-        derive [HashStable]
-        DEBUG_FORMAT = "CounterValueReference({})",
-        MAX = 0xFFFF_FFFF,
-    }
+    #[derive(HashStable)]
+    #[max = 0xFFFF_FFFF]
+    #[debug_format = "CounterValueReference({})"]
+    pub struct CounterValueReference {}
 }
 
 impl CounterValueReference {
@@ -46,7 +44,7 @@ impl CounterValueReference {
 
     /// Returns explicitly-requested zero-based version of the counter id, used
     /// during codegen. LLVM expects zero-based indexes.
-    pub fn zero_based_index(&self) -> u32 {
+    pub fn zero_based_index(self) -> u32 {
         let one_based_index = self.as_u32();
         debug_assert!(one_based_index > 0);
         one_based_index - 1
@@ -57,33 +55,30 @@ rustc_index::newtype_index! {
     /// InjectedExpressionId.as_u32() converts to ExpressionOperandId.as_u32()
     ///
     /// Values descend from u32::MAX.
-    pub struct InjectedExpressionId {
-        derive [HashStable]
-        DEBUG_FORMAT = "InjectedExpressionId({})",
-        MAX = 0xFFFF_FFFF,
-    }
+    #[derive(HashStable)]
+    #[max = 0xFFFF_FFFF]
+    #[debug_format = "InjectedExpressionId({})"]
+    pub struct InjectedExpressionId {}
 }
 
 rustc_index::newtype_index! {
     /// InjectedExpressionIndex.as_u32() translates to u32::MAX - ExpressionOperandId.as_u32()
     ///
     /// Values ascend from 0.
-    pub struct InjectedExpressionIndex {
-        derive [HashStable]
-        DEBUG_FORMAT = "InjectedExpressionIndex({})",
-        MAX = 0xFFFF_FFFF,
-    }
+    #[derive(HashStable)]
+    #[max = 0xFFFF_FFFF]
+    #[debug_format = "InjectedExpressionIndex({})"]
+    pub struct InjectedExpressionIndex {}
 }
 
 rustc_index::newtype_index! {
     /// MappedExpressionIndex values ascend from zero, and are recalculated indexes based on their
     /// array position in the LLVM coverage map "Expressions" array, which is assembled during the
     /// "mapgen" process. They cannot be computed algorithmically, from the other `newtype_index`s.
-    pub struct MappedExpressionIndex {
-        derive [HashStable]
-        DEBUG_FORMAT = "MappedExpressionIndex({})",
-        MAX = 0xFFFF_FFFF,
-    }
+    #[derive(HashStable)]
+    #[max = 0xFFFF_FFFF]
+    #[debug_format = "MappedExpressionIndex({})"]
+    pub struct MappedExpressionIndex {}
 }
 
 impl From<CounterValueReference> for ExpressionOperandId {
@@ -100,7 +95,7 @@ impl From<InjectedExpressionId> for ExpressionOperandId {
     }
 }
 
-#[derive(Clone, PartialEq, TyEncodable, TyDecodable, Hash, HashStable, TypeFoldable)]
+#[derive(Clone, PartialEq, TyEncodable, TyDecodable, Hash, HashStable, TypeFoldable, TypeVisitable)]
 pub enum CoverageKind {
     Counter {
         function_source_hash: u64,
@@ -140,7 +135,10 @@ impl Debug for CoverageKind {
                 "Expression({:?}) = {} {} {}",
                 id.index(),
                 lhs.index(),
-                if *op == Op::Add { "+" } else { "-" },
+                match op {
+                    Op::Add => "+",
+                    Op::Subtract => "-",
+                },
                 rhs.index(),
             ),
             Unreachable => write!(fmt, "Unreachable"),
@@ -148,18 +146,8 @@ impl Debug for CoverageKind {
     }
 }
 
-#[derive(
-    Clone,
-    TyEncodable,
-    TyDecodable,
-    Hash,
-    HashStable,
-    TypeFoldable,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord
-)]
+#[derive(Clone, TyEncodable, TyDecodable, Hash, HashStable, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(TypeFoldable, TypeVisitable)]
 pub struct CodeRegion {
     pub file_name: Symbol,
     pub start_line: u32,
@@ -178,7 +166,8 @@ impl Debug for CodeRegion {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, TyEncodable, TyDecodable, Hash, HashStable, TypeFoldable)]
+#[derive(Copy, Clone, Debug, PartialEq, TyEncodable, TyDecodable, Hash, HashStable)]
+#[derive(TypeFoldable, TypeVisitable)]
 pub enum Op {
     Subtract,
     Add,

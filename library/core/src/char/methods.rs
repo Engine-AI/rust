@@ -1,6 +1,5 @@
 //! impl char {}
 
-use crate::intrinsics::likely;
 use crate::slice;
 use crate::str::from_utf8_unchecked_mut;
 use crate::unicode::printable::is_printable;
@@ -8,16 +7,20 @@ use crate::unicode::{self, conversions};
 
 use super::*;
 
-#[lang = "char"]
 impl char {
-    /// The highest valid code point a `char` can have.
+    /// The highest valid code point a `char` can have, `'\u{10FFFF}'`.
     ///
-    /// A `char` is a [Unicode Scalar Value], which means that it is a [Code
-    /// Point], but only ones within a certain range. `MAX` is the highest valid
-    /// code point that's a valid [Unicode Scalar Value].
+    /// # Examples
     ///
-    /// [Unicode Scalar Value]: http://www.unicode.org/glossary/#unicode_scalar_value
-    /// [Code Point]: http://www.unicode.org/glossary/#code_point
+    /// ```
+    /// # fn something_which_returns_char() -> char { 'a' }
+    /// let c: char = something_which_returns_char();
+    /// assert!(c <= char::MAX);
+    ///
+    /// let value_at_max = char::MAX as u32;
+    /// assert_eq!(char::from_u32(value_at_max), Some('\u{10FFFF}'));
+    /// assert_eq!(char::from_u32(value_at_max + 1), None);
+    /// ```
     #[stable(feature = "assoc_char_consts", since = "1.52.0")]
     pub const MAX: char = '\u{10ffff}';
 
@@ -25,11 +28,11 @@ impl char {
     /// decoding error.
     ///
     /// It can occur, for example, when giving ill-formed UTF-8 bytes to
-    /// [`String::from_utf8_lossy`](string/struct.String.html#method.from_utf8_lossy).
+    /// [`String::from_utf8_lossy`](../std/string/struct.String.html#method.from_utf8_lossy).
     #[stable(feature = "assoc_char_consts", since = "1.52.0")]
     pub const REPLACEMENT_CHARACTER: char = '\u{FFFD}';
 
-    /// The version of [Unicode](http://www.unicode.org/) that the Unicode parts of
+    /// The version of [Unicode](https://www.unicode.org/) that the Unicode parts of
     /// `char` and `str` methods are based on.
     ///
     /// New versions of Unicode are released regularly and subsequently all methods
@@ -50,15 +53,13 @@ impl char {
     /// Basic usage:
     ///
     /// ```
-    /// use std::char::decode_utf16;
-    ///
     /// // 𝄞mus<invalid>ic<invalid>
     /// let v = [
     ///     0xD834, 0xDD1E, 0x006d, 0x0075, 0x0073, 0xDD1E, 0x0069, 0x0063, 0xD834,
     /// ];
     ///
     /// assert_eq!(
-    ///     decode_utf16(v.iter().cloned())
+    ///     char::decode_utf16(v)
     ///         .map(|r| r.map_err(|e| e.unpaired_surrogate()))
     ///         .collect::<Vec<_>>(),
     ///     vec![
@@ -74,16 +75,14 @@ impl char {
     /// A lossy decoder can be obtained by replacing `Err` results with the replacement character:
     ///
     /// ```
-    /// use std::char::{decode_utf16, REPLACEMENT_CHARACTER};
-    ///
     /// // 𝄞mus<invalid>ic<invalid>
     /// let v = [
     ///     0xD834, 0xDD1E, 0x006d, 0x0075, 0x0073, 0xDD1E, 0x0069, 0x0063, 0xD834,
     /// ];
     ///
     /// assert_eq!(
-    ///     decode_utf16(v.iter().cloned())
-    ///        .map(|r| r.unwrap_or(REPLACEMENT_CHARACTER))
+    ///     char::decode_utf16(v)
+    ///        .map(|r| r.unwrap_or(char::REPLACEMENT_CHARACTER))
     ///        .collect::<String>(),
     ///     "𝄞mus�ic�"
     /// );
@@ -97,7 +96,7 @@ impl char {
     /// Converts a `u32` to a `char`.
     ///
     /// Note that all `char`s are valid [`u32`]s, and can be cast to one with
-    /// `as`:
+    /// [`as`](../std/keyword.as.html):
     ///
     /// ```
     /// let c = '💯';
@@ -120,8 +119,6 @@ impl char {
     /// Basic usage:
     ///
     /// ```
-    /// use std::char;
-    ///
     /// let c = char::from_u32(0x2764);
     ///
     /// assert_eq!(Some('❤'), c);
@@ -130,15 +127,15 @@ impl char {
     /// Returning `None` when the input is not a valid `char`:
     ///
     /// ```
-    /// use std::char;
-    ///
     /// let c = char::from_u32(0x110000);
     ///
     /// assert_eq!(None, c);
     /// ```
     #[stable(feature = "assoc_char_funcs", since = "1.52.0")]
+    #[rustc_const_stable(feature = "const_char_convert", since = "1.67.0")]
+    #[must_use]
     #[inline]
-    pub fn from_u32(i: u32) -> Option<char> {
+    pub const fn from_u32(i: u32) -> Option<char> {
         super::convert::from_u32(i)
     }
 
@@ -171,15 +168,15 @@ impl char {
     /// Basic usage:
     ///
     /// ```
-    /// use std::char;
-    ///
     /// let c = unsafe { char::from_u32_unchecked(0x2764) };
     ///
     /// assert_eq!('❤', c);
     /// ```
     #[stable(feature = "assoc_char_funcs", since = "1.52.0")]
+    #[rustc_const_unstable(feature = "const_char_from_u32_unchecked", issue = "89259")]
+    #[must_use]
     #[inline]
-    pub unsafe fn from_u32_unchecked(i: u32) -> char {
+    pub const unsafe fn from_u32_unchecked(i: u32) -> char {
         // SAFETY: the safety contract must be upheld by the caller.
         unsafe { super::convert::from_u32_unchecked(i) }
     }
@@ -203,8 +200,6 @@ impl char {
     /// Basic usage:
     ///
     /// ```
-    /// use std::char;
-    ///
     /// let c = char::from_digit(4, 10);
     ///
     /// assert_eq!(Some('4'), c);
@@ -218,8 +213,6 @@ impl char {
     /// Returning `None` when the input is not a digit:
     ///
     /// ```
-    /// use std::char;
-    ///
     /// let c = char::from_digit(20, 10);
     ///
     /// assert_eq!(None, c);
@@ -228,14 +221,14 @@ impl char {
     /// Passing a large radix, causing a panic:
     ///
     /// ```should_panic
-    /// use std::char;
-    ///
     /// // this panics
-    /// char::from_digit(1, 37);
+    /// let _c = char::from_digit(1, 37);
     /// ```
     #[stable(feature = "assoc_char_funcs", since = "1.52.0")]
+    #[rustc_const_stable(feature = "const_char_convert", since = "1.67.0")]
+    #[must_use]
     #[inline]
-    pub fn from_digit(num: u32, radix: u32) -> Option<char> {
+    pub const fn from_digit(num: u32, radix: u32) -> Option<char> {
         super::convert::from_digit(num, radix)
     }
 
@@ -326,27 +319,26 @@ impl char {
     ///
     /// ```should_panic
     /// // this panics
-    /// '1'.to_digit(37);
+    /// let _ = '1'.to_digit(37);
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
+    #[rustc_const_stable(feature = "const_char_convert", since = "1.67.0")]
+    #[must_use = "this returns the result of the operation, \
+                  without modifying the original"]
     #[inline]
-    pub fn to_digit(self, radix: u32) -> Option<u32> {
-        assert!(radix <= 36, "to_digit: radix is too high (maximum 36)");
-        // the code is split up here to improve execution speed for cases where
-        // the `radix` is constant and 10 or smaller
-        let val = if likely(radix <= 10) {
-            // If not a digit, a number greater than radix will be created.
-            (self as u32).wrapping_sub('0' as u32)
-        } else {
-            match self {
-                '0'..='9' => self as u32 - '0' as u32,
-                'a'..='z' => self as u32 - 'a' as u32 + 10,
-                'A'..='Z' => self as u32 - 'A' as u32 + 10,
-                _ => return None,
+    pub const fn to_digit(self, radix: u32) -> Option<u32> {
+        // If not a digit, a number greater than radix will be created.
+        let mut digit = (self as u32).wrapping_sub('0' as u32);
+        if radix > 10 {
+            assert!(radix <= 36, "to_digit: radix is too high (maximum 36)");
+            if digit < 10 {
+                return Some(digit);
             }
-        };
-
-        if val < radix { Some(val) } else { None }
+            // Force the 6th bit to be set to ensure ascii is lower case.
+            digit = (self as u32 | 0b10_0000).wrapping_sub('a' as u32).saturating_add(10);
+        }
+        // FIXME: once then_some is const fn, use it here
+        if digit < radix { Some(digit) } else { None }
     }
 
     /// Returns an iterator that yields the hexadecimal Unicode escape of a
@@ -361,7 +353,7 @@ impl char {
     ///
     /// ```
     /// for c in '❤'.escape_unicode() {
-    ///     print!("{}", c);
+    ///     print!("{c}");
     /// }
     /// println!();
     /// ```
@@ -378,11 +370,13 @@ impl char {
     /// println!("\\u{{2764}}");
     /// ```
     ///
-    /// Using `to_string`:
+    /// Using [`to_string`](../std/string/trait.ToString.html#tymethod.to_string):
     ///
     /// ```
     /// assert_eq!('❤'.escape_unicode().to_string(), "\\u{2764}");
     /// ```
+    #[must_use = "this returns the escaped char as an iterator, \
+                  without modifying the original"]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
     pub fn escape_unicode(self) -> EscapeUnicode {
@@ -410,6 +404,7 @@ impl char {
     #[inline]
     pub(crate) fn escape_debug_ext(self, args: EscapeDebugExtArgs) -> EscapeDebug {
         let init_state = match self {
+            '\0' => EscapeDefaultState::Backslash('0'),
             '\t' => EscapeDefaultState::Backslash('t'),
             '\r' => EscapeDefaultState::Backslash('r'),
             '\n' => EscapeDefaultState::Backslash('n'),
@@ -428,7 +423,7 @@ impl char {
     /// Returns an iterator that yields the literal escape code of a character
     /// as `char`s.
     ///
-    /// This will escape the characters similar to the `Debug` implementations
+    /// This will escape the characters similar to the [`Debug`](core::fmt::Debug) implementations
     /// of `str` or `char`.
     ///
     /// # Examples
@@ -437,7 +432,7 @@ impl char {
     ///
     /// ```
     /// for c in '\n'.escape_debug() {
-    ///     print!("{}", c);
+    ///     print!("{c}");
     /// }
     /// println!();
     /// ```
@@ -454,11 +449,13 @@ impl char {
     /// println!("\\n");
     /// ```
     ///
-    /// Using `to_string`:
+    /// Using [`to_string`](../std/string/trait.ToString.html#tymethod.to_string):
     ///
     /// ```
     /// assert_eq!('\n'.escape_debug().to_string(), "\\n");
     /// ```
+    #[must_use = "this returns the escaped char as an iterator, \
+                  without modifying the original"]
     #[stable(feature = "char_escape_debug", since = "1.20.0")]
     #[inline]
     pub fn escape_debug(self) -> EscapeDebug {
@@ -491,7 +488,7 @@ impl char {
     ///
     /// ```
     /// for c in '"'.escape_default() {
-    ///     print!("{}", c);
+    ///     print!("{c}");
     /// }
     /// println!();
     /// ```
@@ -508,11 +505,13 @@ impl char {
     /// println!("\\\"");
     /// ```
     ///
-    /// Using `to_string`:
+    /// Using [`to_string`](../std/string/trait.ToString.html#tymethod.to_string):
     ///
     /// ```
     /// assert_eq!('"'.escape_default().to_string(), "\\\"");
     /// ```
+    #[must_use = "this returns the escaped char as an iterator, \
+                  without modifying the original"]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
     pub fn escape_default(self) -> EscapeDefault {
@@ -582,9 +581,14 @@ impl char {
     /// Returns the number of 16-bit code units this `char` would need if
     /// encoded in UTF-16.
     ///
+    /// That number of code units is always either 1 or 2, for unicode scalar values in
+    /// the [basic multilingual plane] or [supplementary planes] respectively.
+    ///
     /// See the documentation for [`len_utf8()`] for more explanation of this
     /// concept. This function is a mirror, but for UTF-16 instead of UTF-8.
     ///
+    /// [basic multilingual plane]: http://www.unicode.org/glossary/#basic_multilingual_plane
+    /// [supplementary planes]: http://www.unicode.org/glossary/#supplementary_planes
     /// [`len_utf8()`]: #method.len_utf8
     ///
     /// # Examples
@@ -698,6 +702,7 @@ impl char {
     /// // love is many things, but it is not alphabetic
     /// assert!(!c.is_alphabetic());
     /// ```
+    #[must_use]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
     pub fn is_alphabetic(self) -> bool {
@@ -730,9 +735,19 @@ impl char {
     /// assert!(!'中'.is_lowercase());
     /// assert!(!' '.is_lowercase());
     /// ```
+    ///
+    /// In a const context:
+    ///
+    /// ```
+    /// #![feature(const_unicode_case_lookup)]
+    /// const CAPITAL_DELTA_IS_LOWERCASE: bool = 'Δ'.is_lowercase();
+    /// assert!(!CAPITAL_DELTA_IS_LOWERCASE);
+    /// ```
+    #[must_use]
     #[stable(feature = "rust1", since = "1.0.0")]
+    #[rustc_const_unstable(feature = "const_unicode_case_lookup", issue = "101400")]
     #[inline]
-    pub fn is_lowercase(self) -> bool {
+    pub const fn is_lowercase(self) -> bool {
         match self {
             'a'..='z' => true,
             c => c > '\x7f' && unicode::Lowercase(c),
@@ -762,9 +777,19 @@ impl char {
     /// assert!(!'中'.is_uppercase());
     /// assert!(!' '.is_uppercase());
     /// ```
+    ///
+    /// In a const context:
+    ///
+    /// ```
+    /// #![feature(const_unicode_case_lookup)]
+    /// const CAPITAL_DELTA_IS_UPPERCASE: bool = 'Δ'.is_uppercase();
+    /// assert!(CAPITAL_DELTA_IS_UPPERCASE);
+    /// ```
+    #[must_use]
     #[stable(feature = "rust1", since = "1.0.0")]
+    #[rustc_const_unstable(feature = "const_unicode_case_lookup", issue = "101400")]
     #[inline]
-    pub fn is_uppercase(self) -> bool {
+    pub const fn is_uppercase(self) -> bool {
         match self {
             'A'..='Z' => true,
             c => c > '\x7f' && unicode::Uppercase(c),
@@ -785,11 +810,15 @@ impl char {
     /// ```
     /// assert!(' '.is_whitespace());
     ///
+    /// // line break
+    /// assert!('\n'.is_whitespace());
+    ///
     /// // a non-breaking space
     /// assert!('\u{A0}'.is_whitespace());
     ///
     /// assert!(!'越'.is_whitespace());
     /// ```
+    #[must_use]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
     pub fn is_whitespace(self) -> bool {
@@ -818,6 +847,7 @@ impl char {
     /// assert!('و'.is_alphanumeric());
     /// assert!('藏'.is_alphanumeric());
     /// ```
+    #[must_use]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
     pub fn is_alphanumeric(self) -> bool {
@@ -843,6 +873,7 @@ impl char {
     /// assert!(''.is_control());
     /// assert!(!'q'.is_control());
     /// ```
+    #[must_use]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
     pub fn is_control(self) -> bool {
@@ -858,6 +889,7 @@ impl char {
     /// [uax29]: https://www.unicode.org/reports/tr29/
     /// [ucd]: https://www.unicode.org/reports/tr44/
     /// [`DerivedCoreProperties.txt`]: https://www.unicode.org/Public/UCD/latest/ucd/DerivedCoreProperties.txt
+    #[must_use]
     #[inline]
     pub(crate) fn is_grapheme_extended(self) -> bool {
         unicode::Grapheme_Extend(self)
@@ -868,6 +900,14 @@ impl char {
     /// The general categories for numbers (`Nd` for decimal digits, `Nl` for letter-like numeric
     /// characters, and `No` for other numeric characters) are specified in the [Unicode Character
     /// Database][ucd] [`UnicodeData.txt`].
+    ///
+    /// This method doesn't cover everything that could be considered a number, e.g. ideographic numbers like '三'.
+    /// If you want everything including characters with overlapping purposes then you might want to use
+    /// a unicode or language-processing library that exposes the appropriate character properties instead
+    /// of looking at the unicode categories.
+    ///
+    /// If you want to parse ASCII decimal digits (0-9) or ASCII base-N, use
+    /// `is_ascii_digit` or `is_digit` instead.
     ///
     /// [Unicode Standard]: https://www.unicode.org/versions/latest/
     /// [ucd]: https://www.unicode.org/reports/tr44/
@@ -886,7 +926,9 @@ impl char {
     /// assert!(!'K'.is_numeric());
     /// assert!(!'و'.is_numeric());
     /// assert!(!'藏'.is_numeric());
+    /// assert!(!'三'.is_numeric());
     /// ```
+    #[must_use]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
     pub fn is_numeric(self) -> bool {
@@ -926,7 +968,7 @@ impl char {
     ///
     /// ```
     /// for c in 'İ'.to_lowercase() {
-    ///     print!("{}", c);
+    ///     print!("{c}");
     /// }
     /// println!();
     /// ```
@@ -943,7 +985,7 @@ impl char {
     /// println!("i\u{307}");
     /// ```
     ///
-    /// Using `to_string`:
+    /// Using [`to_string`](../std/string/trait.ToString.html#tymethod.to_string):
     ///
     /// ```
     /// assert_eq!('C'.to_lowercase().to_string(), "c");
@@ -955,6 +997,8 @@ impl char {
     /// // convert into themselves.
     /// assert_eq!('山'.to_lowercase().to_string(), "山");
     /// ```
+    #[must_use = "this returns the lowercase character as a new iterator, \
+                  without modifying the original"]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
     pub fn to_lowercase(self) -> ToLowercase {
@@ -964,7 +1008,7 @@ impl char {
     /// Returns an iterator that yields the uppercase mapping of this `char` as one or more
     /// `char`s.
     ///
-    /// If this `char` does not have a uppercase mapping, the iterator yields the same `char`.
+    /// If this `char` does not have an uppercase mapping, the iterator yields the same `char`.
     ///
     /// If this `char` has a one-to-one uppercase mapping given by the [Unicode Character
     /// Database][ucd] [`UnicodeData.txt`], the iterator yields that `char`.
@@ -991,7 +1035,7 @@ impl char {
     ///
     /// ```
     /// for c in 'ß'.to_uppercase() {
-    ///     print!("{}", c);
+    ///     print!("{c}");
     /// }
     /// println!();
     /// ```
@@ -1008,7 +1052,7 @@ impl char {
     /// println!("SS");
     /// ```
     ///
-    /// Using `to_string`:
+    /// Using [`to_string`](../std/string/trait.ToString.html#tymethod.to_string):
     ///
     /// ```
     /// assert_eq!('c'.to_uppercase().to_string(), "C");
@@ -1045,6 +1089,8 @@ impl char {
     /// ```
     ///
     /// holds across languages.
+    #[must_use = "this returns the uppercase character as a new iterator, \
+                  without modifying the original"]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
     pub fn to_uppercase(self) -> ToUppercase {
@@ -1062,8 +1108,9 @@ impl char {
     /// assert!(ascii.is_ascii());
     /// assert!(!non_ascii.is_ascii());
     /// ```
+    #[must_use]
     #[stable(feature = "ascii_methods_on_intrinsics", since = "1.23.0")]
-    #[rustc_const_stable(feature = "const_ascii_methods_on_intrinsics", since = "1.32.0")]
+    #[rustc_const_stable(feature = "const_char_is_ascii", since = "1.32.0")]
     #[inline]
     pub const fn is_ascii(&self) -> bool {
         *self as u32 <= 0x7F
@@ -1091,6 +1138,7 @@ impl char {
     ///
     /// [`make_ascii_uppercase()`]: #method.make_ascii_uppercase
     /// [`to_uppercase()`]: #method.to_uppercase
+    #[must_use = "to uppercase the value in-place, use `make_ascii_uppercase()`"]
     #[stable(feature = "ascii_methods_on_intrinsics", since = "1.23.0")]
     #[rustc_const_stable(feature = "const_ascii_methods_on_intrinsics", since = "1.52.0")]
     #[inline]
@@ -1124,6 +1172,7 @@ impl char {
     ///
     /// [`make_ascii_lowercase()`]: #method.make_ascii_lowercase
     /// [`to_lowercase()`]: #method.to_lowercase
+    #[must_use = "to lowercase the value in-place, use `make_ascii_lowercase()`"]
     #[stable(feature = "ascii_methods_on_intrinsics", since = "1.23.0")]
     #[rustc_const_stable(feature = "const_ascii_methods_on_intrinsics", since = "1.52.0")]
     #[inline]
@@ -1137,7 +1186,7 @@ impl char {
 
     /// Checks that two values are an ASCII case-insensitive match.
     ///
-    /// Equivalent to `to_ascii_lowercase(a) == to_ascii_lowercase(b)`.
+    /// Equivalent to <code>[to_ascii_lowercase]\(a) == [to_ascii_lowercase]\(b)</code>.
     ///
     /// # Examples
     ///
@@ -1150,6 +1199,8 @@ impl char {
     /// assert!(upper_a.eq_ignore_ascii_case(&upper_a));
     /// assert!(!upper_a.eq_ignore_ascii_case(&lower_z));
     /// ```
+    ///
+    /// [to_ascii_lowercase]: #method.to_ascii_lowercase
     #[stable(feature = "ascii_methods_on_intrinsics", since = "1.23.0")]
     #[rustc_const_stable(feature = "const_ascii_methods_on_intrinsics", since = "1.52.0")]
     #[inline]
@@ -1223,7 +1274,7 @@ impl char {
     /// let percent = '%';
     /// let space = ' ';
     /// let lf = '\n';
-    /// let esc: char = 0x1b_u8.into();
+    /// let esc = '\x1b';
     ///
     /// assert!(uppercase_a.is_ascii_alphabetic());
     /// assert!(uppercase_g.is_ascii_alphabetic());
@@ -1235,6 +1286,7 @@ impl char {
     /// assert!(!lf.is_ascii_alphabetic());
     /// assert!(!esc.is_ascii_alphabetic());
     /// ```
+    #[must_use]
     #[stable(feature = "ascii_ctype_on_intrinsics", since = "1.24.0")]
     #[rustc_const_stable(feature = "const_ascii_ctype_on_intrinsics", since = "1.47.0")]
     #[inline]
@@ -1256,7 +1308,7 @@ impl char {
     /// let percent = '%';
     /// let space = ' ';
     /// let lf = '\n';
-    /// let esc: char = 0x1b_u8.into();
+    /// let esc = '\x1b';
     ///
     /// assert!(uppercase_a.is_ascii_uppercase());
     /// assert!(uppercase_g.is_ascii_uppercase());
@@ -1268,6 +1320,7 @@ impl char {
     /// assert!(!lf.is_ascii_uppercase());
     /// assert!(!esc.is_ascii_uppercase());
     /// ```
+    #[must_use]
     #[stable(feature = "ascii_ctype_on_intrinsics", since = "1.24.0")]
     #[rustc_const_stable(feature = "const_ascii_ctype_on_intrinsics", since = "1.47.0")]
     #[inline]
@@ -1289,7 +1342,7 @@ impl char {
     /// let percent = '%';
     /// let space = ' ';
     /// let lf = '\n';
-    /// let esc: char = 0x1b_u8.into();
+    /// let esc = '\x1b';
     ///
     /// assert!(!uppercase_a.is_ascii_lowercase());
     /// assert!(!uppercase_g.is_ascii_lowercase());
@@ -1301,6 +1354,7 @@ impl char {
     /// assert!(!lf.is_ascii_lowercase());
     /// assert!(!esc.is_ascii_lowercase());
     /// ```
+    #[must_use]
     #[stable(feature = "ascii_ctype_on_intrinsics", since = "1.24.0")]
     #[rustc_const_stable(feature = "const_ascii_ctype_on_intrinsics", since = "1.47.0")]
     #[inline]
@@ -1325,7 +1379,7 @@ impl char {
     /// let percent = '%';
     /// let space = ' ';
     /// let lf = '\n';
-    /// let esc: char = 0x1b_u8.into();
+    /// let esc = '\x1b';
     ///
     /// assert!(uppercase_a.is_ascii_alphanumeric());
     /// assert!(uppercase_g.is_ascii_alphanumeric());
@@ -1337,6 +1391,7 @@ impl char {
     /// assert!(!lf.is_ascii_alphanumeric());
     /// assert!(!esc.is_ascii_alphanumeric());
     /// ```
+    #[must_use]
     #[stable(feature = "ascii_ctype_on_intrinsics", since = "1.24.0")]
     #[rustc_const_stable(feature = "const_ascii_ctype_on_intrinsics", since = "1.47.0")]
     #[inline]
@@ -1358,7 +1413,7 @@ impl char {
     /// let percent = '%';
     /// let space = ' ';
     /// let lf = '\n';
-    /// let esc: char = 0x1b_u8.into();
+    /// let esc = '\x1b';
     ///
     /// assert!(!uppercase_a.is_ascii_digit());
     /// assert!(!uppercase_g.is_ascii_digit());
@@ -1370,11 +1425,44 @@ impl char {
     /// assert!(!lf.is_ascii_digit());
     /// assert!(!esc.is_ascii_digit());
     /// ```
+    #[must_use]
     #[stable(feature = "ascii_ctype_on_intrinsics", since = "1.24.0")]
     #[rustc_const_stable(feature = "const_ascii_ctype_on_intrinsics", since = "1.47.0")]
     #[inline]
     pub const fn is_ascii_digit(&self) -> bool {
         matches!(*self, '0'..='9')
+    }
+
+    /// Checks if the value is an ASCII octal digit:
+    /// U+0030 '0' ..= U+0037 '7'.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(is_ascii_octdigit)]
+    ///
+    /// let uppercase_a = 'A';
+    /// let a = 'a';
+    /// let zero = '0';
+    /// let seven = '7';
+    /// let nine = '9';
+    /// let percent = '%';
+    /// let lf = '\n';
+    ///
+    /// assert!(!uppercase_a.is_ascii_octdigit());
+    /// assert!(!a.is_ascii_octdigit());
+    /// assert!(zero.is_ascii_octdigit());
+    /// assert!(seven.is_ascii_octdigit());
+    /// assert!(!nine.is_ascii_octdigit());
+    /// assert!(!percent.is_ascii_octdigit());
+    /// assert!(!lf.is_ascii_octdigit());
+    /// ```
+    #[must_use]
+    #[unstable(feature = "is_ascii_octdigit", issue = "101288")]
+    #[rustc_const_unstable(feature = "is_ascii_octdigit", issue = "101288")]
+    #[inline]
+    pub const fn is_ascii_octdigit(&self) -> bool {
+        matches!(*self, '0'..='7')
     }
 
     /// Checks if the value is an ASCII hexadecimal digit:
@@ -1394,7 +1482,7 @@ impl char {
     /// let percent = '%';
     /// let space = ' ';
     /// let lf = '\n';
-    /// let esc: char = 0x1b_u8.into();
+    /// let esc = '\x1b';
     ///
     /// assert!(uppercase_a.is_ascii_hexdigit());
     /// assert!(!uppercase_g.is_ascii_hexdigit());
@@ -1406,6 +1494,7 @@ impl char {
     /// assert!(!lf.is_ascii_hexdigit());
     /// assert!(!esc.is_ascii_hexdigit());
     /// ```
+    #[must_use]
     #[stable(feature = "ascii_ctype_on_intrinsics", since = "1.24.0")]
     #[rustc_const_stable(feature = "const_ascii_ctype_on_intrinsics", since = "1.47.0")]
     #[inline]
@@ -1431,7 +1520,7 @@ impl char {
     /// let percent = '%';
     /// let space = ' ';
     /// let lf = '\n';
-    /// let esc: char = 0x1b_u8.into();
+    /// let esc = '\x1b';
     ///
     /// assert!(!uppercase_a.is_ascii_punctuation());
     /// assert!(!uppercase_g.is_ascii_punctuation());
@@ -1443,6 +1532,7 @@ impl char {
     /// assert!(!lf.is_ascii_punctuation());
     /// assert!(!esc.is_ascii_punctuation());
     /// ```
+    #[must_use]
     #[stable(feature = "ascii_ctype_on_intrinsics", since = "1.24.0")]
     #[rustc_const_stable(feature = "const_ascii_ctype_on_intrinsics", since = "1.47.0")]
     #[inline]
@@ -1464,7 +1554,7 @@ impl char {
     /// let percent = '%';
     /// let space = ' ';
     /// let lf = '\n';
-    /// let esc: char = 0x1b_u8.into();
+    /// let esc = '\x1b';
     ///
     /// assert!(uppercase_a.is_ascii_graphic());
     /// assert!(uppercase_g.is_ascii_graphic());
@@ -1476,6 +1566,7 @@ impl char {
     /// assert!(!lf.is_ascii_graphic());
     /// assert!(!esc.is_ascii_graphic());
     /// ```
+    #[must_use]
     #[stable(feature = "ascii_ctype_on_intrinsics", since = "1.24.0")]
     #[rustc_const_stable(feature = "const_ascii_ctype_on_intrinsics", since = "1.47.0")]
     #[inline]
@@ -1500,8 +1591,8 @@ impl char {
     /// before using this function.
     ///
     /// [infra-aw]: https://infra.spec.whatwg.org/#ascii-whitespace
-    /// [pct]: http://pubs.opengroup.org/onlinepubs/9699919799/basedefs/V1_chap07.html#tag_07_03_01
-    /// [bfs]: http://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html#tag_18_06_05
+    /// [pct]: https://pubs.opengroup.org/onlinepubs/9699919799/basedefs/V1_chap07.html#tag_07_03_01
+    /// [bfs]: https://pubs.opengroup.org/onlinepubs/9699919799/utilities/V3_chap02.html#tag_18_06_05
     ///
     /// # Examples
     ///
@@ -1514,7 +1605,7 @@ impl char {
     /// let percent = '%';
     /// let space = ' ';
     /// let lf = '\n';
-    /// let esc: char = 0x1b_u8.into();
+    /// let esc = '\x1b';
     ///
     /// assert!(!uppercase_a.is_ascii_whitespace());
     /// assert!(!uppercase_g.is_ascii_whitespace());
@@ -1526,6 +1617,7 @@ impl char {
     /// assert!(lf.is_ascii_whitespace());
     /// assert!(!esc.is_ascii_whitespace());
     /// ```
+    #[must_use]
     #[stable(feature = "ascii_ctype_on_intrinsics", since = "1.24.0")]
     #[rustc_const_stable(feature = "const_ascii_ctype_on_intrinsics", since = "1.47.0")]
     #[inline]
@@ -1549,7 +1641,7 @@ impl char {
     /// let percent = '%';
     /// let space = ' ';
     /// let lf = '\n';
-    /// let esc: char = 0x1b_u8.into();
+    /// let esc = '\x1b';
     ///
     /// assert!(!uppercase_a.is_ascii_control());
     /// assert!(!uppercase_g.is_ascii_control());
@@ -1561,6 +1653,7 @@ impl char {
     /// assert!(lf.is_ascii_control());
     /// assert!(esc.is_ascii_control());
     /// ```
+    #[must_use]
     #[stable(feature = "ascii_ctype_on_intrinsics", since = "1.24.0")]
     #[rustc_const_stable(feature = "const_ascii_ctype_on_intrinsics", since = "1.47.0")]
     #[inline]
@@ -1677,7 +1770,7 @@ pub fn encode_utf16_raw(mut code: u32, dst: &mut [u16]) -> &mut [u16] {
         } else {
             panic!(
                 "encode_utf16: need {} units to encode U+{:X}, but the buffer has {}",
-                from_u32_unchecked(code).len_utf16(),
+                char::from_u32_unchecked(code).len_utf16(),
                 code,
                 dst.len(),
             )

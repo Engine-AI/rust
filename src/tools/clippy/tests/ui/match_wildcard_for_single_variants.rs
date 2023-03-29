@@ -115,13 +115,42 @@ fn main() {
         pub enum Enum {
             A,
             B,
+            C,
             #[doc(hidden)]
             __Private,
         }
         match Enum::A {
             Enum::A => (),
             Enum::B => (),
+            Enum::C => (),
             _ => (),
         }
+        match Enum::A {
+            Enum::A => (),
+            Enum::B => (),
+            _ => (),
+        }
+    }
+}
+
+mod issue9993 {
+    enum Foo {
+        A(bool),
+        B,
+    }
+
+    fn test() {
+        let _ = match Foo::A(true) {
+            _ if false => 0,
+            Foo::A(true) => 1,
+            Foo::A(false) => 2,
+            Foo::B => 3,
+        };
+
+        let _ = match Foo::B {
+            _ if false => 0,
+            Foo::A(_) => 1,
+            _ => 2,
+        };
     }
 }

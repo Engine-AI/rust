@@ -13,20 +13,21 @@ use rustc_span::symbol::Ident;
 use rustc_span::Span;
 
 declare_clippy_lint! {
-    /// **What it does:**
+    /// ### What it does
     /// Checks for unlikely usages of binary operators that are almost
     /// certainly typos and/or copy/paste errors, given the other usages
     /// of binary operators nearby.
-    /// **Why is this bad?**
+    ///
+    /// ### Why is this bad?
     /// They are probably bugs and if they aren't then they look like bugs
     /// and you should add a comment explaining why you are doing such an
     /// odd set of operations.
-    /// **Known problems:**
+    ///
+    /// ### Known problems
     /// There may be some false positives if you are trying to do something
     /// unusual that happens to look like a typo.
     ///
-    /// **Example:**
-    ///
+    /// ### Example
     /// ```rust
     /// struct Vec3 {
     ///     x: f64,
@@ -58,8 +59,9 @@ declare_clippy_lint! {
     ///     }
     /// }
     /// ```
+    #[clippy::version = "1.50.0"]
     pub SUSPICIOUS_OPERATION_GROUPINGS,
-    style,
+    nursery,
     "groupings of binary operations that look suspiciously like typos"
 }
 
@@ -195,7 +197,7 @@ fn attempt_to_emit_no_difference_lint(
     i: usize,
     expected_loc: IdentLocation,
 ) {
-    if let Some(binop) = binops.get(i).cloned() {
+    if let Some(binop) = binops.get(i).copied() {
         // We need to try and figure out which identifier we should
         // suggest using instead. Since there could be multiple
         // replacement candidates in a given expression, and we're
@@ -266,7 +268,7 @@ fn emit_suggestion(cx: &EarlyContext<'_>, span: Span, sugg: String, applicabilit
         "did you mean",
         sugg,
         applicability,
-    )
+    );
 }
 
 fn ident_swap_sugg(
@@ -288,7 +290,7 @@ fn ident_swap_sugg(
             // used instead, in these cases.
             *applicability = Applicability::MaybeIncorrect;
 
-            // We arbitraily choose one side to suggest changing,
+            // We arbitrarily choose one side to suggest changing,
             // since we don't have a better guess. If the user
             // ends up duplicating a clause, the `logic_bug` lint
             // should catch it.
@@ -324,8 +326,7 @@ fn replace_left_sugg(
     applicability: &mut Applicability,
 ) -> String {
     format!(
-        "{} {} {}",
-        left_suggestion,
+        "{left_suggestion} {} {}",
         binop.op.to_string(),
         snippet_with_applicability(cx, binop.right.span, "..", applicability),
     )
@@ -338,10 +339,9 @@ fn replace_right_sugg(
     applicability: &mut Applicability,
 ) -> String {
     format!(
-        "{} {} {}",
+        "{} {} {right_suggestion}",
         snippet_with_applicability(cx, binop.left.span, "..", applicability),
         binop.op.to_string(),
-        right_suggestion,
     )
 }
 
@@ -353,7 +353,7 @@ struct BinaryOp<'exprs> {
     right: &'exprs Expr,
 }
 
-impl BinaryOp<'exprs> {
+impl<'exprs> BinaryOp<'exprs> {
     fn new(op: BinOpKind, span: Span, (left, right): (&'exprs Expr, &'exprs Expr)) -> Self {
         Self { op, span, left, right }
     }
@@ -372,19 +372,19 @@ fn strip_non_ident_wrappers(expr: &Expr) -> &Expr {
 }
 
 fn extract_related_binops(kind: &ExprKind) -> Option<Vec<BinaryOp<'_>>> {
-    append_opt_vecs(chained_binops(kind), if_statment_binops(kind))
+    append_opt_vecs(chained_binops(kind), if_statement_binops(kind))
 }
 
-fn if_statment_binops(kind: &ExprKind) -> Option<Vec<BinaryOp<'_>>> {
+fn if_statement_binops(kind: &ExprKind) -> Option<Vec<BinaryOp<'_>>> {
     match kind {
         ExprKind::If(ref condition, _, _) => chained_binops(&condition.kind),
-        ExprKind::Paren(ref e) => if_statment_binops(&e.kind),
+        ExprKind::Paren(ref e) => if_statement_binops(&e.kind),
         ExprKind::Block(ref block, _) => {
             let mut output = None;
             for stmt in &block.stmts {
                 match stmt.kind {
                     StmtKind::Expr(ref e) | StmtKind::Semi(ref e) => {
-                        output = append_opt_vecs(output, if_statment_binops(&e.kind));
+                        output = append_opt_vecs(output, if_statement_binops(&e.kind));
                     },
                     _ => {},
                 }
@@ -397,9 +397,9 @@ fn if_statment_binops(kind: &ExprKind) -> Option<Vec<BinaryOp<'_>>> {
 
 fn append_opt_vecs<A>(target_opt: Option<Vec<A>>, source_opt: Option<Vec<A>>) -> Option<Vec<A>> {
     match (target_opt, source_opt) {
-        (Some(mut target), Some(mut source)) => {
+        (Some(mut target), Some(source)) => {
             target.reserve(source.len());
-            for op in source.drain(..) {
+            for op in source {
                 target.push(op);
             }
             Some(target)
@@ -417,7 +417,7 @@ fn chained_binops(kind: &ExprKind) -> Option<Vec<BinaryOp<'_>>> {
     }
 }
 
-fn chained_binops_helper(left_outer: &'expr Expr, right_outer: &'expr Expr) -> Option<Vec<BinaryOp<'expr>>> {
+fn chained_binops_helper<'expr>(left_outer: &'expr Expr, right_outer: &'expr Expr) -> Option<Vec<BinaryOp<'expr>>> {
     match (&left_outer.kind, &right_outer.kind) {
         (
             ExprKind::Paren(ref left_e) | ExprKind::Unary(_, ref left_e),
@@ -434,9 +434,9 @@ fn chained_binops_helper(left_outer: &'expr Expr, right_outer: &'expr Expr) -> O
             chained_binops_helper(left_left, left_right),
             chained_binops_helper(right_left, right_right),
         ) {
-            (Some(mut left_ops), Some(mut right_ops)) => {
+            (Some(mut left_ops), Some(right_ops)) => {
                 left_ops.reserve(right_ops.len());
-                for op in right_ops.drain(..) {
+                for op in right_ops {
                     left_ops.push(op);
                 }
                 Some(left_ops)
@@ -475,7 +475,7 @@ impl Add for IdentLocation {
 
 impl AddAssign for IdentLocation {
     fn add_assign(&mut self, other: Self) {
-        *self = *self + other
+        *self = *self + other;
     }
 }
 
@@ -506,7 +506,7 @@ impl Add for IdentDifference {
 
 impl AddAssign for IdentDifference {
     fn add_assign(&mut self, other: Self) {
-        *self = *self + other
+        *self = *self + other;
     }
 }
 
@@ -548,7 +548,7 @@ fn ident_difference_expr_with_base_location(
     // IdentIter, then the output of this function will be almost always be correct
     // in practice.
     //
-    // If it turns out that problematic cases are more prelavent than we assume,
+    // If it turns out that problematic cases are more prevalent than we assume,
     // then we should be able to change this function to do the correct traversal,
     // without needing to change the rest of the code.
 
@@ -565,7 +565,6 @@ fn ident_difference_expr_with_base_location(
         | (Repeat(_, _), Repeat(_, _))
         | (Struct(_), Struct(_))
         | (MacCall(_), MacCall(_))
-        | (LlvmInlineAsm(_), LlvmInlineAsm(_))
         | (InlineAsm(_), InlineAsm(_))
         | (Ret(_), Ret(_))
         | (Continue(_), Continue(_))
@@ -579,26 +578,25 @@ fn ident_difference_expr_with_base_location(
         | (Assign(_, _, _), Assign(_, _, _))
         | (TryBlock(_), TryBlock(_))
         | (Await(_), Await(_))
-        | (Async(_, _, _), Async(_, _, _))
+        | (Async(_, _), Async(_, _))
         | (Block(_, _), Block(_, _))
-        | (Closure(_, _, _, _, _, _), Closure(_, _, _, _, _, _))
+        | (Closure(_), Closure(_))
         | (Match(_, _), Match(_, _))
-        | (Loop(_, _), Loop(_, _))
+        | (Loop(_, _, _), Loop(_, _, _))
         | (ForLoop(_, _, _, _), ForLoop(_, _, _, _))
         | (While(_, _, _), While(_, _, _))
         | (If(_, _, _), If(_, _, _))
-        | (Let(_, _), Let(_, _))
+        | (Let(_, _, _), Let(_, _, _))
         | (Type(_, _), Type(_, _))
         | (Cast(_, _), Cast(_, _))
         | (Lit(_), Lit(_))
         | (Unary(_, _), Unary(_, _))
         | (Binary(_, _, _), Binary(_, _, _))
         | (Tup(_), Tup(_))
-        | (MethodCall(_, _, _), MethodCall(_, _, _))
+        | (MethodCall(_), MethodCall(_))
         | (Call(_, _), Call(_, _))
         | (ConstBlock(_), ConstBlock(_))
-        | (Array(_), Array(_))
-        | (Box(_), Box(_)) => {
+        | (Array(_), Array(_)) => {
             // keep going
         },
         _ => {
@@ -675,9 +673,8 @@ fn suggestion_with_swapped_ident(
         }
 
         Some(format!(
-            "{}{}{}",
+            "{}{new_ident}{}",
             snippet_with_applicability(cx, expr.span.with_hi(current_ident.span.lo()), "..", applicability),
-            new_ident.to_string(),
             snippet_with_applicability(cx, expr.span.with_lo(current_ident.span.hi()), "..", applicability),
         ))
     })

@@ -1,4 +1,4 @@
-target
+/target
 **/*.rs.bk
 *.rlib
 *.o
@@ -6,10 +6,12 @@ perf.data
 perf.data.old
 *.events
 *.string*
+/y.bin
+/y.bin.dSYM
+/y.exe
+/y.pdb
 /build
-/build_sysroot/sysroot_src
-/build_sysroot/compiler-builtins
+/dist
 /rust
-/rand
-/regex
-/simple-raytracer
+/download
+/git-fixed-subtree.sh

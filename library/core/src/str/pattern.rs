@@ -22,6 +22,8 @@
 //! assert_eq!(s.find("you"), Some(4));
 //! // char pattern
 //! assert_eq!(s.find('n'), Some(2));
+//! // array of chars pattern
+//! assert_eq!(s.find(&['a', 'e', 'i', 'o', 'u']), Some(1));
 //! // slice of chars pattern
 //! assert_eq!(s.find(&['a', 'e', 'i', 'o', 'u'][..]), Some(1));
 //! // closure pattern
@@ -37,6 +39,7 @@
 )]
 
 use crate::cmp;
+use crate::cmp::Ordering;
 use crate::fmt;
 use crate::slice::memchr;
 
@@ -78,6 +81,11 @@ use crate::slice::memchr;
 /// assert_eq!("abaaa".find('a'), Some(0));
 /// assert_eq!("abaaa".find('b'), Some(1));
 /// assert_eq!("abaaa".find('c'), None);
+///
+/// // &[char; N]
+/// assert_eq!("ab".find(&['b', 'a']), Some(0));
+/// assert_eq!("abaaa".find(&['a', 'z']), Some(0));
+/// assert_eq!("abaaa".find(&['c', 'd']), None);
 ///
 /// // &[char]
 /// assert_eq!("ab".find(&['b', 'a'][..]), Some(0));
@@ -260,7 +268,7 @@ pub unsafe trait Searcher<'a> {
 /// The index ranges returned by this trait are not required
 /// to exactly match those of the forward search in reverse.
 ///
-/// For the reason why this trait is marked unsafe, see them
+/// For the reason why this trait is marked unsafe, see the
 /// parent trait [`Searcher`].
 pub unsafe trait ReverseSearcher<'a>: Searcher<'a> {
     /// Performs the next search step starting from the back.
@@ -601,6 +609,20 @@ where
     }
 }
 
+impl<const N: usize> MultiCharEq for [char; N] {
+    #[inline]
+    fn matches(&mut self, c: char) -> bool {
+        self.iter().any(|&m| m == c)
+    }
+}
+
+impl<const N: usize> MultiCharEq for &[char; N] {
+    #[inline]
+    fn matches(&mut self, c: char) -> bool {
+        self.iter().any(|&m| m == c)
+    }
+}
+
 impl MultiCharEq for &[char] {
     #[inline]
     fn matches(&mut self, c: char) -> bool {
@@ -752,6 +774,58 @@ macro_rules! searcher_methods {
     };
 }
 
+/// Associated type for `<[char; N] as Pattern<'a>>::Searcher`.
+#[derive(Clone, Debug)]
+pub struct CharArraySearcher<'a, const N: usize>(
+    <MultiCharEqPattern<[char; N]> as Pattern<'a>>::Searcher,
+);
+
+/// Associated type for `<&[char; N] as Pattern<'a>>::Searcher`.
+#[derive(Clone, Debug)]
+pub struct CharArrayRefSearcher<'a, 'b, const N: usize>(
+    <MultiCharEqPattern<&'b [char; N]> as Pattern<'a>>::Searcher,
+);
+
+/// Searches for chars that are equal to any of the [`char`]s in the array.
+///
+/// # Examples
+///
+/// ```
+/// assert_eq!("Hello world".find(['l', 'l']), Some(2));
+/// assert_eq!("Hello world".find(['l', 'l']), Some(2));
+/// ```
+impl<'a, const N: usize> Pattern<'a> for [char; N] {
+    pattern_methods!(CharArraySearcher<'a, N>, MultiCharEqPattern, CharArraySearcher);
+}
+
+unsafe impl<'a, const N: usize> Searcher<'a> for CharArraySearcher<'a, N> {
+    searcher_methods!(forward);
+}
+
+unsafe impl<'a, const N: usize> ReverseSearcher<'a> for CharArraySearcher<'a, N> {
+    searcher_methods!(reverse);
+}
+
+/// Searches for chars that are equal to any of the [`char`]s in the array.
+///
+/// # Examples
+///
+/// ```
+/// assert_eq!("Hello world".find(&['l', 'l']), Some(2));
+/// assert_eq!("Hello world".find(&['l', 'l']), Some(2));
+/// ```
+impl<'a, 'b, const N: usize> Pattern<'a> for &'b [char; N] {
+    pattern_methods!(CharArrayRefSearcher<'a, 'b, N>, MultiCharEqPattern, CharArrayRefSearcher);
+}
+
+unsafe impl<'a, 'b, const N: usize> Searcher<'a> for CharArrayRefSearcher<'a, 'b, N> {
+    searcher_methods!(forward);
+}
+
+unsafe impl<'a, 'b, const N: usize> ReverseSearcher<'a> for CharArrayRefSearcher<'a, 'b, N> {
+    searcher_methods!(reverse);
+}
+
 /////////////////////////////////////////////////////////////////////////////
 // Impl for &[char]
 /////////////////////////////////////////////////////////////////////////////
@@ -873,6 +947,32 @@ impl<'a, 'b> Pattern<'a> for &'b str {
         haystack.as_bytes().starts_with(self.as_bytes())
     }
 
+    /// Checks whether the pattern matches anywhere in the haystack
+    #[inline]
+    fn is_contained_in(self, haystack: &'a str) -> bool {
+        if self.len() == 0 {
+            return true;
+        }
+
+        match self.len().cmp(&haystack.len()) {
+            Ordering::Less => {
+                if self.len() == 1 {
+                    return haystack.as_bytes().contains(&self.as_bytes()[0]);
+                }
+
+                #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+                if self.len() <= 32 {
+                    if let Some(result) = simd_contains(self, haystack) {
+                        return result;
+                    }
+                }
+
+                self.into_searcher(haystack).next_match().is_some()
+            }
+            _ => self == haystack,
+        }
+    }
+
     /// Removes the pattern from the front of haystack, if it matches.
     #[inline]
     fn strip_prefix_of(self, haystack: &'a str) -> Option<&'a str> {
@@ -928,6 +1028,8 @@ struct EmptyNeedle {
     end: usize,
     is_match_fw: bool,
     is_match_bw: bool,
+    // Needed in case of an empty haystack, see #85462
+    is_finished: bool,
 }
 
 impl<'a, 'b> StrSearcher<'a, 'b> {
@@ -941,6 +1043,7 @@ impl<'a, 'b> StrSearcher<'a, 'b> {
                     end: haystack.len(),
                     is_match_fw: true,
                     is_match_bw: true,
+                    is_finished: false,
                 }),
             }
         } else {
@@ -966,13 +1069,19 @@ unsafe impl<'a, 'b> Searcher<'a> for StrSearcher<'a, 'b> {
     fn next(&mut self) -> SearchStep {
         match self.searcher {
             StrSearcherImpl::Empty(ref mut searcher) => {
+                if searcher.is_finished {
+                    return SearchStep::Done;
+                }
                 // empty needle rejects every char and matches every empty string between them
                 let is_match = searcher.is_match_fw;
                 searcher.is_match_fw = !searcher.is_match_fw;
                 let pos = searcher.position;
                 match self.haystack[pos..].chars().next() {
                     _ if is_match => SearchStep::Match(pos, pos),
-                    None => SearchStep::Done,
+                    None => {
+                        searcher.is_finished = true;
+                        SearchStep::Done
+                    }
                     Some(ch) => {
                         searcher.position += ch.len_utf8();
                         SearchStep::Reject(pos, searcher.position)
@@ -1045,12 +1154,18 @@ unsafe impl<'a, 'b> ReverseSearcher<'a> for StrSearcher<'a, 'b> {
     fn next_back(&mut self) -> SearchStep {
         match self.searcher {
             StrSearcherImpl::Empty(ref mut searcher) => {
+                if searcher.is_finished {
+                    return SearchStep::Done;
+                }
                 let is_match = searcher.is_match_bw;
                 searcher.is_match_bw = !searcher.is_match_bw;
                 let end = searcher.end;
                 match self.haystack[..end].chars().next_back() {
                     _ if is_match => SearchStep::Match(end, end),
-                    None => SearchStep::Done,
+                    None => {
+                        searcher.is_finished = true;
+                        SearchStep::Done
+                    }
                     Some(ch) => {
                         searcher.end -= ch.len_utf8();
                         SearchStep::Reject(searcher.end, end)
@@ -1594,5 +1709,212 @@ impl TwoWayStrategy for RejectAndMatch {
     #[inline]
     fn matching(a: usize, b: usize) -> Self::Output {
         SearchStep::Match(a, b)
+    }
+}
+
+/// SIMD search for short needles based on
+/// Wojciech Muła's "SIMD-friendly algorithms for substring searching"[0]
+///
+/// It skips ahead by the vector width on each iteration (rather than the needle length as two-way
+/// does) by probing the first and last byte of the needle for the whole vector width
+/// and only doing full needle comparisons when the vectorized probe indicated potential matches.
+///
+/// Since the x86_64 baseline only offers SSE2 we only use u8x16 here.
+/// If we ever ship std with for x86-64-v3 or adapt this for other platforms then wider vectors
+/// should be evaluated.
+///
+/// For haystacks smaller than vector-size + needle length it falls back to
+/// a naive O(n*m) search so this implementation should not be called on larger needles.
+///
+/// [0]: http://0x80.pl/articles/simd-strfind.html#sse-avx2
+#[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
+#[inline]
+fn simd_contains(needle: &str, haystack: &str) -> Option<bool> {
+    let needle = needle.as_bytes();
+    let haystack = haystack.as_bytes();
+
+    debug_assert!(needle.len() > 1);
+
+    use crate::ops::BitAnd;
+    use crate::simd::mask8x16 as Mask;
+    use crate::simd::u8x16 as Block;
+    use crate::simd::{SimdPartialEq, ToBitMask};
+
+    let first_probe = needle[0];
+    let last_byte_offset = needle.len() - 1;
+
+    // the offset used for the 2nd vector
+    let second_probe_offset = if needle.len() == 2 {
+        // never bail out on len=2 needles because the probes will fully cover them and have
+        // no degenerate cases.
+        1
+    } else {
+        // try a few bytes in case first and last byte of the needle are the same
+        let Some(second_probe_offset) = (needle.len().saturating_sub(4)..needle.len()).rfind(|&idx| needle[idx] != first_probe) else {
+            // fall back to other search methods if we can't find any different bytes
+            // since we could otherwise hit some degenerate cases
+            return None;
+        };
+        second_probe_offset
+    };
+
+    // do a naive search if the haystack is too small to fit
+    if haystack.len() < Block::LANES + last_byte_offset {
+        return Some(haystack.windows(needle.len()).any(|c| c == needle));
+    }
+
+    let first_probe: Block = Block::splat(first_probe);
+    let second_probe: Block = Block::splat(needle[second_probe_offset]);
+    // first byte are already checked by the outer loop. to verify a match only the
+    // remainder has to be compared.
+    let trimmed_needle = &needle[1..];
+
+    // this #[cold] is load-bearing, benchmark before removing it...
+    let check_mask = #[cold]
+    |idx, mask: u16, skip: bool| -> bool {
+        if skip {
+            return false;
+        }
+
+        // and so is this. optimizations are weird.
+        let mut mask = mask;
+
+        while mask != 0 {
+            let trailing = mask.trailing_zeros();
+            let offset = idx + trailing as usize + 1;
+            // SAFETY: mask is between 0 and 15 trailing zeroes, we skip one additional byte that was already compared
+            // and then take trimmed_needle.len() bytes. This is within the bounds defined by the outer loop
+            unsafe {
+                let sub = haystack.get_unchecked(offset..).get_unchecked(..trimmed_needle.len());
+                if small_slice_eq(sub, trimmed_needle) {
+                    return true;
+                }
+            }
+            mask &= !(1 << trailing);
+        }
+        return false;
+    };
+
+    let test_chunk = |idx| -> u16 {
+        // SAFETY: this requires at least LANES bytes being readable at idx
+        // that is ensured by the loop ranges (see comments below)
+        let a: Block = unsafe { haystack.as_ptr().add(idx).cast::<Block>().read_unaligned() };
+        // SAFETY: this requires LANES + block_offset bytes being readable at idx
+        let b: Block = unsafe {
+            haystack.as_ptr().add(idx).add(second_probe_offset).cast::<Block>().read_unaligned()
+        };
+        let eq_first: Mask = a.simd_eq(first_probe);
+        let eq_last: Mask = b.simd_eq(second_probe);
+        let both = eq_first.bitand(eq_last);
+        let mask = both.to_bitmask();
+
+        return mask;
+    };
+
+    let mut i = 0;
+    let mut result = false;
+    // The loop condition must ensure that there's enough headroom to read LANE bytes,
+    // and not only at the current index but also at the index shifted by block_offset
+    const UNROLL: usize = 4;
+    while i + last_byte_offset + UNROLL * Block::LANES < haystack.len() && !result {
+        let mut masks = [0u16; UNROLL];
+        for j in 0..UNROLL {
+            masks[j] = test_chunk(i + j * Block::LANES);
+        }
+        for j in 0..UNROLL {
+            let mask = masks[j];
+            if mask != 0 {
+                result |= check_mask(i + j * Block::LANES, mask, result);
+            }
+        }
+        i += UNROLL * Block::LANES;
+    }
+    while i + last_byte_offset + Block::LANES < haystack.len() && !result {
+        let mask = test_chunk(i);
+        if mask != 0 {
+            result |= check_mask(i, mask, result);
+        }
+        i += Block::LANES;
+    }
+
+    // Process the tail that didn't fit into LANES-sized steps.
+    // This simply repeats the same procedure but as right-aligned chunk instead
+    // of a left-aligned one. The last byte must be exactly flush with the string end so
+    // we don't miss a single byte or read out of bounds.
+    let i = haystack.len() - last_byte_offset - Block::LANES;
+    let mask = test_chunk(i);
+    if mask != 0 {
+        result |= check_mask(i, mask, result);
+    }
+
+    Some(result)
+}
+
+/// Compares short slices for equality.
+///
+/// It avoids a call to libc's memcmp which is faster on long slices
+/// due to SIMD optimizations but it incurs a function call overhead.
+///
+/// # Safety
+///
+/// Both slices must have the same length.
+#[cfg(all(target_arch = "x86_64", target_feature = "sse2"))] // only called on x86
+#[inline]
+unsafe fn small_slice_eq(x: &[u8], y: &[u8]) -> bool {
+    debug_assert_eq!(x.len(), y.len());
+    // This function is adapted from
+    // https://github.com/BurntSushi/memchr/blob/8037d11b4357b0f07be2bb66dc2659d9cf28ad32/src/memmem/util.rs#L32
+
+    // If we don't have enough bytes to do 4-byte at a time loads, then
+    // fall back to the naive slow version.
+    //
+    // Potential alternative: We could do a copy_nonoverlapping combined with a mask instead
+    // of a loop. Benchmark it.
+    if x.len() < 4 {
+        for (&b1, &b2) in x.iter().zip(y) {
+            if b1 != b2 {
+                return false;
+            }
+        }
+        return true;
+    }
+    // When we have 4 or more bytes to compare, then proceed in chunks of 4 at
+    // a time using unaligned loads.
+    //
+    // Also, why do 4 byte loads instead of, say, 8 byte loads? The reason is
+    // that this particular version of memcmp is likely to be called with tiny
+    // needles. That means that if we do 8 byte loads, then a higher proportion
+    // of memcmp calls will use the slower variant above. With that said, this
+    // is a hypothesis and is only loosely supported by benchmarks. There's
+    // likely some improvement that could be made here. The main thing here
+    // though is to optimize for latency, not throughput.
+
+    // SAFETY: Via the conditional above, we know that both `px` and `py`
+    // have the same length, so `px < pxend` implies that `py < pyend`.
+    // Thus, derefencing both `px` and `py` in the loop below is safe.
+    //
+    // Moreover, we set `pxend` and `pyend` to be 4 bytes before the actual
+    // end of `px` and `py`. Thus, the final dereference outside of the
+    // loop is guaranteed to be valid. (The final comparison will overlap with
+    // the last comparison done in the loop for lengths that aren't multiples
+    // of four.)
+    //
+    // Finally, we needn't worry about alignment here, since we do unaligned
+    // loads.
+    unsafe {
+        let (mut px, mut py) = (x.as_ptr(), y.as_ptr());
+        let (pxend, pyend) = (px.add(x.len() - 4), py.add(y.len() - 4));
+        while px < pxend {
+            let vx = (px as *const u32).read_unaligned();
+            let vy = (py as *const u32).read_unaligned();
+            if vx != vy {
+                return false;
+            }
+            px = px.add(4);
+            py = py.add(4);
+        }
+        let vx = (pxend as *const u32).read_unaligned();
+        let vy = (pyend as *const u32).read_unaligned();
+        vx == vy
     }
 }

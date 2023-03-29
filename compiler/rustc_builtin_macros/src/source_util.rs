@@ -61,7 +61,9 @@ pub fn expand_file(
 
     let topmost = cx.expansion_cause().unwrap_or(sp);
     let loc = cx.source_map().lookup_char_pos(topmost.lo());
-    base::MacEager::expr(cx.expr_str(topmost, Symbol::intern(&loc.file.name.to_string())))
+    base::MacEager::expr(
+        cx.expr_str(topmost, Symbol::intern(&loc.file.name.prefer_remapped().to_string_lossy())),
+    )
 }
 
 pub fn expand_stringify(
@@ -96,12 +98,11 @@ pub fn expand_include<'cx>(
     tts: TokenStream,
 ) -> Box<dyn base::MacResult + 'cx> {
     let sp = cx.with_def_site_ctxt(sp);
-    let file = match get_single_str_from_tts(cx, sp, tts, "include!") {
-        Some(f) => f,
-        None => return DummyResult::any(sp),
+    let Some(file) = get_single_str_from_tts(cx, sp, tts, "include!") else {
+        return DummyResult::any(sp);
     };
     // The file will be added to the code map by the parser
-    let file = match cx.resolve_path(file, sp) {
+    let file = match resolve_path(&cx.sess.parse_sess, file.as_str(), sp) {
         Ok(f) => f,
         Err(mut err) => {
             err.emit();
@@ -138,7 +139,7 @@ pub fn expand_include<'cx>(
 
         fn make_items(mut self: Box<ExpandResult<'a>>) -> Option<SmallVec<[P<ast::Item>; 1]>> {
             let mut ret = SmallVec::new();
-            while self.p.token != token::Eof {
+            loop {
                 match self.p.parse_item(ForceCollect::No) {
                     Err(mut err) => {
                         err.emit();
@@ -146,9 +147,12 @@ pub fn expand_include<'cx>(
                     }
                     Ok(Some(item)) => ret.push(item),
                     Ok(None) => {
-                        let token = pprust::token_to_string(&self.p.token);
-                        let msg = format!("expected item, found `{}`", token);
-                        self.p.struct_span_err(self.p.token.span, &msg).emit();
+                        if self.p.token != token::Eof {
+                            let token = pprust::token_to_string(&self.p.token);
+                            let msg = format!("expected item, found `{}`", token);
+                            self.p.struct_span_err(self.p.token.span, &msg).emit();
+                        }
+
                         break;
                     }
                 }
@@ -157,21 +161,20 @@ pub fn expand_include<'cx>(
         }
     }
 
-    Box::new(ExpandResult { p, node_id: cx.resolver.lint_node_id(cx.current_expansion.id) })
+    Box::new(ExpandResult { p, node_id: cx.current_expansion.lint_node_id })
 }
 
-// include_str! : read the given file, insert it as a literal string expr
+/// `include_str!`: read the given file, insert it as a literal string expr
 pub fn expand_include_str(
     cx: &mut ExtCtxt<'_>,
     sp: Span,
     tts: TokenStream,
 ) -> Box<dyn base::MacResult + 'static> {
     let sp = cx.with_def_site_ctxt(sp);
-    let file = match get_single_str_from_tts(cx, sp, tts, "include_str!") {
-        Some(f) => f,
-        None => return DummyResult::any(sp),
+    let Some(file) = get_single_str_from_tts(cx, sp, tts, "include_str!") else {
+        return DummyResult::any(sp);
     };
-    let file = match cx.resolve_path(file, sp) {
+    let file = match resolve_path(&cx.sess.parse_sess, file.as_str(), sp) {
         Ok(f) => f,
         Err(mut err) => {
             err.emit();
@@ -202,11 +205,10 @@ pub fn expand_include_bytes(
     tts: TokenStream,
 ) -> Box<dyn base::MacResult + 'static> {
     let sp = cx.with_def_site_ctxt(sp);
-    let file = match get_single_str_from_tts(cx, sp, tts, "include_bytes!") {
-        Some(f) => f,
-        None => return DummyResult::any(sp),
+    let Some(file) = get_single_str_from_tts(cx, sp, tts, "include_bytes!") else {
+        return DummyResult::any(sp);
     };
-    let file = match cx.resolve_path(file, sp) {
+    let file = match resolve_path(&cx.sess.parse_sess, file.as_str(), sp) {
         Ok(f) => f,
         Err(mut err) => {
             err.emit();
@@ -214,7 +216,10 @@ pub fn expand_include_bytes(
         }
     };
     match cx.source_map().load_binary_file(&file) {
-        Ok(bytes) => base::MacEager::expr(cx.expr_lit(sp, ast::LitKind::ByteStr(bytes.into()))),
+        Ok(bytes) => {
+            let expr = cx.expr(sp, ast::ExprKind::IncludedBytes(bytes.into()));
+            base::MacEager::expr(expr)
+        }
         Err(e) => {
             cx.span_err(sp, &format!("couldn't read {}: {}", file.display(), e));
             DummyResult::any(sp)

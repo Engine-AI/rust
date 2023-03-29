@@ -1,9 +1,5 @@
 #![warn(clippy::borrow_interior_mutable_const)]
-#![allow(
-    clippy::declare_interior_mutable_const,
-    clippy::ref_in_deref,
-    clippy::needless_borrow
-)]
+#![allow(clippy::declare_interior_mutable_const, clippy::needless_borrow)]
 #![allow(const_item_mutation)]
 
 use std::borrow::Cow;
@@ -46,7 +42,7 @@ impl<T> StaticRef<T> {
 impl<T> std::ops::Deref for StaticRef<T> {
     type Target = T;
 
-    fn deref(&self) -> &'static T {
+    fn deref(&self) -> &T {
         unsafe { &*self.ptr }
     }
 }

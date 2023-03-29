@@ -1,5 +1,5 @@
 // Reference: MSP430 Embedded Application Binary Interface
-// http://www.ti.com/lit/an/slaa534/slaa534.pdf
+// https://www.ti.com/lit/an/slaa534a/slaa534a.pdf
 
 use crate::abi::call::{ArgAbi, FnAbi};
 
@@ -30,7 +30,7 @@ pub fn compute_abi_info<Ty>(fn_abi: &mut FnAbi<'_, Ty>) {
         classify_ret(&mut fn_abi.ret);
     }
 
-    for arg in &mut fn_abi.args {
+    for arg in fn_abi.args.iter_mut() {
         if arg.is_ignore() {
             continue;
         }

@@ -3,7 +3,7 @@ use rustc_lint::LintStore;
 use rustc_lint_defs::{declare_tool_lint, Lint, LintId};
 use rustc_session::{lint, Session};
 
-use std::lazy::SyncLazy as Lazy;
+use std::sync::LazyLock as Lazy;
 
 /// This function is used to setup the lint initialization. By default, in rustdoc, everything
 /// is "allowed". Depending if we run in test mode or not, we want some of them to be at their
@@ -64,9 +64,13 @@ where
 }
 
 macro_rules! declare_rustdoc_lint {
-    ($(#[$attr:meta])* $name: ident, $level: ident, $descr: literal $(,)?) => {
+    (
+        $(#[$attr:meta])* $name: ident, $level: ident, $descr: literal $(,)?
+        $(@feature_gate = $gate:expr;)?
+    ) => {
         declare_tool_lint! {
             $(#[$attr])* pub rustdoc::$name, $level, $descr
+            $(, @feature_gate = $gate;)?
         }
     }
 }
@@ -123,7 +127,8 @@ declare_rustdoc_lint! {
     /// [rustdoc book]: ../../../rustdoc/lints.html#missing_doc_code_examples
     MISSING_DOC_CODE_EXAMPLES,
     Allow,
-    "detects publicly-exported items without code samples in their documentation"
+    "detects publicly-exported items without code samples in their documentation",
+    @feature_gate = rustc_span::symbol::sym::rustdoc_missing_doc_code_examples;
 }
 
 declare_rustdoc_lint! {
@@ -143,7 +148,7 @@ declare_rustdoc_lint! {
     ///
     /// [rustdoc book]: ../../../rustdoc/lints.html#invalid_html_tags
     INVALID_HTML_TAGS,
-    Allow,
+    Warn,
     "detects invalid HTML tags in doc comments"
 }
 
@@ -157,30 +162,47 @@ declare_rustdoc_lint! {
     "detects URLs that are not hyperlinks"
 }
 
-crate static RUSTDOC_LINTS: Lazy<Vec<&'static Lint>> = Lazy::new(|| {
+declare_rustdoc_lint! {
+   /// The `invalid_rust_codeblocks` lint detects Rust code blocks in
+   /// documentation examples that are invalid (e.g. empty, not parsable as
+   /// Rust code). This is a `rustdoc` only lint, see the documentation in the
+   /// [rustdoc book].
+   ///
+   /// [rustdoc book]: ../../../rustdoc/lints.html#invalid_rust_codeblocks
+   INVALID_RUST_CODEBLOCKS,
+   Warn,
+   "codeblock could not be parsed as valid Rust or is empty"
+}
+
+pub(crate) static RUSTDOC_LINTS: Lazy<Vec<&'static Lint>> = Lazy::new(|| {
     vec![
         BROKEN_INTRA_DOC_LINKS,
         PRIVATE_INTRA_DOC_LINKS,
         MISSING_DOC_CODE_EXAMPLES,
         PRIVATE_DOC_TESTS,
         INVALID_CODEBLOCK_ATTRIBUTES,
+        INVALID_RUST_CODEBLOCKS,
         INVALID_HTML_TAGS,
         BARE_URLS,
         MISSING_CRATE_LEVEL_DOCS,
     ]
 });
 
-crate fn register_lints(_sess: &Session, lint_store: &mut LintStore) {
+pub(crate) fn register_lints(_sess: &Session, lint_store: &mut LintStore) {
     lint_store.register_lints(&**RUSTDOC_LINTS);
     lint_store.register_group(
         true,
         "rustdoc::all",
         Some("rustdoc"),
-        RUSTDOC_LINTS.iter().map(|&lint| LintId::of(lint)).collect(),
+        RUSTDOC_LINTS
+            .iter()
+            .filter(|lint| lint.feature_gate.is_none()) // only include stable lints
+            .map(|&lint| LintId::of(lint))
+            .collect(),
     );
     for lint in &*RUSTDOC_LINTS {
         let name = lint.name_lower();
-        lint_store.register_alias(&name.replace("rustdoc::", ""), &name);
+        lint_store.register_renamed(&name.replace("rustdoc::", ""), &name);
     }
     lint_store
         .register_renamed("intra_doc_link_resolution_failure", "rustdoc::broken_intra_doc_links");

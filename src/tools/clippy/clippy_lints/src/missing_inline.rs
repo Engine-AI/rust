@@ -7,10 +7,12 @@ use rustc_span::source_map::Span;
 use rustc_span::sym;
 
 declare_clippy_lint! {
-    /// **What it does:** it lints if an exported function, method, trait method with default impl,
+    /// ### What it does
+    /// It lints if an exported function, method, trait method with default impl,
     /// or trait method impl is not `#[inline]`.
     ///
-    /// **Why is this bad?** In general, it is not. Functions can be inlined across
+    /// ### Why is this bad?
+    /// In general, it is not. Functions can be inlined across
     /// crates when that's profitable as long as any form of LTO is used. When LTO is disabled,
     /// functions that are not `#[inline]` cannot be inlined across crates. Certain types of crates
     /// might intend for most of the methods in their public API to be able to be inlined across
@@ -18,9 +20,7 @@ declare_clippy_lint! {
     /// sense. It allows the crate to require all exported methods to be `#[inline]` by default, and
     /// then opt out for specific methods where this might not make sense.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
+    /// ### Example
     /// ```rust
     /// pub fn foo() {} // missing #[inline]
     /// fn ok() {} // ok
@@ -44,7 +44,7 @@ declare_clippy_lint! {
     /// pub struct PubBaz;
     /// impl PubBaz {
     ///    fn private() {} // ok
-    ///    pub fn not_ptrivate() {} // missing #[inline]
+    ///    pub fn not_private() {} // missing #[inline]
     /// }
     ///
     /// impl Bar for PubBaz {
@@ -52,6 +52,7 @@ declare_clippy_lint! {
     ///    fn def_bar() {} // missing #[inline]
     /// }
     /// ```
+    #[clippy::version = "pre 1.29.0"]
     pub MISSING_INLINE_IN_PUBLIC_ITEMS,
     restriction,
     "detects missing `#[inline]` attribute for public callables (functions, trait methods, methods...)"
@@ -64,7 +65,7 @@ fn check_missing_inline_attrs(cx: &LateContext<'_>, attrs: &[ast::Attribute], sp
             cx,
             MISSING_INLINE_IN_PUBLIC_ITEMS,
             sp,
-            &format!("missing `#[inline]` for {}", desc),
+            &format!("missing `#[inline]` for {desc}"),
         );
     }
 }
@@ -87,7 +88,7 @@ impl<'tcx> LateLintPass<'tcx> for MissingInline {
             return;
         }
 
-        if !cx.access_levels.is_exported(it.hir_id()) {
+        if !cx.effective_visibilities.is_exported(it.owner_id.def_id) {
             return;
         }
         match it.kind {
@@ -96,7 +97,7 @@ impl<'tcx> LateLintPass<'tcx> for MissingInline {
                 let attrs = cx.tcx.hir().attrs(it.hir_id());
                 check_missing_inline_attrs(cx, attrs, it.span, desc);
             },
-            hir::ItemKind::Trait(ref _is_auto, ref _unsafe, ref _generics, _bounds, trait_items) => {
+            hir::ItemKind::Trait(ref _is_auto, ref _unsafe, _generics, _bounds, trait_items) => {
                 // note: we need to check if the trait is exported so we can't use
                 // `LateLintPass::check_trait_item` here.
                 for tit in trait_items {
@@ -104,7 +105,7 @@ impl<'tcx> LateLintPass<'tcx> for MissingInline {
                     match tit_.kind {
                         hir::TraitItemKind::Const(..) | hir::TraitItemKind::Type(..) => {},
                         hir::TraitItemKind::Fn(..) => {
-                            if tit.defaultness.has_value() {
+                            if cx.tcx.impl_defaultness(tit.id.owner_id).has_value() {
                                 // trait method with default body needs inline in case
                                 // an impl is not provided
                                 let desc = "a default trait method";
@@ -118,6 +119,7 @@ impl<'tcx> LateLintPass<'tcx> for MissingInline {
             },
             hir::ItemKind::Const(..)
             | hir::ItemKind::Enum(..)
+            | hir::ItemKind::Macro(..)
             | hir::ItemKind::Mod(..)
             | hir::ItemKind::Static(..)
             | hir::ItemKind::Struct(..)
@@ -140,22 +142,24 @@ impl<'tcx> LateLintPass<'tcx> for MissingInline {
         }
 
         // If the item being implemented is not exported, then we don't need #[inline]
-        if !cx.access_levels.is_exported(impl_item.hir_id()) {
+        if !cx.effective_visibilities.is_exported(impl_item.owner_id.def_id) {
             return;
         }
 
         let desc = match impl_item.kind {
             hir::ImplItemKind::Fn(..) => "a method",
-            hir::ImplItemKind::Const(..) | hir::ImplItemKind::TyAlias(_) => return,
+            hir::ImplItemKind::Const(..) | hir::ImplItemKind::Type(_) => return,
         };
 
-        let trait_def_id = match cx.tcx.associated_item(impl_item.def_id).container {
-            TraitContainer(cid) => Some(cid),
-            ImplContainer(cid) => cx.tcx.impl_trait_ref(cid).map(|t| t.def_id),
+        let assoc_item = cx.tcx.associated_item(impl_item.owner_id);
+        let container_id = assoc_item.container_id(cx.tcx);
+        let trait_def_id = match assoc_item.container {
+            TraitContainer => Some(container_id),
+            ImplContainer => cx.tcx.impl_trait_ref(container_id).map(|t| t.skip_binder().def_id),
         };
 
         if let Some(trait_def_id) = trait_def_id {
-            if trait_def_id.is_local() && !cx.access_levels.is_exported(impl_item.hir_id()) {
+            if trait_def_id.is_local() && !cx.effective_visibilities.is_exported(impl_item.owner_id.def_id) {
                 // If a trait is being implemented for an item, and the
                 // trait is not exported, we don't need #[inline]
                 return;

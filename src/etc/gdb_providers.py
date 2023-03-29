@@ -12,8 +12,10 @@ FIRST_FIELD = "__1"
 def unwrap_unique_or_non_null(unique_or_nonnull):
     # BACKCOMPAT: rust 1.32
     # https://github.com/rust-lang/rust/commit/7a0911528058e87d22ea305695f4047572c5e067
+    # BACKCOMPAT: rust 1.60
+    # https://github.com/rust-lang/rust/commit/2a91eeac1a2d27dd3de1bf55515d765da20fd86f
     ptr = unique_or_nonnull["pointer"]
-    return ptr if ptr.type.code == gdb.TYPE_CODE_PTR else ptr[ZERO_FIELD]
+    return ptr if ptr.type.code == gdb.TYPE_CODE_PTR else ptr[ptr.type.fields()[0]]
 
 
 class EnumProvider:
@@ -85,6 +87,39 @@ class StdStrProvider:
     def display_hint():
         return "string"
 
+def _enumerate_array_elements(element_ptrs):
+    for (i, element_ptr) in enumerate(element_ptrs):
+        key = "[{}]".format(i)
+        element = element_ptr.dereference()
+
+        try:
+            # rust-lang/rust#64343: passing deref expr to `str` allows
+            # catching exception on garbage pointer
+            str(element)
+        except RuntimeError:
+            yield key, "inaccessible"
+
+            break
+
+        yield key, element
+
+class StdSliceProvider:
+    def __init__(self, valobj):
+        self.valobj = valobj
+        self.length = int(valobj["length"])
+        self.data_ptr = valobj["data_ptr"]
+
+    def to_string(self):
+        return "{}(size={})".format(self.valobj.type, self.length)
+
+    def children(self):
+        return _enumerate_array_elements(
+            self.data_ptr + index for index in xrange(self.length)
+        )
+
+    @staticmethod
+    def display_hint():
+        return "array"
 
 class StdVecProvider:
     def __init__(self, valobj):
@@ -96,19 +131,9 @@ class StdVecProvider:
         return "Vec(size={})".format(self.length)
 
     def children(self):
-        saw_inaccessible = False
-        for index in xrange(self.length):
-            element_ptr = self.data_ptr + index
-            if saw_inaccessible:
-                return
-            try:
-                # rust-lang/rust#64343: passing deref expr to `str` allows
-                # catching exception on garbage pointer
-                str(element_ptr.dereference())
-                yield "[{}]".format(index), element_ptr.dereference()
-            except RuntimeError:
-                saw_inaccessible = True
-                yield str(index), "inaccessible"
+        return _enumerate_array_elements(
+            self.data_ptr + index for index in xrange(self.length)
+        )
 
     @staticmethod
     def display_hint():
@@ -119,21 +144,17 @@ class StdVecDequeProvider:
     def __init__(self, valobj):
         self.valobj = valobj
         self.head = int(valobj["head"])
-        self.tail = int(valobj["tail"])
+        self.size = int(valobj["len"])
         self.cap = int(valobj["buf"]["cap"])
         self.data_ptr = unwrap_unique_or_non_null(valobj["buf"]["ptr"])
-        if self.head >= self.tail:
-            self.size = self.head - self.tail
-        else:
-            self.size = self.cap + self.head - self.tail
 
     def to_string(self):
         return "VecDeque(size={})".format(self.size)
 
     def children(self):
-        for index in xrange(0, self.size):
-            value = (self.data_ptr + ((self.tail + index) % self.cap)).dereference()
-            yield "[{}]".format(index), value
+        return _enumerate_array_elements(
+            (self.data_ptr + ((self.head + index) % self.cap)) for index in xrange(self.size)
+        )
 
     @staticmethod
     def display_hint():
@@ -204,6 +225,17 @@ class StdRefCellProvider:
     def children(self):
         yield "value", self.value
         yield "borrow", self.borrow
+
+
+class StdNonZeroNumberProvider:
+    def __init__(self, valobj):
+        fields = valobj.type.fields()
+        assert len(fields) == 1
+        field = list(fields)[0]
+        self.value = str(valobj[field.name])
+
+    def to_string(self):
+        return self.value
 
 
 # Yields children (in a provider's sense of the word) for a BTreeMap.

@@ -1,5 +1,6 @@
 mod append;
 mod borrow;
+mod dedup_sorted_iter;
 mod fix;
 pub mod map;
 mod mem;
@@ -9,9 +10,9 @@ mod node;
 mod remove;
 mod search;
 pub mod set;
+mod set_val;
 mod split;
 
-#[doc(hidden)]
 trait Recover<Q: ?Sized> {
     type Key;
 
@@ -19,6 +20,3 @@ trait Recover<Q: ?Sized> {
     fn take(&mut self, key: &Q) -> Option<Self::Key>;
     fn replace(&mut self, key: Self::Key) -> Option<Self::Key>;
 }
-
-#[cfg(test)]
-mod testing;

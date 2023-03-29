@@ -1,21 +1,28 @@
 //! Clippy wrappers around rustc's diagnostic functions.
+//!
+//! These functions are used by the `INTERNAL_METADATA_COLLECTOR` lint to collect the corresponding
+//! lint applicability. Please make sure that you update the `LINT_EMISSION_FUNCTIONS` variable in
+//! `clippy_lints::utils::internal_lints::metadata_collector` when a new function is added
+//! or renamed.
+//!
+//! Thank you!
+//! ~The `INTERNAL_METADATA_COLLECTOR` lint
 
-use rustc_errors::{Applicability, DiagnosticBuilder};
+use rustc_errors::{Applicability, Diagnostic, MultiSpan};
 use rustc_hir::HirId;
 use rustc_lint::{LateContext, Lint, LintContext};
-use rustc_span::source_map::{MultiSpan, Span};
+use rustc_span::source_map::Span;
 use std::env;
 
-fn docs_link(diag: &mut DiagnosticBuilder<'_>, lint: &'static Lint) {
+fn docs_link(diag: &mut Diagnostic, lint: &'static Lint) {
     if env::var("CLIPPY_DISABLE_DOCS_LINKS").is_err() {
         if let Some(lint) = lint.name_lower().strip_prefix("clippy::") {
-            diag.help(&format!(
-                "for further information visit https://rust-lang.github.io/rust-clippy/{}/index.html#{}",
+            diag.help(format!(
+                "for further information visit https://rust-lang.github.io/rust-clippy/{}/index.html#{lint}",
                 &option_env!("RUST_RELEASE_NUM").map_or("master".to_string(), |n| {
                     // extract just major + minor version and ignore patch versions
-                    format!("rust-{}", n.rsplitn(2, '.').nth(1).unwrap())
-                }),
-                lint
+                    format!("rust-{}", n.rsplit_once('.').unwrap().1)
+                })
             ));
         }
     }
@@ -39,10 +46,9 @@ fn docs_link(diag: &mut DiagnosticBuilder<'_>, lint: &'static Lint) {
 ///    |     ^^^^^^^^^^^^^^^^^^^^^^^
 /// ```
 pub fn span_lint<T: LintContext>(cx: &T, lint: &'static Lint, sp: impl Into<MultiSpan>, msg: &str) {
-    cx.struct_span_lint(lint, sp, |diag| {
-        let mut diag = diag.build(msg);
-        docs_link(&mut diag, lint);
-        diag.emit();
+    cx.struct_span_lint(lint, sp, msg, |diag| {
+        docs_link(diag, lint);
+        diag
     });
 }
 
@@ -57,32 +63,31 @@ pub fn span_lint<T: LintContext>(cx: &T, lint: &'static Lint, sp: impl Into<Mult
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```text
 /// error: constant division of 0.0 with 0.0 will always result in NaN
 ///   --> $DIR/zero_div_zero.rs:6:25
 ///    |
 /// 6  |     let other_f64_nan = 0.0f64 / 0.0;
 ///    |                         ^^^^^^^^^^^^
 ///    |
-///    = help: Consider using `f64::NAN` if you would like a constant representing NaN
+///    = help: consider using `f64::NAN` if you would like a constant representing NaN
 /// ```
-pub fn span_lint_and_help<'a, T: LintContext>(
-    cx: &'a T,
+pub fn span_lint_and_help<T: LintContext>(
+    cx: &T,
     lint: &'static Lint,
-    span: Span,
+    span: impl Into<MultiSpan>,
     msg: &str,
     help_span: Option<Span>,
     help: &str,
 ) {
-    cx.struct_span_lint(lint, span, |diag| {
-        let mut diag = diag.build(msg);
+    cx.struct_span_lint(lint, span, msg, |diag| {
         if let Some(help_span) = help_span {
             diag.span_help(help_span, help);
         } else {
             diag.help(help);
         }
-        docs_link(&mut diag, lint);
-        diag.emit();
+        docs_link(diag, lint);
+        diag
     });
 }
 
@@ -95,7 +100,7 @@ pub fn span_lint_and_help<'a, T: LintContext>(
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```text
 /// error: calls to `std::mem::forget` with a reference instead of an owned value. Forgetting a reference does nothing.
 ///   --> $DIR/drop_forget_ref.rs:10:5
 ///    |
@@ -109,23 +114,22 @@ pub fn span_lint_and_help<'a, T: LintContext>(
 /// 10 |     forget(&SomeStruct);
 ///    |            ^^^^^^^^^^^
 /// ```
-pub fn span_lint_and_note<'a, T: LintContext>(
-    cx: &'a T,
+pub fn span_lint_and_note<T: LintContext>(
+    cx: &T,
     lint: &'static Lint,
     span: impl Into<MultiSpan>,
     msg: &str,
     note_span: Option<Span>,
     note: &str,
 ) {
-    cx.struct_span_lint(lint, span, |diag| {
-        let mut diag = diag.build(msg);
+    cx.struct_span_lint(lint, span, msg, |diag| {
         if let Some(note_span) = note_span {
             diag.span_note(note_span, note);
         } else {
             diag.note(note);
         }
-        docs_link(&mut diag, lint);
-        diag.emit();
+        docs_link(diag, lint);
+        diag
     });
 }
 
@@ -137,21 +141,19 @@ pub fn span_lint_and_then<C, S, F>(cx: &C, lint: &'static Lint, sp: S, msg: &str
 where
     C: LintContext,
     S: Into<MultiSpan>,
-    F: FnOnce(&mut DiagnosticBuilder<'_>),
+    F: FnOnce(&mut Diagnostic),
 {
-    cx.struct_span_lint(lint, sp, |diag| {
-        let mut diag = diag.build(msg);
-        f(&mut diag);
-        docs_link(&mut diag, lint);
-        diag.emit();
+    cx.struct_span_lint(lint, sp, msg, |diag| {
+        f(diag);
+        docs_link(diag, lint);
+        diag
     });
 }
 
 pub fn span_lint_hir(cx: &LateContext<'_>, lint: &'static Lint, hir_id: HirId, sp: Span, msg: &str) {
-    cx.tcx.struct_span_lint_hir(lint, hir_id, sp, |diag| {
-        let mut diag = diag.build(msg);
-        docs_link(&mut diag, lint);
-        diag.emit();
+    cx.tcx.struct_span_lint_hir(lint, hir_id, sp, msg, |diag| {
+        docs_link(diag, lint);
+        diag
     });
 }
 
@@ -159,15 +161,14 @@ pub fn span_lint_hir_and_then(
     cx: &LateContext<'_>,
     lint: &'static Lint,
     hir_id: HirId,
-    sp: Span,
+    sp: impl Into<MultiSpan>,
     msg: &str,
-    f: impl FnOnce(&mut DiagnosticBuilder<'_>),
+    f: impl FnOnce(&mut Diagnostic),
 ) {
-    cx.tcx.struct_span_lint_hir(lint, hir_id, sp, |diag| {
-        let mut diag = diag.build(msg);
-        f(&mut diag);
-        docs_link(&mut diag, lint);
-        diag.emit();
+    cx.tcx.struct_span_lint_hir(lint, hir_id, sp, msg, |diag| {
+        f(diag);
+        docs_link(diag, lint);
+        diag
     });
 }
 
@@ -181,7 +182,7 @@ pub fn span_lint_hir_and_then(
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```text
 /// error: This `.fold` can be more succinctly expressed as `.any`
 /// --> $DIR/methods.rs:390:13
 ///     |
@@ -190,9 +191,9 @@ pub fn span_lint_hir_and_then(
 ///     |
 ///     = note: `-D fold-any` implied by `-D warnings`
 /// ```
-#[cfg_attr(feature = "internal-lints", allow(clippy::collapsible_span_lint_calls))]
-pub fn span_lint_and_sugg<'a, T: LintContext>(
-    cx: &'a T,
+#[cfg_attr(feature = "internal", allow(clippy::collapsible_span_lint_calls))]
+pub fn span_lint_and_sugg<T: LintContext>(
+    cx: &T,
     lint: &'static Lint,
     sp: Span,
     msg: &str,
@@ -211,11 +212,11 @@ pub fn span_lint_and_sugg<'a, T: LintContext>(
 /// appear once per
 /// replacement. In human-readable format though, it only appears once before
 /// the whole suggestion.
-pub fn multispan_sugg<I>(diag: &mut DiagnosticBuilder<'_>, help_msg: &str, sugg: I)
+pub fn multispan_sugg<I>(diag: &mut Diagnostic, help_msg: &str, sugg: I)
 where
     I: IntoIterator<Item = (Span, String)>,
 {
-    multispan_sugg_with_applicability(diag, help_msg, Applicability::Unspecified, sugg)
+    multispan_sugg_with_applicability(diag, help_msg, Applicability::Unspecified, sugg);
 }
 
 /// Create a suggestion made from several `span → replacement`.
@@ -224,7 +225,7 @@ where
 /// multiple spans. This is tracked in issue [rustfix#141](https://github.com/rust-lang/rustfix/issues/141).
 /// Suggestions with multiple spans will be silently ignored.
 pub fn multispan_sugg_with_applicability<I>(
-    diag: &mut DiagnosticBuilder<'_>,
+    diag: &mut Diagnostic,
     help_msg: &str,
     applicability: Applicability,
     sugg: I,

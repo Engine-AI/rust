@@ -1,4 +1,4 @@
-pub mod printf {
+pub(crate) mod printf {
     use super::strcursor::StrCursor as Cur;
     use rustc_span::InnerSpan;
 
@@ -7,28 +7,29 @@ pub mod printf {
     pub enum Substitution<'a> {
         /// A formatted output substitution with its internal byte offset.
         Format(Format<'a>),
-        /// A literal `%%` escape.
-        Escape,
+        /// A literal `%%` escape, with its start and end indices.
+        Escape((usize, usize)),
     }
 
     impl<'a> Substitution<'a> {
         pub fn as_str(&self) -> &str {
-            match *self {
-                Substitution::Format(ref fmt) => fmt.span,
-                Substitution::Escape => "%%",
+            match self {
+                Substitution::Format(fmt) => fmt.span,
+                Substitution::Escape(_) => "%%",
             }
         }
 
         pub fn position(&self) -> Option<InnerSpan> {
-            match *self {
-                Substitution::Format(ref fmt) => Some(fmt.position),
-                _ => None,
+            match self {
+                Substitution::Format(fmt) => Some(fmt.position),
+                &Substitution::Escape((start, end)) => Some(InnerSpan::new(start, end)),
             }
         }
 
         pub fn set_position(&mut self, start: usize, end: usize) {
-            if let Substitution::Format(ref mut fmt) = self {
-                fmt.position = InnerSpan::new(start, end);
+            match self {
+                Substitution::Format(fmt) => fmt.position = InnerSpan::new(start, end),
+                Substitution::Escape(pos) => *pos = (start, end),
             }
         }
 
@@ -36,10 +37,10 @@ pub mod printf {
         ///
         /// This ignores cases where the substitution does not have an exact equivalent, or where
         /// the substitution would be unnecessary.
-        pub fn translate(&self) -> Option<String> {
-            match *self {
-                Substitution::Format(ref fmt) => fmt.translate(),
-                Substitution::Escape => None,
+        pub fn translate(&self) -> Result<String, Option<String>> {
+            match self {
+                Substitution::Format(fmt) => fmt.translate(),
+                Substitution::Escape(_) => Err(None),
             }
         }
     }
@@ -68,9 +69,9 @@ pub mod printf {
     impl Format<'_> {
         /// Translate this directive into an equivalent Rust formatting directive.
         ///
-        /// Returns `None` in cases where the `printf` directive does not have an exact Rust
+        /// Returns `Err` in cases where the `printf` directive does not have an exact Rust
         /// equivalent, rather than guessing.
-        pub fn translate(&self) -> Option<String> {
+        pub fn translate(&self) -> Result<String, Option<String>> {
             use std::fmt::Write;
 
             let (c_alt, c_zero, c_left, c_plus) = {
@@ -84,7 +85,12 @@ pub mod printf {
                         '0' => c_zero = true,
                         '-' => c_left = true,
                         '+' => c_plus = true,
-                        _ => return None,
+                        _ => {
+                            return Err(Some(format!(
+                                "the flag `{}` is unknown or unsupported",
+                                c
+                            )));
+                        }
                     }
                 }
                 (c_alt, c_zero, c_left, c_plus)
@@ -104,7 +110,9 @@ pub mod printf {
             let width = match self.width {
                 Some(Num::Next) => {
                     // NOTE: Rust doesn't support this.
-                    return None;
+                    return Err(Some(
+                        "you have to use a positional or named parameter for the width".to_string(),
+                    ));
                 }
                 w @ Some(Num::Arg(_)) => w,
                 w @ Some(Num::Num(_)) => w,
@@ -125,13 +133,21 @@ pub mod printf {
                 "p" => (Some(self.type_), false, true),
                 "g" => (Some("e"), true, false),
                 "G" => (Some("E"), true, false),
-                _ => return None,
+                _ => {
+                    return Err(Some(format!(
+                        "the conversion specifier `{}` is unknown or unsupported",
+                        self.type_
+                    )));
+                }
             };
 
             let (fill, width, precision) = match (is_int, width, precision) {
                 (true, Some(_), Some(_)) => {
                     // Rust can't duplicate this insanity.
-                    return None;
+                    return Err(Some(
+                        "width and precision cannot both be specified for integer conversions"
+                            .to_string(),
+                    ));
                 }
                 (true, None, Some(p)) => (Some("0"), Some(p), None),
                 (true, w, None) => (fill, w, None),
@@ -169,7 +185,17 @@ pub mod printf {
             s.push('{');
 
             if let Some(arg) = self.parameter {
-                write!(s, "{}", arg.checked_sub(1)?).ok()?;
+                match write!(
+                    s,
+                    "{}",
+                    match arg.checked_sub(1) {
+                        Some(a) => a,
+                        None => return Err(None),
+                    }
+                ) {
+                    Err(_) => return Err(None),
+                    _ => {}
+                }
             }
 
             if has_options {
@@ -199,12 +225,18 @@ pub mod printf {
                 }
 
                 if let Some(width) = width {
-                    width.translate(&mut s).ok()?;
+                    match width.translate(&mut s) {
+                        Err(_) => return Err(None),
+                        _ => {}
+                    }
                 }
 
                 if let Some(precision) = precision {
                     s.push('.');
-                    precision.translate(&mut s).ok()?;
+                    match precision.translate(&mut s) {
+                        Err(_) => return Err(None),
+                        _ => {}
+                    }
                 }
 
                 if let Some(type_) = type_ {
@@ -213,7 +245,7 @@ pub mod printf {
             }
 
             s.push('}');
-            Some(s)
+            Ok(s)
         }
     }
 
@@ -221,7 +253,7 @@ pub mod printf {
     #[derive(Copy, Clone, PartialEq, Debug)]
     pub enum Num {
         // The range of these values is technically bounded by `NL_ARGMAX`... but, at least for GNU
-        // libc, it apparently has no real fixed limit.  A `u16` is used here on the basis that it
+        // libc, it apparently has no real fixed limit. A `u16` is used here on the basis that it
         // is *vanishingly* unlikely that *anyone* is going to try formatting something wider, or
         // with more precision, than 32 thousand positions which is so wide it couldn't possibly fit
         // on a screen.
@@ -273,14 +305,9 @@ pub mod printf {
         fn next(&mut self) -> Option<Self::Item> {
             let (mut sub, tail) = parse_next_substitution(self.s)?;
             self.s = tail;
-            match sub {
-                Substitution::Format(_) => {
-                    if let Some(inner_span) = sub.position() {
-                        sub.set_position(inner_span.start + self.pos, inner_span.end + self.pos);
-                        self.pos += inner_span.end;
-                    }
-                }
-                Substitution::Escape => self.pos += 2,
+            if let Some(InnerSpan { start, end }) = sub.position() {
+                sub.set_position(start + self.pos, end + self.pos);
+                self.pos += end;
             }
             Some(sub)
         }
@@ -309,7 +336,7 @@ pub mod printf {
         let at = {
             let start = s.find('%')?;
             if let '%' = s[start + 1..].chars().next()? {
-                return Some((Substitution::Escape, &s[start + 2..]));
+                return Some((Substitution::Escape((start, start + 2)), &s[start + 2..]));
             }
 
             Cur::new_at(s, start)
@@ -608,26 +635,20 @@ pub mod shell {
         }
 
         pub fn position(&self) -> Option<InnerSpan> {
-            match self {
-                Substitution::Ordinal(_, pos)
-                | Substitution::Name(_, pos)
-                | Substitution::Escape(pos) => Some(InnerSpan::new(pos.0, pos.1)),
-            }
+            let (Self::Ordinal(_, pos) | Self::Name(_, pos) | Self::Escape(pos)) = self;
+            Some(InnerSpan::new(pos.0, pos.1))
         }
 
         pub fn set_position(&mut self, start: usize, end: usize) {
-            match self {
-                Substitution::Ordinal(_, ref mut pos)
-                | Substitution::Name(_, ref mut pos)
-                | Substitution::Escape(ref mut pos) => *pos = (start, end),
-            }
+            let (Self::Ordinal(_, pos) | Self::Name(_, pos) | Self::Escape(pos)) = self;
+            *pos = (start, end);
         }
 
-        pub fn translate(&self) -> Option<String> {
-            match *self {
-                Substitution::Ordinal(n, _) => Some(format!("{{{}}}", n)),
-                Substitution::Name(n, _) => Some(format!("{{{}}}", n)),
-                Substitution::Escape(_) => None,
+        pub fn translate(&self) -> Result<String, Option<String>> {
+            match self {
+                Substitution::Ordinal(n, _) => Ok(format!("{{{}}}", n)),
+                Substitution::Name(n, _) => Ok(format!("{{{}}}", n)),
+                Substitution::Escape(_) => Err(None),
             }
         }
     }

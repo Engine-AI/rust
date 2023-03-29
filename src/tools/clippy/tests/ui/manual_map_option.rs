@@ -1,4 +1,3 @@
-// edition:2018
 // run-rustfix
 
 #![warn(clippy::manual_map)]
@@ -8,6 +7,7 @@
     clippy::unit_arg,
     clippy::match_ref_pats,
     clippy::redundant_pattern_matching,
+    for_loops_over_fallibles,
     dead_code
 )]
 
@@ -212,4 +212,12 @@ fn main() {
             None => None,
         };
     }
+
+    // #7077
+    let s = &String::new();
+    #[allow(clippy::needless_match)]
+    let _: Option<&str> = match Some(s) {
+        Some(s) => Some(s),
+        None => None,
+    };
 }

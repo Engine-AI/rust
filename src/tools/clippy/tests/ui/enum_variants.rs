@@ -1,5 +1,4 @@
-#![feature(non_ascii_idents)]
-#![warn(clippy::enum_variant_names, clippy::pub_enum_variant_names)]
+#![warn(clippy::enum_variant_names)]
 #![allow(non_camel_case_types, clippy::upper_case_acronyms)]
 
 enum FakeCallType {
@@ -97,8 +96,8 @@ pub enum PubSeall {
     WithOut,
 }
 
-#[allow(clippy::pub_enum_variant_names)]
-mod allowed {
+#[allow(clippy::enum_variant_names)]
+pub mod allowed {
     pub enum PubAllowed {
         SomeThis,
         SomeThat,
@@ -144,6 +143,40 @@ enum HIDataRequest {
     PutHIData(String),
     GetHIData(String),
     DeleteUnpubHIData(String),
+}
+
+enum North {
+    Normal,
+    NoLeft,
+    NoRight,
+}
+
+// #8324
+enum Phase {
+    PreLookup,
+    Lookup,
+    PostLookup,
+}
+
+mod issue9018 {
+    enum DoLint {
+        _TypeCreate,
+        _TypeRead,
+        _TypeUpdate,
+        _TypeDestroy,
+    }
+
+    enum DoLintToo {
+        _CreateType,
+        _UpdateType,
+        _DeleteType,
+    }
+
+    enum DoNotLint {
+        _Foo,
+        _Bar,
+        _Baz,
+    }
 }
 
 fn main() {}

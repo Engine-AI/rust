@@ -3,13 +3,14 @@
 Thank you for your interest in contributing to Rust! There are many ways to contribute
 and we appreciate all of them.
 
-Documentation for contributing to Rust is located in the [Guide to Rustc Development](https://rustc-dev-guide.rust-lang.org/),
-commonly known as the [rustc-dev-guide]. Despite the name, this guide documents
-not just how to develop rustc (the Rust compiler), but also how to contribute to any part
-of the Rust project.
+The best way to get started is by asking for help in the [#new
+members](https://rust-lang.zulipchat.com/#narrow/stream/122652-new-members)
+Zulip stream. We have lots of docs below of how to get started on your own, but
+the Zulip stream is the best place to *ask* for help.
 
-To get started with contributing, please read the [Contributing to Rust] chapter of the guide.
-That chapter explains how to get your development environment set up and how to get help.
+Documentation for contributing to the compiler or tooling is located in the [Guide to Rustc
+Development][rustc-dev-guide], commonly known as the [rustc-dev-guide]. Documentation for the
+standard library in the [Standard library developers Guide][std-dev-guide], commonly known as the [std-dev-guide].
 
 ## About the [rustc-dev-guide]
 
@@ -34,6 +35,7 @@ refer to [this section][contributing-bug-reports] and [open an issue][issue temp
 
 [Contributing to Rust]: https://rustc-dev-guide.rust-lang.org/contributing.html#contributing-to-rust
 [rustc-dev-guide]: https://rustc-dev-guide.rust-lang.org/
+[std-dev-guide]: https://std-dev-guide.rust-lang.org/
 [contributing-bug-reports]: https://rustc-dev-guide.rust-lang.org/contributing.html#bug-reports
 [issue template]: https://github.com/rust-lang/rust/issues/new/choose
 [internals]: https://internals.rust-lang.org

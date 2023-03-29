@@ -1,6 +1,6 @@
 use crate::llvm;
 
-use crate::abi::{Abi, FnAbi};
+use crate::abi::Abi;
 use crate::builder::Builder;
 use crate::common::CodegenCx;
 
@@ -20,15 +20,12 @@ use rustc_middle::mir::coverage::{
     CodeRegion, CounterValueReference, ExpressionOperandId, InjectedExpressionId, Op,
 };
 use rustc_middle::ty;
-use rustc_middle::ty::layout::FnAbiExt;
+use rustc_middle::ty::layout::FnAbiOf;
 use rustc_middle::ty::subst::InternalSubsts;
 use rustc_middle::ty::Instance;
 
 use std::cell::RefCell;
 use std::ffi::CString;
-
-use std::iter;
-use tracing::debug;
 
 pub mod mapgen;
 
@@ -38,7 +35,7 @@ const VAR_ALIGN_BYTES: usize = 8;
 
 /// A context object for maintaining all state needed by the coverageinfo module.
 pub struct CrateCoverageContext<'ll, 'tcx> {
-    // Coverage data for each instrumented function identified by DefId.
+    /// Coverage data for each instrumented function identified by DefId.
     pub(crate) function_coverage_map: RefCell<FxHashMap<Instance<'tcx>, FunctionCoverage<'tcx>>>,
     pub(crate) pgo_func_name_var_map: RefCell<FxHashMap<Instance<'tcx>, &'ll llvm::Value>>,
 }
@@ -56,7 +53,7 @@ impl<'ll, 'tcx> CrateCoverageContext<'ll, 'tcx> {
     }
 }
 
-impl CoverageInfoMethods<'tcx> for CodegenCx<'ll, 'tcx> {
+impl<'ll, 'tcx> CoverageInfoMethods<'tcx> for CodegenCx<'ll, 'tcx> {
     fn coverageinfo_finalize(&self) {
         mapgen::finalize(self)
     }
@@ -90,13 +87,13 @@ impl CoverageInfoMethods<'tcx> for CodegenCx<'ll, 'tcx> {
     /// call. Since the function is never called, all other `CodeRegion`s can be
     /// added as `unreachable_region`s.
     fn define_unused_fn(&self, def_id: DefId) {
-        let instance = declare_unused_fn(self, &def_id);
+        let instance = declare_unused_fn(self, def_id);
         codegen_unused_fn_and_counter(self, instance);
         add_unused_function_coverage(self, instance, def_id);
     }
 }
 
-impl CoverageInfoBuilderMethods<'tcx> for Builder<'a, 'll, 'tcx> {
+impl<'tcx> CoverageInfoBuilderMethods<'tcx> for Builder<'_, '_, 'tcx> {
     fn set_function_source_hash(
         &mut self,
         instance: Instance<'tcx>,
@@ -184,12 +181,12 @@ impl CoverageInfoBuilderMethods<'tcx> for Builder<'a, 'll, 'tcx> {
     }
 }
 
-fn declare_unused_fn(cx: &CodegenCx<'ll, 'tcx>, def_id: &DefId) -> Instance<'tcx> {
+fn declare_unused_fn<'tcx>(cx: &CodegenCx<'_, 'tcx>, def_id: DefId) -> Instance<'tcx> {
     let tcx = cx.tcx;
 
     let instance = Instance::new(
-        *def_id,
-        InternalSubsts::for_item(tcx, *def_id, |param, _| {
+        def_id,
+        InternalSubsts::for_item(tcx, def_id, |param, _| {
             if let ty::GenericParamDefKind::Lifetime = param.kind {
                 tcx.lifetimes.re_erased.into()
             } else {
@@ -199,31 +196,31 @@ fn declare_unused_fn(cx: &CodegenCx<'ll, 'tcx>, def_id: &DefId) -> Instance<'tcx
     );
 
     let llfn = cx.declare_fn(
-        &tcx.symbol_name(instance).name,
-        &FnAbi::of_fn_ptr(
-            cx,
+        tcx.symbol_name(instance).name,
+        cx.fn_abi_of_fn_ptr(
             ty::Binder::dummy(tcx.mk_fn_sig(
-                iter::once(tcx.mk_unit()),
+                [tcx.mk_unit()],
                 tcx.mk_unit(),
                 false,
                 hir::Unsafety::Unsafe,
                 Abi::Rust,
             )),
-            &[],
+            ty::List::empty(),
         ),
     );
 
-    llvm::set_linkage(llfn, llvm::Linkage::WeakAnyLinkage);
-    llvm::set_visibility(llfn, llvm::Visibility::Hidden);
+    llvm::set_linkage(llfn, llvm::Linkage::PrivateLinkage);
+    llvm::set_visibility(llfn, llvm::Visibility::Default);
 
     assert!(cx.instances.borrow_mut().insert(instance, llfn).is_none());
 
     instance
 }
 
-fn codegen_unused_fn_and_counter(cx: &CodegenCx<'ll, 'tcx>, instance: Instance<'tcx>) {
+fn codegen_unused_fn_and_counter<'tcx>(cx: &CodegenCx<'_, 'tcx>, instance: Instance<'tcx>) {
     let llfn = cx.get_fn(instance);
-    let mut bx = Builder::new_block(cx, llfn, "unused_function");
+    let llbb = Builder::append_block(cx, llfn, "unused_function");
+    let mut bx = Builder::build(cx, llbb);
     let fn_name = bx.get_pgo_func_name_var(instance);
     let hash = bx.const_u64(0);
     let num_counters = bx.const_u32(1);
@@ -237,8 +234,8 @@ fn codegen_unused_fn_and_counter(cx: &CodegenCx<'ll, 'tcx>, instance: Instance<'
     bx.ret_void();
 }
 
-fn add_unused_function_coverage(
-    cx: &CodegenCx<'ll, 'tcx>,
+fn add_unused_function_coverage<'tcx>(
+    cx: &CodegenCx<'_, 'tcx>,
     instance: Instance<'tcx>,
     def_id: DefId,
 ) {
@@ -268,7 +265,7 @@ fn add_unused_function_coverage(
 /// required by LLVM InstrProf source-based coverage instrumentation. Use
 /// `bx.get_pgo_func_name_var()` to ensure the variable is only created once per
 /// `Instance`.
-fn create_pgo_func_name_var(
+fn create_pgo_func_name_var<'ll, 'tcx>(
     cx: &CodegenCx<'ll, 'tcx>,
     instance: Instance<'tcx>,
 ) -> &'ll llvm::Value {

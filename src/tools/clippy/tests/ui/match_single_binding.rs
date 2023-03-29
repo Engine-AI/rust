@@ -1,7 +1,12 @@
 // run-rustfix
-
 #![warn(clippy::match_single_binding)]
-#![allow(unused_variables, clippy::many_single_char_names, clippy::toplevel_ref_arg)]
+#![allow(
+    unused,
+    clippy::let_unit_value,
+    clippy::no_effect,
+    clippy::toplevel_ref_arg,
+    clippy::uninlined_format_args
+)]
 
 struct Point {
     x: i32,
@@ -106,15 +111,7 @@ fn main() {
         0 => println!("Disabled branch"),
         _ => println!("Enabled branch"),
     }
-    // Lint
-    let x = 1;
-    let y = 1;
-    match match y {
-        0 => 1,
-        _ => 2,
-    } {
-        _ => println!("Single branch"),
-    }
+
     // Ok
     let x = 1;
     let y = 1;
@@ -126,10 +123,85 @@ fn main() {
         0 => println!("Array index start"),
         _ => println!("Not an array index start"),
     }
-    // False negative
+
+    // Lint
     let x = 1;
     match x {
         // =>
         _ => println!("Not an array index start"),
     }
+}
+
+fn issue_8723() {
+    let (mut val, idx) = ("a b", 1);
+
+    val = match val.split_at(idx) {
+        (pre, suf) => {
+            println!("{}", pre);
+            suf
+        },
+    };
+
+    let _ = val;
+}
+
+fn side_effects() {}
+
+fn issue_9575() {
+    let _ = || match side_effects() {
+        _ => println!("Needs curlies"),
+    };
+}
+
+fn issue_9725(r: Option<u32>) {
+    match r {
+        x => match x {
+            Some(_) => {
+                println!("Some");
+            },
+            None => {
+                println!("None");
+            },
+        },
+    };
+}
+
+fn issue_10447() -> usize {
+    match 1 {
+        _ => (),
+    }
+
+    let a = match 1 {
+        _ => (),
+    };
+
+    match 1 {
+        _ => side_effects(),
+    }
+
+    let b = match 1 {
+        _ => side_effects(),
+    };
+
+    match 1 {
+        _ => println!("1"),
+    }
+
+    let c = match 1 {
+        _ => println!("1"),
+    };
+
+    let in_expr = [
+        match 1 {
+            _ => (),
+        },
+        match 1 {
+            _ => side_effects(),
+        },
+        match 1 {
+            _ => println!("1"),
+        },
+    ];
+
+    2
 }

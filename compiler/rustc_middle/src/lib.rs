@@ -8,7 +8,7 @@
 //! - **MIR.** The "mid-level (M) intermediate representation (IR)" is
 //!   defined in the `mir` module. This module contains only the
 //!   *definition* of the MIR; the passes that transform and operate
-//!   on MIR are found in `rustc_mir` crate.
+//!   on MIR are found in `rustc_const_eval` crate.
 //! - **Types.** The internal representation of types used in rustc is
 //!   defined in the `ty` module. This includes the **type context**
 //!   (or `tcx`), which is the central context during most of
@@ -23,35 +23,44 @@
 //! This API is completely unstable and subject to change.
 
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
+#![feature(allocator_api)]
 #![feature(array_windows)]
 #![feature(assert_matches)]
-#![feature(backtrace)]
-#![feature(bool_to_option)]
 #![feature(box_patterns)]
-#![feature(box_syntax)]
-#![feature(const_fn)]
-#![feature(const_panic)]
 #![feature(core_intrinsics)]
 #![feature(discriminant_kind)]
+#![feature(exhaustive_patterns)]
+#![feature(generators)]
+#![feature(get_mut_unchecked)]
+#![feature(if_let_guard)]
+#![feature(iter_from_generator)]
+#![feature(local_key_cell_methods)]
+#![feature(negative_impls)]
 #![feature(never_type)]
 #![feature(extern_types)]
-#![feature(nll)]
+#![feature(new_uninit)]
 #![feature(once_cell)]
-#![cfg_attr(bootstrap, feature(or_patterns))]
+#![feature(let_chains)]
 #![feature(min_specialization)]
 #![feature(trusted_len)]
-#![feature(test)]
-#![feature(in_band_lifetimes)]
-#![feature(crate_visibility_modifier)]
+#![feature(type_alias_impl_trait)]
+#![feature(strict_provenance)]
 #![feature(associated_type_bounds)]
 #![feature(rustc_attrs)]
-#![feature(int_error_matching)]
-#![feature(half_open_range_patterns)]
-#![feature(exclusive_range_pattern)]
 #![feature(control_flow_enum)]
-#![feature(associated_type_defaults)]
-#![feature(iter_zip)]
+#![feature(trusted_step)]
+#![feature(try_blocks)]
+#![feature(try_reserve_kind)]
+#![feature(nonzero_ops)]
+#![feature(decl_macro)]
+#![feature(drain_filter)]
+#![feature(intra_doc_pointers)]
+#![feature(yeet_expr)]
+#![feature(result_option_inspect)]
+#![feature(const_option)]
+#![feature(trait_alias)]
 #![recursion_limit = "512"]
+#![allow(rustc::potential_query_instability)]
 
 #[macro_use]
 extern crate bitflags;
@@ -63,6 +72,9 @@ extern crate rustc_data_structures;
 extern crate tracing;
 #[macro_use]
 extern crate smallvec;
+
+use rustc_errors::{DiagnosticMessage, SubdiagnosticMessage};
+use rustc_macros::fluent_messages;
 
 #[cfg(test)]
 mod tests;
@@ -77,14 +89,17 @@ pub mod query;
 pub mod arena;
 #[macro_use]
 pub mod dep_graph;
+pub(crate) mod error;
 pub mod hir;
-pub mod ich;
 pub mod infer;
 pub mod lint;
+pub mod metadata;
 pub mod middle;
 pub mod mir;
+pub mod thir;
 pub mod traits;
 pub mod ty;
+mod values;
 
 pub mod util {
     pub mod bug;
@@ -93,3 +108,5 @@ pub mod util {
 
 // Allows macros to refer to this crate as `::rustc_middle`
 extern crate self as rustc_middle;
+
+fluent_messages! { "../messages.ftl" }

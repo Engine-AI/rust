@@ -1,8 +1,8 @@
 use super::utils::derefs_to_slice;
 use clippy_utils::diagnostics::span_lint_and_sugg;
+use clippy_utils::get_parent_expr;
 use clippy_utils::source::snippet_with_applicability;
-use clippy_utils::ty::{is_type_diagnostic_item, match_type};
-use clippy_utils::{get_parent_expr, paths};
+use clippy_utils::ty::is_type_diagnostic_item;
 use if_chain::if_chain;
 use rustc_errors::Applicability;
 use rustc_hir as hir;
@@ -27,16 +27,16 @@ pub(super) fn check<'tcx>(
     let caller_type = if derefs_to_slice(cx, recv, expr_ty).is_some() {
         needs_ref = get_args_str.parse::<usize>().is_ok();
         "slice"
-    } else if is_type_diagnostic_item(cx, expr_ty, sym::vec_type) {
+    } else if is_type_diagnostic_item(cx, expr_ty, sym::Vec) {
         needs_ref = get_args_str.parse::<usize>().is_ok();
         "Vec"
-    } else if is_type_diagnostic_item(cx, expr_ty, sym::vecdeque_type) {
+    } else if is_type_diagnostic_item(cx, expr_ty, sym::VecDeque) {
         needs_ref = get_args_str.parse::<usize>().is_ok();
         "VecDeque"
-    } else if !is_mut && is_type_diagnostic_item(cx, expr_ty, sym::hashmap_type) {
+    } else if !is_mut && is_type_diagnostic_item(cx, expr_ty, sym::HashMap) {
         needs_ref = true;
         "HashMap"
-    } else if !is_mut && match_type(cx, expr_ty, &paths::BTREEMAP) {
+    } else if !is_mut && is_type_diagnostic_item(cx, expr_ty, sym::BTreeMap) {
         needs_ref = true;
         "BTreeMap"
     } else {
@@ -71,16 +71,11 @@ pub(super) fn check<'tcx>(
         cx,
         GET_UNWRAP,
         span,
-        &format!(
-            "called `.get{0}().unwrap()` on a {1}. Using `[]` is more clear and more concise",
-            mut_str, caller_type
-        ),
+        &format!("called `.get{mut_str}().unwrap()` on a {caller_type}. Using `[]` is more clear and more concise"),
         "try this",
         format!(
-            "{}{}[{}]",
-            borrow_str,
-            snippet_with_applicability(cx, recv.span, "..", &mut applicability),
-            get_args_str
+            "{borrow_str}{}[{get_args_str}]",
+            snippet_with_applicability(cx, recv.span, "..", &mut applicability)
         ),
         applicability,
     );

@@ -7,13 +7,16 @@ use rustc_hir::{self as hir, ExprKind};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_session::{declare_lint_pass, declare_tool_lint};
 use rustc_span::symbol::Symbol;
+use std::fmt::{self, Write as _};
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for struct constructors where all fields are shorthand and
+    /// ### What it does
+    /// Checks for struct constructors where all fields are shorthand and
     /// the order of the field init shorthand in the constructor is inconsistent
     /// with the order in the struct definition.
     ///
-    /// **Why is this bad?** Since the order of fields in a constructor doesn't affect the
+    /// ### Why is this bad?
+    /// Since the order of fields in a constructor doesn't affect the
     /// resulted instance as the below example indicates,
     ///
     /// ```rust
@@ -31,10 +34,7 @@ declare_clippy_lint! {
     ///
     /// inconsistent order can be confusing and decreases readability and consistency.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
-    ///
+    /// ### Example
     /// ```rust
     /// struct Foo {
     ///     x: i32,
@@ -56,26 +56,28 @@ declare_clippy_lint! {
     /// # let y = 2;
     /// Foo { x, y };
     /// ```
+    #[clippy::version = "1.52.0"]
     pub INCONSISTENT_STRUCT_CONSTRUCTOR,
-    style,
+    pedantic,
     "the order of the field init shorthand is inconsistent with the order in the struct definition"
 }
 
 declare_lint_pass!(InconsistentStructConstructor => [INCONSISTENT_STRUCT_CONSTRUCTOR]);
 
-impl LateLintPass<'_> for InconsistentStructConstructor {
+impl<'tcx> LateLintPass<'tcx> for InconsistentStructConstructor {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx hir::Expr<'_>) {
         if_chain! {
+            if !expr.span.from_expansion();
             if let ExprKind::Struct(qpath, fields, base) = expr.kind;
             let ty = cx.typeck_results().expr_ty(expr);
             if let Some(adt_def) = ty.ty_adt_def();
             if adt_def.is_struct();
-            if let Some(variant) = adt_def.variants.iter().next();
+            if let Some(variant) = adt_def.variants().iter().next();
             if fields.iter().all(|f| f.is_shorthand);
             then {
                 let mut def_order_map = FxHashMap::default();
                 for (idx, field) in variant.fields.iter().enumerate() {
-                    def_order_map.insert(field.ident.name, idx);
+                    def_order_map.insert(field.name, idx);
                 }
 
                 if is_consistent_order(fields, &def_order_map) {
@@ -88,7 +90,7 @@ impl LateLintPass<'_> for InconsistentStructConstructor {
                 let mut fields_snippet = String::new();
                 let (last_ident, idents) = ordered_fields.split_last().unwrap();
                 for ident in idents {
-                    fields_snippet.push_str(&format!("{}, ", ident));
+                    let _: fmt::Result = write!(fields_snippet, "{ident}, ");
                 }
                 fields_snippet.push_str(&last_ident.to_string());
 
@@ -98,10 +100,8 @@ impl LateLintPass<'_> for InconsistentStructConstructor {
                         String::new()
                     };
 
-                let sugg = format!("{} {{ {}{} }}",
+                let sugg = format!("{} {{ {fields_snippet}{base_snippet} }}",
                     snippet(cx, qpath.span(), ".."),
-                    fields_snippet,
-                    base_snippet,
                     );
 
                 span_lint_and_sugg(

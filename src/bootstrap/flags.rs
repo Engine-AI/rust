@@ -3,18 +3,17 @@
 //! This module implements the command-line parsing of the build system which
 //! has various flags to configure how it's run.
 
-use std::env;
 use std::path::PathBuf;
-use std::process;
 
-use build_helper::t;
 use getopts::Options;
 
-use crate::builder::Builder;
+use crate::builder::{Builder, Kind};
 use crate::config::{Config, TargetSelection};
 use crate::setup::Profile;
+use crate::util::t;
 use crate::{Build, DocTests};
 
+#[derive(Copy, Clone)]
 pub enum Color {
     Always,
     Never,
@@ -51,6 +50,7 @@ pub struct Flags {
     pub host: Option<Vec<TargetSelection>>,
     pub target: Option<Vec<TargetSelection>>,
     pub config: Option<PathBuf>,
+    pub build_dir: Option<PathBuf>,
     pub jobs: Option<u32>,
     pub cmd: Subcommand,
     pub incremental: bool,
@@ -67,53 +67,73 @@ pub struct Flags {
     // true => deny, false => warn
     pub deny_warnings: Option<bool>,
 
-    pub llvm_skip_rebuild: Option<bool>,
-
     pub rust_profile_use: Option<String>,
     pub rust_profile_generate: Option<String>,
+
+    pub llvm_profile_use: Option<String>,
+    // LLVM doesn't support a custom location for generating profile
+    // information.
+    //
+    // llvm_out/build/profiles/ is the location this writes to.
+    pub llvm_profile_generate: bool,
+    pub llvm_bolt_profile_generate: bool,
+    pub llvm_bolt_profile_use: Option<String>,
+
+    /// Arguments appearing after `--` to be forwarded to tools,
+    /// e.g. `--fix-broken` or test arguments.
+    pub free_args: Option<Vec<String>>,
 }
 
+#[derive(Debug)]
+#[cfg_attr(test, derive(Clone))]
 pub enum Subcommand {
     Build {
         paths: Vec<PathBuf>,
     },
     Check {
-        // Whether to run checking over all targets (e.g., unit / integration
-        // tests).
-        all_targets: bool,
         paths: Vec<PathBuf>,
     },
     Clippy {
         fix: bool,
         paths: Vec<PathBuf>,
+        clippy_lint_allow: Vec<String>,
+        clippy_lint_deny: Vec<String>,
+        clippy_lint_warn: Vec<String>,
+        clippy_lint_forbid: Vec<String>,
     },
     Fix {
         paths: Vec<PathBuf>,
     },
     Format {
+        paths: Vec<PathBuf>,
         check: bool,
     },
     Doc {
         paths: Vec<PathBuf>,
         open: bool,
+        json: bool,
     },
     Test {
         paths: Vec<PathBuf>,
         /// Whether to automatically update stderr/stdout files
         bless: bool,
+        force_rerun: bool,
         compare_mode: Option<String>,
         pass: Option<String>,
+        run: Option<String>,
         test_args: Vec<String>,
         rustc_args: Vec<String>,
         fail_fast: bool,
         doc_tests: DocTests,
         rustfix_coverage: bool,
+        only_modified: bool,
     },
     Bench {
         paths: Vec<PathBuf>,
         test_args: Vec<String>,
     },
     Clean {
+        paths: Vec<PathBuf>,
         all: bool,
     },
     Dist {
@@ -124,9 +144,10 @@ pub enum Subcommand {
     },
     Run {
         paths: Vec<PathBuf>,
+        args: Vec<String>,
     },
     Setup {
-        profile: Profile,
+        profile: Option<PathBuf>,
     },
 }
 
@@ -138,6 +159,12 @@ impl Default for Subcommand {
 
 impl Flags {
     pub fn parse(args: &[String]) -> Flags {
+        let (args, free_args) = if let Some(pos) = args.iter().position(|s| s == "--") {
+            let (args, free) = args.split_at(pos);
+            (args, Some(free[1..].to_vec()))
+        } else {
+            (args, None)
+        };
         let mut subcommand_help = String::from(
             "\
 Usage: x.py <subcommand> [options] [<paths>...]
@@ -150,7 +177,7 @@ Subcommands:
     fmt         Run rustfmt
     test, t     Build and run some test suites
     bench       Build and run some benchmarks
-    doc         Build documentation
+    doc, d      Build documentation
     clean       Clean out build directories
     dist        Build distribution artifacts
     install     Install distribution artifacts
@@ -165,6 +192,12 @@ To learn more about a subcommand, run `./x.py <subcommand> -h`",
         opts.optflagmulti("v", "verbose", "use verbose output (-vv for very verbose)");
         opts.optflag("i", "incremental", "use incremental compilation");
         opts.optopt("", "config", "TOML configuration file for build", "FILE");
+        opts.optopt(
+            "",
+            "build-dir",
+            "Build directory, overrides `build.build-dir` in `config.toml`",
+            "DIR",
+        );
         opts.optopt("", "build", "build target of the stage0 compiler", "BUILD");
         opts.optmulti("", "host", "host targets to build", "HOST");
         opts.optmulti("", "target", "target targets to build", "TARGET");
@@ -201,7 +234,7 @@ To learn more about a subcommand, run `./x.py <subcommand> -h`",
         let j_msg = format!(
             "number of jobs to run in parallel; \
              defaults to {} (this host's logical CPU count)",
-            num_cpus::get()
+            std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
         );
         opts.optopt("j", "jobs", &j_msg, "JOBS");
         opts.optflag("h", "help", "print this help message");
@@ -216,40 +249,26 @@ To learn more about a subcommand, run `./x.py <subcommand> -h`",
         opts.optopt("", "color", "whether to use color in cargo and rustc output", "STYLE");
         opts.optopt(
             "",
-            "llvm-skip-rebuild",
-            "whether rebuilding llvm should be skipped \
-             a VALUE of TRUE indicates that llvm will not be rebuilt \
-             VALUE overrides the skip-rebuild option in config.toml.",
-            "VALUE",
+            "rust-profile-generate",
+            "generate PGO profile with rustc build",
+            "PROFILE",
         );
-        opts.optopt("", "rust-profile-generate", "rustc error format", "FORMAT");
-        opts.optopt("", "rust-profile-use", "rustc error format", "FORMAT");
+        opts.optopt("", "rust-profile-use", "use PGO profile for rustc build", "PROFILE");
+        opts.optflag("", "llvm-profile-generate", "generate PGO profile with llvm built for rustc");
+        opts.optopt("", "llvm-profile-use", "use PGO profile for llvm build", "PROFILE");
+        opts.optmulti("A", "", "allow certain clippy lints", "OPT");
+        opts.optmulti("D", "", "deny certain clippy lints", "OPT");
+        opts.optmulti("W", "", "warn about certain clippy lints", "OPT");
+        opts.optmulti("F", "", "forbid certain clippy lints", "OPT");
+        opts.optflag("", "llvm-bolt-profile-generate", "generate BOLT profile for LLVM build");
+        opts.optopt("", "llvm-bolt-profile-use", "use BOLT profile for LLVM build", "PROFILE");
 
         // We can't use getopt to parse the options until we have completed specifying which
         // options are valid, but under the current implementation, some options are conditional on
         // the subcommand. Therefore we must manually identify the subcommand first, so that we can
         // complete the definition of the options.  Then we can use the getopt::Matches object from
         // there on out.
-        let subcommand = args.iter().find(|&s| {
-            (s == "build")
-                || (s == "b")
-                || (s == "check")
-                || (s == "c")
-                || (s == "clippy")
-                || (s == "fix")
-                || (s == "fmt")
-                || (s == "test")
-                || (s == "t")
-                || (s == "bench")
-                || (s == "doc")
-                || (s == "clean")
-                || (s == "dist")
-                || (s == "install")
-                || (s == "run")
-                || (s == "r")
-                || (s == "setup")
-        });
-        let subcommand = match subcommand {
+        let subcommand = match args.iter().find_map(|s| Kind::parse(&s)) {
             Some(s) => s,
             None => {
                 // No or an invalid subcommand -- show the general usage and subcommand help
@@ -257,14 +276,15 @@ To learn more about a subcommand, run `./x.py <subcommand> -h`",
                 // subcommand.
                 println!("{}\n", subcommand_help);
                 let exit_code = if args.is_empty() { 0 } else { 1 };
-                process::exit(exit_code);
+                crate::detail_exit(exit_code);
             }
         };
 
         // Some subcommands get extra options
-        match subcommand.as_str() {
-            "test" | "t" => {
+        match subcommand {
+            Kind::Test => {
                 opts.optflag("", "no-fail-fast", "Run all tests regardless of failure");
+                opts.optmulti("", "skip", "skips tests matching SUBSTRING, if supported by test tool. May be passed multiple times", "SUBSTRING");
                 opts.optmulti(
                     "",
                     "test-args",
@@ -281,6 +301,8 @@ To learn more about a subcommand, run `./x.py <subcommand> -h`",
                 opts.optflag("", "no-doc", "do not run doc tests");
                 opts.optflag("", "doc", "only run doc tests");
                 opts.optflag("", "bless", "update all stderr/stdout files of failing ui tests");
+                opts.optflag("", "force-rerun", "rerun tests even if the inputs are unchanged");
+                opts.optflag("", "only-modified", "only run tests that result has been changed");
                 opts.optopt(
                     "",
                     "compare-mode",
@@ -293,6 +315,7 @@ To learn more about a subcommand, run `./x.py <subcommand> -h`",
                     "force {check,build,run}-pass tests to this mode.",
                     "check | build | run",
                 );
+                opts.optopt("", "run", "whether to execute run-* tests", "auto | always | never");
                 opts.optflag(
                     "",
                     "rustfix-coverage",
@@ -300,50 +323,65 @@ To learn more about a subcommand, run `./x.py <subcommand> -h`",
                         `/<build_base>/rustfix_missing_coverage.txt`",
                 );
             }
-            "check" | "c" => {
+            Kind::Check => {
                 opts.optflag("", "all-targets", "Check all targets");
             }
-            "bench" => {
+            Kind::Bench => {
                 opts.optmulti("", "test-args", "extra arguments", "ARGS");
             }
-            "clippy" => {
+            Kind::Clippy => {
                 opts.optflag("", "fix", "automatically apply lint suggestions");
             }
-            "doc" => {
+            Kind::Doc => {
                 opts.optflag("", "open", "open the docs in a browser");
+                opts.optflag(
+                    "",
+                    "json",
+                    "render the documentation in JSON format in addition to the usual HTML format",
+                );
             }
-            "clean" => {
+            Kind::Clean => {
                 opts.optflag("", "all", "clean all build artifacts");
             }
-            "fmt" => {
+            Kind::Format => {
                 opts.optflag("", "check", "check formatting instead of applying.");
+            }
+            Kind::Run => {
+                opts.optmulti("", "args", "arguments for the tool", "ARGS");
             }
             _ => {}
         };
 
         // fn usage()
         let usage = |exit_code: i32, opts: &Options, verbose: bool, subcommand_help: &str| -> ! {
-            let mut extra_help = String::new();
-
-            // All subcommands except `clean` can have an optional "Available paths" section
+            println!("{}", opts.usage(subcommand_help));
             if verbose {
-                let config = Config::parse(&["build".to_string()]);
+                // We have an unfortunate situation here: some Steps use `builder.in_tree_crates` to determine their paths.
+                // To determine those crates, we need to run `cargo metadata`, which means we need all submodules to be checked out.
+                // That takes a while to run, so only do it when paths were explicitly requested, not on all CLI errors.
+                // `Build::new` won't load submodules for the `setup` command.
+                let cmd = if verbose {
+                    println!("note: updating submodules before printing available paths");
+                    "build"
+                } else {
+                    "setup"
+                };
+                let config = Config::parse(&[cmd.to_string()]);
                 let build = Build::new(config);
+                let paths = Builder::get_help(&build, subcommand);
 
-                let maybe_rules_help = Builder::get_help(&build, subcommand.as_str());
-                extra_help.push_str(maybe_rules_help.unwrap_or_default().as_str());
-            } else if !(subcommand.as_str() == "clean" || subcommand.as_str() == "fmt") {
-                extra_help.push_str(
-                    format!("Run `./x.py {} -h -v` to see a list of available paths.", subcommand)
-                        .as_str(),
+                if let Some(s) = paths {
+                    println!("{}", s);
+                } else {
+                    panic!("No paths available for subcommand `{}`", subcommand.as_str());
+                }
+            } else {
+                println!(
+                    "Run `./x.py {} -h -v` to see a list of available paths.",
+                    subcommand.as_str()
                 );
             }
-
-            println!("{}", opts.usage(subcommand_help));
-            if !extra_help.is_empty() {
-                println!("{}", extra_help);
-            }
-            process::exit(exit_code);
+            crate::detail_exit(exit_code);
         };
 
         // Done specifying what options are possible, so do the getopts parsing
@@ -359,7 +397,7 @@ To learn more about a subcommand, run `./x.py <subcommand> -h`",
         //            ^-- option  ^     ^- actual subcommand
         //                        \_ arg to option could be mistaken as subcommand
         let mut pass_sanity_check = true;
-        match matches.free.get(0) {
+        match matches.free.get(0).and_then(|s| Kind::parse(&s)) {
             Some(check_subcommand) => {
                 if check_subcommand != subcommand {
                     pass_sanity_check = false;
@@ -370,60 +408,48 @@ To learn more about a subcommand, run `./x.py <subcommand> -h`",
             }
         }
         if !pass_sanity_check {
-            println!("{}\n", subcommand_help);
-            println!(
+            eprintln!("{}\n", subcommand_help);
+            eprintln!(
                 "Sorry, I couldn't figure out which subcommand you were trying to specify.\n\
                  You may need to move some options to after the subcommand.\n"
             );
-            process::exit(1);
+            crate::detail_exit(1);
         }
         // Extra help text for some commands
-        match subcommand.as_str() {
-            "build" | "b" => {
+        match subcommand {
+            Kind::Build => {
+                subcommand_help.push_str(
+                    "\n
+Arguments:
+    This subcommand accepts a number of paths to directories to the crates
+    and/or artifacts to compile. For example, for a quick build of a usable
+    compiler:
+
+        ./x.py build --stage 1 library/std
+
+    This will build a compiler and standard library from the local source code.
+    Once this is done, build/$ARCH/stage1 contains a usable compiler.
+
+    If no arguments are passed then the default artifacts for that stage are
+    compiled. For example:
+
+        ./x.py build --stage 0
+        ./x.py build ",
+                );
+            }
+            Kind::Check => {
                 subcommand_help.push_str(
                     "\n
 Arguments:
     This subcommand accepts a number of paths to directories to the crates
     and/or artifacts to compile. For example:
 
-        ./x.py build library/core
-        ./x.py build library/core library/proc_macro
-        ./x.py build library/std --stage 1
+        ./x.py check library/std
 
-    If no arguments are passed then the complete artifacts for that stage are
-    also compiled.
-
-        ./x.py build
-        ./x.py build --stage 1
-
-    For a quick build of a usable compiler, you can pass:
-
-        ./x.py build --stage 1 library/test
-
-    This will first build everything once (like `--stage 0` without further
-    arguments would), and then use the compiler built in stage 0 to build
-    library/test and its dependencies.
-    Once this is done, build/$ARCH/stage1 contains a usable compiler.",
+    If no arguments are passed then many artifacts are checked.",
                 );
             }
-            "check" | "c" => {
-                subcommand_help.push_str(
-                    "\n
-Arguments:
-    This subcommand accepts a number of paths to directories to the crates
-    and/or artifacts to compile. For example:
-
-        ./x.py check library/core
-        ./x.py check library/core library/proc_macro
-
-    If no arguments are passed then the complete artifacts are compiled: std, test, and rustc. Note
-    also that since we use `cargo check`, by default this will automatically enable incremental
-    compilation, so there's no need to pass it separately, though it won't hurt. We also completely
-    ignore the stage passed, as there's no way to compile in non-stage 0 without actually building
-    the compiler.",
-                );
-            }
-            "clippy" => {
+            Kind::Clippy => {
                 subcommand_help.push_str(
                     "\n
 Arguments:
@@ -434,7 +460,7 @@ Arguments:
         ./x.py clippy library/core library/proc_macro",
                 );
             }
-            "fix" => {
+            Kind::Fix => {
                 subcommand_help.push_str(
                     "\n
 Arguments:
@@ -445,7 +471,7 @@ Arguments:
         ./x.py fix library/core library/proc_macro",
                 );
             }
-            "fmt" => {
+            Kind::Format => {
                 subcommand_help.push_str(
                     "\n
 Arguments:
@@ -456,20 +482,20 @@ Arguments:
         ./x.py fmt --check",
                 );
             }
-            "test" | "t" => {
+            Kind::Test => {
                 subcommand_help.push_str(
                     "\n
 Arguments:
     This subcommand accepts a number of paths to test directories that
     should be compiled and run. For example:
 
-        ./x.py test src/test/ui
+        ./x.py test tests/ui
         ./x.py test library/std --test-args hash_map
         ./x.py test library/std --stage 0 --no-doc
-        ./x.py test src/test/ui --bless
-        ./x.py test src/test/ui --compare-mode nll
+        ./x.py test tests/ui --bless
+        ./x.py test tests/ui --compare-mode chalk
 
-    Note that `test src/test/* --stage N` does NOT depend on `build compiler/rustc --stage N`;
+    Note that `test tests/* --stage N` does NOT depend on `build compiler/rustc --stage N`;
     just like `build library/std --stage N` it tests the compiler produced by the previous
     stage.
 
@@ -484,7 +510,7 @@ Arguments:
         ./x.py test --stage 1",
                 );
             }
-            "doc" => {
+            Kind::Doc => {
                 subcommand_help.push_str(
                     "\n
 Arguments:
@@ -494,6 +520,7 @@ Arguments:
         ./x.py doc src/doc/book
         ./x.py doc src/doc/nomicon
         ./x.py doc src/doc/book library/std
+        ./x.py doc library/std --json
         ./x.py doc library/std --open
 
     If no arguments are passed then everything is documented:
@@ -502,7 +529,7 @@ Arguments:
         ./x.py doc --stage 1",
                 );
             }
-            "run" | "r" => {
+            Kind::Run => {
                 subcommand_help.push_str(
                     "\n
 Arguments:
@@ -514,10 +541,11 @@ Arguments:
     At least a tool needs to be called.",
                 );
             }
-            "setup" => {
+            Kind::Setup => {
                 subcommand_help.push_str(&format!(
                     "\n
-x.py setup creates a `config.toml` which changes the defaults for x.py itself.
+x.py setup creates a `config.toml` which changes the defaults for x.py itself,
+as well as setting up a git pre-push hook, VS code config and toolchain link.
 
 Arguments:
     This subcommand accepts a 'profile' to use for builds. For example:
@@ -527,16 +555,21 @@ Arguments:
     The profile is optional and you will be prompted interactively if it is not given.
     The following profiles are available:
 
-{}",
+{}
+
+    To only set up the git hook, VS code or toolchain link, you may use
+        ./x.py setup hook
+        ./x.py setup vscode
+        ./x.py setup link
+",
                     Profile::all_for_help("        ").trim_end()
                 ));
             }
-            _ => {}
+            Kind::Bench | Kind::Clean | Kind::Dist | Kind::Install => {}
         };
         // Get any optional paths which occur after the subcommand
         let mut paths = matches.free[1..].iter().map(|p| p.into()).collect::<Vec<PathBuf>>();
 
-        let cfg_file = env::var_os("BOOTSTRAP_CONFIG").map(PathBuf::from);
         let verbose = matches.opt_present("verbose");
 
         // User passed in -h/--help?
@@ -544,22 +577,37 @@ Arguments:
             usage(0, &opts, verbose, &subcommand_help);
         }
 
-        let cmd = match subcommand.as_str() {
-            "build" | "b" => Subcommand::Build { paths },
-            "check" | "c" => {
-                Subcommand::Check { paths, all_targets: matches.opt_present("all-targets") }
+        let cmd = match subcommand {
+            Kind::Build => Subcommand::Build { paths },
+            Kind::Check => {
+                if matches.opt_present("all-targets") {
+                    println!(
+                        "Warning: --all-targets is now on by default and does not need to be passed explicitly."
+                    );
+                }
+                Subcommand::Check { paths }
             }
-            "clippy" => Subcommand::Clippy { paths, fix: matches.opt_present("fix") },
-            "fix" => Subcommand::Fix { paths },
-            "test" | "t" => Subcommand::Test {
+            Kind::Clippy => Subcommand::Clippy {
+                paths,
+                fix: matches.opt_present("fix"),
+                clippy_lint_allow: matches.opt_strs("A"),
+                clippy_lint_warn: matches.opt_strs("W"),
+                clippy_lint_deny: matches.opt_strs("D"),
+                clippy_lint_forbid: matches.opt_strs("F"),
+            },
+            Kind::Fix => Subcommand::Fix { paths },
+            Kind::Test => Subcommand::Test {
                 paths,
                 bless: matches.opt_present("bless"),
+                force_rerun: matches.opt_present("force-rerun"),
                 compare_mode: matches.opt_str("compare-mode"),
                 pass: matches.opt_str("pass"),
+                run: matches.opt_str("run"),
                 test_args: matches.opt_strs("test-args"),
                 rustc_args: matches.opt_strs("rustc-args"),
                 fail_fast: !matches.opt_present("no-fail-fast"),
                 rustfix_coverage: matches.opt_present("rustfix-coverage"),
+                only_modified: matches.opt_present("only-modified"),
                 doc_tests: if matches.opt_present("doc") {
                     DocTests::Only
                 } else if matches.opt_present("no-doc") {
@@ -568,59 +616,45 @@ Arguments:
                     DocTests::Yes
                 },
             },
-            "bench" => Subcommand::Bench { paths, test_args: matches.opt_strs("test-args") },
-            "doc" => Subcommand::Doc { paths, open: matches.opt_present("open") },
-            "clean" => {
-                if !paths.is_empty() {
-                    println!("\nclean does not take a path argument\n");
-                    usage(1, &opts, verbose, &subcommand_help);
-                }
-
-                Subcommand::Clean { all: matches.opt_present("all") }
-            }
-            "fmt" => Subcommand::Format { check: matches.opt_present("check") },
-            "dist" => Subcommand::Dist { paths },
-            "install" => Subcommand::Install { paths },
-            "run" | "r" => {
+            Kind::Bench => Subcommand::Bench { paths, test_args: matches.opt_strs("test-args") },
+            Kind::Doc => Subcommand::Doc {
+                paths,
+                open: matches.opt_present("open"),
+                json: matches.opt_present("json"),
+            },
+            Kind::Clean => Subcommand::Clean { all: matches.opt_present("all"), paths },
+            Kind::Format => Subcommand::Format { check: matches.opt_present("check"), paths },
+            Kind::Dist => Subcommand::Dist { paths },
+            Kind::Install => Subcommand::Install { paths },
+            Kind::Run => {
                 if paths.is_empty() {
                     println!("\nrun requires at least a path!\n");
                     usage(1, &opts, verbose, &subcommand_help);
                 }
-                Subcommand::Run { paths }
+                Subcommand::Run { paths, args: matches.opt_strs("args") }
             }
-            "setup" => {
+            Kind::Setup => {
                 let profile = if paths.len() > 1 {
-                    println!("\nat most one profile can be passed to setup\n");
+                    eprintln!("\nerror: At most one option can be passed to setup\n");
                     usage(1, &opts, verbose, &subcommand_help)
                 } else if let Some(path) = paths.pop() {
                     let profile_string = t!(path.into_os_string().into_string().map_err(
                         |path| format!("{} is not a valid UTF8 string", path.to_string_lossy())
                     ));
 
-                    profile_string.parse().unwrap_or_else(|err| {
+                    let profile = profile_string.parse().unwrap_or_else(|err| {
                         eprintln!("error: {}", err);
                         eprintln!("help: the available profiles are:");
                         eprint!("{}", Profile::all_for_help("- "));
-                        std::process::exit(1);
-                    })
+                        crate::detail_exit(1);
+                    });
+                    Some(profile)
                 } else {
-                    t!(crate::setup::interactive_path())
+                    None
                 };
                 Subcommand::Setup { profile }
             }
-            _ => {
-                usage(1, &opts, verbose, &subcommand_help);
-            }
         };
-
-        if let Subcommand::Check { .. } = &cmd {
-            if matches.opt_str("keep-stage").is_some()
-                || matches.opt_str("keep-stage-std").is_some()
-            {
-                println!("--keep-stage not yet supported for x.py check");
-                process::exit(1);
-            }
-        }
 
         Flags {
             verbose: matches.opt_count("verbose"),
@@ -659,7 +693,8 @@ Arguments:
             } else {
                 None
             },
-            config: cfg_file,
+            config: matches.opt_str("config").map(PathBuf::from),
+            build_dir: matches.opt_str("build-dir").map(PathBuf::from),
             jobs: matches.opt_str("jobs").map(|j| j.parse().expect("`jobs` should be a number")),
             cmd,
             incremental: matches.opt_present("incremental"),
@@ -669,25 +704,45 @@ Arguments:
                 .collect::<Vec<_>>(),
             include_default_paths: matches.opt_present("include-default-paths"),
             deny_warnings: parse_deny_warnings(&matches),
-            llvm_skip_rebuild: matches.opt_str("llvm-skip-rebuild").map(|s| s.to_lowercase()).map(
-                |s| s.parse::<bool>().expect("`llvm-skip-rebuild` should be either true or false"),
-            ),
             color: matches
                 .opt_get_default("color", Color::Auto)
                 .expect("`color` should be `always`, `never`, or `auto`"),
             rust_profile_use: matches.opt_str("rust-profile-use"),
             rust_profile_generate: matches.opt_str("rust-profile-generate"),
+            llvm_profile_use: matches.opt_str("llvm-profile-use"),
+            llvm_profile_generate: matches.opt_present("llvm-profile-generate"),
+            llvm_bolt_profile_generate: matches.opt_present("llvm-bolt-profile-generate"),
+            llvm_bolt_profile_use: matches.opt_str("llvm-bolt-profile-use"),
+            free_args,
         }
     }
 }
 
 impl Subcommand {
+    pub fn kind(&self) -> Kind {
+        match self {
+            Subcommand::Bench { .. } => Kind::Bench,
+            Subcommand::Build { .. } => Kind::Build,
+            Subcommand::Check { .. } => Kind::Check,
+            Subcommand::Clippy { .. } => Kind::Clippy,
+            Subcommand::Doc { .. } => Kind::Doc,
+            Subcommand::Fix { .. } => Kind::Fix,
+            Subcommand::Format { .. } => Kind::Format,
+            Subcommand::Test { .. } => Kind::Test,
+            Subcommand::Clean { .. } => Kind::Clean,
+            Subcommand::Dist { .. } => Kind::Dist,
+            Subcommand::Install { .. } => Kind::Install,
+            Subcommand::Run { .. } => Kind::Run,
+            Subcommand::Setup { .. } => Kind::Setup,
+        }
+    }
+
     pub fn test_args(&self) -> Vec<&str> {
         match *self {
             Subcommand::Test { ref test_args, .. } | Subcommand::Bench { ref test_args, .. } => {
                 test_args.iter().flat_map(|s| s.split_whitespace()).collect()
             }
-            _ => Vec::new(),
+            _ => vec![],
         }
     }
 
@@ -696,7 +751,16 @@ impl Subcommand {
             Subcommand::Test { ref rustc_args, .. } => {
                 rustc_args.iter().flat_map(|s| s.split_whitespace()).collect()
             }
-            _ => Vec::new(),
+            _ => vec![],
+        }
+    }
+
+    pub fn args(&self) -> Vec<&str> {
+        match *self {
+            Subcommand::Run { ref args, .. } => {
+                args.iter().flat_map(|s| s.split_whitespace()).collect()
+            }
+            _ => vec![],
         }
     }
 
@@ -717,6 +781,20 @@ impl Subcommand {
     pub fn bless(&self) -> bool {
         match *self {
             Subcommand::Test { bless, .. } => bless,
+            _ => false,
+        }
+    }
+
+    pub fn only_modified(&self) -> bool {
+        match *self {
+            Subcommand::Test { only_modified, .. } => only_modified,
+            _ => false,
+        }
+    }
+
+    pub fn force_rerun(&self) -> bool {
+        match *self {
+            Subcommand::Test { force_rerun, .. } => force_rerun,
             _ => false,
         }
     }
@@ -742,9 +820,23 @@ impl Subcommand {
         }
     }
 
+    pub fn run(&self) -> Option<&str> {
+        match *self {
+            Subcommand::Test { ref run, .. } => run.as_ref().map(|s| &s[..]),
+            _ => None,
+        }
+    }
+
     pub fn open(&self) -> bool {
         match *self {
             Subcommand::Doc { open, .. } => open,
+            _ => false,
+        }
+    }
+
+    pub fn json(&self) -> bool {
+        match *self {
+            Subcommand::Doc { json, .. } => json,
             _ => false,
         }
     }
@@ -760,7 +852,7 @@ fn parse_deny_warnings(matches: &getopts::Matches) -> Option<bool> {
         Some("warn") => Some(false),
         Some(value) => {
             eprintln!(r#"invalid value for --warnings: {:?}, expected "warn" or "deny""#, value,);
-            process::exit(1);
+            crate::detail_exit(1);
         }
         None => None,
     }

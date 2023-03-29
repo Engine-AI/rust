@@ -42,29 +42,18 @@
 //!   `DefId` it was computed from. In other cases, too much information gets
 //!   lost during fingerprint computation.
 
-use super::{DepContext, DepKind};
+use super::{DepContext, DepKind, FingerprintStyle};
+use crate::ich::StableHashingContext;
 
 use rustc_data_structures::fingerprint::{Fingerprint, PackedFingerprint};
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
-
+use rustc_hir::definitions::DefPathHash;
 use std::fmt;
 use std::hash::Hash;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Encodable, Decodable)]
 pub struct DepNode<K> {
     pub kind: K,
-    // Important - whenever a `DepNode` is constructed, we need to make
-    // sure to register a `DefPathHash -> DefId` mapping if needed.
-    // This is currently done in two places:
-    //
-    // * When a `DepNode::construct` is called, `arg.to_fingerprint()`
-    //   is responsible for calling `OnDiskCache::store_foreign_def_id_hash`
-    //   if needed
-    // * When we serialize the on-disk cache, `OnDiskCache::serialize` is
-    //   responsible for calling `DepGraph::register_reused_dep_nodes`.
-    //
-    // FIXME: Enforce this by preventing manual construction of `DefNode`
-    // (e.g. add a `_priv: ()` field)
     pub hash: PackedFingerprint,
 }
 
@@ -72,30 +61,44 @@ impl<K: DepKind> DepNode<K> {
     /// Creates a new, parameterless DepNode. This method will assert
     /// that the DepNode corresponding to the given DepKind actually
     /// does not require any parameters.
-    pub fn new_no_params(kind: K) -> DepNode<K> {
-        debug_assert!(!kind.has_params());
+    pub fn new_no_params<Tcx>(tcx: Tcx, kind: K) -> DepNode<K>
+    where
+        Tcx: super::DepContext<DepKind = K>,
+    {
+        debug_assert_eq!(tcx.fingerprint_style(kind), FingerprintStyle::Unit);
         DepNode { kind, hash: Fingerprint::ZERO.into() }
     }
 
-    pub fn construct<Ctxt, Key>(tcx: Ctxt, kind: K, arg: &Key) -> DepNode<K>
+    pub fn construct<Tcx, Key>(tcx: Tcx, kind: K, arg: &Key) -> DepNode<K>
     where
-        Ctxt: super::DepContext<DepKind = K>,
-        Key: DepNodeParams<Ctxt>,
+        Tcx: super::DepContext<DepKind = K>,
+        Key: DepNodeParams<Tcx>,
     {
         let hash = arg.to_fingerprint(tcx);
         let dep_node = DepNode { kind, hash: hash.into() };
 
         #[cfg(debug_assertions)]
         {
-            if !kind.can_reconstruct_query_key()
-                && (tcx.sess().opts.debugging_opts.incremental_info
-                    || tcx.sess().opts.debugging_opts.query_dep_graph)
+            if !tcx.fingerprint_style(kind).reconstructible()
+                && (tcx.sess().opts.unstable_opts.incremental_info
+                    || tcx.sess().opts.unstable_opts.query_dep_graph)
             {
                 tcx.dep_graph().register_dep_node_debug_str(dep_node, || arg.to_debug_str(tcx));
             }
         }
 
         dep_node
+    }
+
+    /// Construct a DepNode from the given DepKind and DefPathHash. This
+    /// method will assert that the given DepKind actually requires a
+    /// single DefId/DefPathHash parameter.
+    pub fn from_def_path_hash<Tcx>(tcx: Tcx, def_path_hash: DefPathHash, kind: K) -> Self
+    where
+        Tcx: super::DepContext<DepKind = K>,
+    {
+        debug_assert!(tcx.fingerprint_style(kind) == FingerprintStyle::DefPathHash);
+        DepNode { kind, hash: def_path_hash.0.into() }
     }
 }
 
@@ -105,55 +108,118 @@ impl<K: DepKind> fmt::Debug for DepNode<K> {
     }
 }
 
-pub trait DepNodeParams<Ctxt: DepContext>: fmt::Debug + Sized {
-    fn can_reconstruct_query_key() -> bool;
+pub trait DepNodeParams<Tcx: DepContext>: fmt::Debug + Sized {
+    fn fingerprint_style() -> FingerprintStyle;
 
     /// This method turns the parameters of a DepNodeConstructor into an opaque
     /// Fingerprint to be used in DepNode.
     /// Not all DepNodeParams support being turned into a Fingerprint (they
     /// don't need to if the corresponding DepNode is anonymous).
-    fn to_fingerprint(&self, _: Ctxt) -> Fingerprint {
+    fn to_fingerprint(&self, _: Tcx) -> Fingerprint {
         panic!("Not implemented. Accidentally called on anonymous node?")
     }
 
-    fn to_debug_str(&self, _: Ctxt) -> String {
-        format!("{:?}", self)
+    fn to_debug_str(&self, _: Tcx) -> String {
+        format!("{self:?}")
     }
 
     /// This method tries to recover the query key from the given `DepNode`,
     /// something which is needed when forcing `DepNode`s during red-green
     /// evaluation. The query system will only call this method if
-    /// `can_reconstruct_query_key()` is `true`.
+    /// `fingerprint_style()` is not `FingerprintStyle::Opaque`.
     /// It is always valid to return `None` here, in which case incremental
     /// compilation will treat the query as having changed instead of forcing it.
-    fn recover(tcx: Ctxt, dep_node: &DepNode<Ctxt::DepKind>) -> Option<Self>;
+    fn recover(tcx: Tcx, dep_node: &DepNode<Tcx::DepKind>) -> Option<Self>;
 }
 
-impl<Ctxt: DepContext, T> DepNodeParams<Ctxt> for T
+impl<Tcx: DepContext, T> DepNodeParams<Tcx> for T
 where
-    T: HashStable<Ctxt::StableHashingContext> + fmt::Debug,
+    T: for<'a> HashStable<StableHashingContext<'a>> + fmt::Debug,
 {
-    #[inline]
-    default fn can_reconstruct_query_key() -> bool {
-        false
+    #[inline(always)]
+    default fn fingerprint_style() -> FingerprintStyle {
+        FingerprintStyle::Opaque
     }
 
-    default fn to_fingerprint(&self, tcx: Ctxt) -> Fingerprint {
-        let mut hcx = tcx.create_stable_hashing_context();
-        let mut hasher = StableHasher::new();
-
-        self.hash_stable(&mut hcx, &mut hasher);
-
-        hasher.finish()
+    #[inline(always)]
+    default fn to_fingerprint(&self, tcx: Tcx) -> Fingerprint {
+        tcx.with_stable_hashing_context(|mut hcx| {
+            let mut hasher = StableHasher::new();
+            self.hash_stable(&mut hcx, &mut hasher);
+            hasher.finish()
+        })
     }
 
-    default fn to_debug_str(&self, _: Ctxt) -> String {
+    #[inline(always)]
+    default fn to_debug_str(&self, _: Tcx) -> String {
         format!("{:?}", *self)
     }
 
-    default fn recover(_: Ctxt, _: &DepNode<Ctxt::DepKind>) -> Option<Self> {
+    #[inline(always)]
+    default fn recover(_: Tcx, _: &DepNode<Tcx::DepKind>) -> Option<Self> {
         None
     }
+}
+
+/// This struct stores metadata about each DepKind.
+///
+/// Information is retrieved by indexing the `DEP_KINDS` array using the integer value
+/// of the `DepKind`. Overall, this allows to implement `DepContext` using this manual
+/// jump table instead of large matches.
+pub struct DepKindStruct<Tcx: DepContext> {
+    /// Anonymous queries cannot be replayed from one compiler invocation to the next.
+    /// When their result is needed, it is recomputed. They are useful for fine-grained
+    /// dependency tracking, and caching within one compiler invocation.
+    pub is_anon: bool,
+
+    /// Eval-always queries do not track their dependencies, and are always recomputed, even if
+    /// their inputs have not changed since the last compiler invocation. The result is still
+    /// cached within one compiler invocation.
+    pub is_eval_always: bool,
+
+    /// Whether the query key can be recovered from the hashed fingerprint.
+    /// See [DepNodeParams] trait for the behaviour of each key type.
+    pub fingerprint_style: FingerprintStyle,
+
+    /// The red/green evaluation system will try to mark a specific DepNode in the
+    /// dependency graph as green by recursively trying to mark the dependencies of
+    /// that `DepNode` as green. While doing so, it will sometimes encounter a `DepNode`
+    /// where we don't know if it is red or green and we therefore actually have
+    /// to recompute its value in order to find out. Since the only piece of
+    /// information that we have at that point is the `DepNode` we are trying to
+    /// re-evaluate, we need some way to re-run a query from just that. This is what
+    /// `force_from_dep_node()` implements.
+    ///
+    /// In the general case, a `DepNode` consists of a `DepKind` and an opaque
+    /// GUID/fingerprint that will uniquely identify the node. This GUID/fingerprint
+    /// is usually constructed by computing a stable hash of the query-key that the
+    /// `DepNode` corresponds to. Consequently, it is not in general possible to go
+    /// back from hash to query-key (since hash functions are not reversible). For
+    /// this reason `force_from_dep_node()` is expected to fail from time to time
+    /// because we just cannot find out, from the `DepNode` alone, what the
+    /// corresponding query-key is and therefore cannot re-run the query.
+    ///
+    /// The system deals with this case letting `try_mark_green` fail which forces
+    /// the root query to be re-evaluated.
+    ///
+    /// Now, if `force_from_dep_node()` would always fail, it would be pretty useless.
+    /// Fortunately, we can use some contextual information that will allow us to
+    /// reconstruct query-keys for certain kinds of `DepNode`s. In particular, we
+    /// enforce by construction that the GUID/fingerprint of certain `DepNode`s is a
+    /// valid `DefPathHash`. Since we also always build a huge table that maps every
+    /// `DefPathHash` in the current codebase to the corresponding `DefId`, we have
+    /// everything we need to re-run the query.
+    ///
+    /// Take the `mir_promoted` query as an example. Like many other queries, it
+    /// just has a single parameter: the `DefId` of the item it will compute the
+    /// validated MIR for. Now, when we call `force_from_dep_node()` on a `DepNode`
+    /// with kind `MirValidated`, we know that the GUID/fingerprint of the `DepNode`
+    /// is actually a `DefPathHash`, and can therefore just look up the corresponding
+    /// `DefId` in `tcx.def_path_hash_to_def_id`.
+    pub force_from_dep_node: Option<fn(tcx: Tcx, dep_node: DepNode<Tcx::DepKind>) -> bool>,
+
+    /// Invoke a query to put the on-disk cached value in memory.
+    pub try_load_from_on_disk_cache: Option<fn(Tcx, DepNode<Tcx::DepKind>)>,
 }
 
 /// A "work product" corresponds to a `.o` (or other) file that we
@@ -170,7 +236,6 @@ pub struct WorkProductId {
 impl WorkProductId {
     pub fn from_cgu_name(cgu_name: &str) -> WorkProductId {
         let mut hasher = StableHasher::new();
-        cgu_name.len().hash(&mut hasher);
         cgu_name.hash(&mut hasher);
         WorkProductId { hash: hasher.finish() }
     }

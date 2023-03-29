@@ -1,17 +1,10 @@
 #![warn(clippy::integer_arithmetic, clippy::float_arithmetic)]
-#![allow(
-    unused,
-    clippy::shadow_reuse,
-    clippy::shadow_unrelated,
-    clippy::no_effect,
-    clippy::unnecessary_operation,
-    clippy::op_ref
-)]
+#![allow(clippy::no_effect, clippy::unnecessary_operation, clippy::op_ref)]
 
 #[rustfmt::skip]
 fn main() {
     let mut i = 1i32;
-    let mut var1 = 0i32;
+    let mut var1 = 13i32;
     let mut var2 = -1i32;
     1 + i;
     i * 2;

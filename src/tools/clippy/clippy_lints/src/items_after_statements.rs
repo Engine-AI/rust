@@ -7,17 +7,16 @@ use rustc_middle::lint::in_external_macro;
 use rustc_session::{declare_lint_pass, declare_tool_lint};
 
 declare_clippy_lint! {
-    /// **What it does:** Checks for items declared after some statement in a block.
+    /// ### What it does
+    /// Checks for items declared after some statement in a block.
     ///
-    /// **Why is this bad?** Items live for the entire scope they are declared
+    /// ### Why is this bad?
+    /// Items live for the entire scope they are declared
     /// in. But statements are processed in order. This might cause confusion as
     /// it's hard to figure out which item is meant in a statement.
     ///
-    /// **Known problems:** None.
-    ///
-    /// **Example:**
+    /// ### Example
     /// ```rust
-    /// // Bad
     /// fn foo() {
     ///     println!("cake");
     /// }
@@ -31,8 +30,8 @@ declare_clippy_lint! {
     /// }
     /// ```
     ///
+    /// Use instead:
     /// ```rust
-    /// // Good
     /// fn foo() {
     ///     println!("cake");
     /// }
@@ -45,6 +44,7 @@ declare_clippy_lint! {
     ///     foo(); // prints "foo"
     /// }
     /// ```
+    #[clippy::version = "pre 1.29.0"]
     pub ITEMS_AFTER_STATEMENTS,
     pedantic,
     "blocks where an item comes after a statement"

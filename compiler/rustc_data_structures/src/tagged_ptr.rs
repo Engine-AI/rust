@@ -45,7 +45,8 @@ pub unsafe trait Pointer: Deref {
     /// case you'll need to manually figure out what the right type to pass to
     /// align_of is.
     ///
-    /// ```rust
+    /// ```ignore UNSOLVED (what to do about the Self)
+    /// # use std::ops::Deref;
     /// std::mem::align_of::<<Self as Deref>::Target>().trailing_zeros() as usize;
     /// ```
     const BITS: usize;
@@ -90,9 +91,11 @@ pub unsafe trait Tag: Copy {
 
 unsafe impl<T> Pointer for Box<T> {
     const BITS: usize = std::mem::align_of::<T>().trailing_zeros() as usize;
+    #[inline]
     fn into_usize(self) -> usize {
         Box::into_raw(self) as usize
     }
+    #[inline]
     unsafe fn from_usize(ptr: usize) -> Self {
         Box::from_raw(ptr as *mut T)
     }
@@ -104,9 +107,11 @@ unsafe impl<T> Pointer for Box<T> {
 
 unsafe impl<T> Pointer for Rc<T> {
     const BITS: usize = std::mem::align_of::<T>().trailing_zeros() as usize;
+    #[inline]
     fn into_usize(self) -> usize {
         Rc::into_raw(self) as usize
     }
+    #[inline]
     unsafe fn from_usize(ptr: usize) -> Self {
         Rc::from_raw(ptr as *const T)
     }
@@ -118,9 +123,11 @@ unsafe impl<T> Pointer for Rc<T> {
 
 unsafe impl<T> Pointer for Arc<T> {
     const BITS: usize = std::mem::align_of::<T>().trailing_zeros() as usize;
+    #[inline]
     fn into_usize(self) -> usize {
         Arc::into_raw(self) as usize
     }
+    #[inline]
     unsafe fn from_usize(ptr: usize) -> Self {
         Arc::from_raw(ptr as *const T)
     }
@@ -132,9 +139,11 @@ unsafe impl<T> Pointer for Arc<T> {
 
 unsafe impl<'a, T: 'a> Pointer for &'a T {
     const BITS: usize = std::mem::align_of::<T>().trailing_zeros() as usize;
+    #[inline]
     fn into_usize(self) -> usize {
         self as *const T as usize
     }
+    #[inline]
     unsafe fn from_usize(ptr: usize) -> Self {
         &*(ptr as *const T)
     }
@@ -145,9 +154,11 @@ unsafe impl<'a, T: 'a> Pointer for &'a T {
 
 unsafe impl<'a, T: 'a> Pointer for &'a mut T {
     const BITS: usize = std::mem::align_of::<T>().trailing_zeros() as usize;
+    #[inline]
     fn into_usize(self) -> usize {
         self as *mut T as usize
     }
+    #[inline]
     unsafe fn from_usize(ptr: usize) -> Self {
         &mut *(ptr as *mut T)
     }

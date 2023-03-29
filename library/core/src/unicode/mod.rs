@@ -4,7 +4,7 @@
 pub(crate) mod printable;
 mod unicode_data;
 
-/// The version of [Unicode](http://www.unicode.org/) that the Unicode parts of
+/// The version of [Unicode](https://www.unicode.org/) that the Unicode parts of
 /// `char` and `str` methods are based on.
 ///
 /// New versions of Unicode are released regularly and subsequently all methods
@@ -17,7 +17,7 @@ mod unicode_data;
 #[stable(feature = "unicode_version", since = "1.45.0")]
 pub const UNICODE_VERSION: (u8, u8, u8) = unicode_data::UNICODE_VERSION;
 
-// For use in liballoc, not re-exported in libstd.
+// For use in alloc, not re-exported in std.
 pub use unicode_data::{
     case_ignorable::lookup as Case_Ignorable, cased::lookup as Cased, conversions,
 };

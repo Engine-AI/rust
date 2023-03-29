@@ -2,6 +2,7 @@
 
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
+use std::hint::black_box;
 use std::io::Write;
 use std::ops::Generator;
 
@@ -15,8 +16,6 @@ fn main() {
     let stderr = ::std::io::stderr();
     let mut stderr = stderr.lock();
 
-    // FIXME support lazy jit when multi threading
-    #[cfg(not(lazy_jit))]
     std::thread::spawn(move || {
         println!("Hello from another thread!");
     });
@@ -48,6 +47,8 @@ fn main() {
     assert_eq!(2.3f32.copysign(-1.0), -2.3f32);
     println!("{}", 2.3f32.powf(2.0));
 
+    assert_eq!(i64::MAX.checked_mul(2), None);
+
     assert_eq!(-128i8, (-128i8).saturating_sub(1));
     assert_eq!(127i8, 127i8.saturating_sub(-128));
     assert_eq!(-128i8, (-128i8).saturating_add(-128));
@@ -57,8 +58,9 @@ fn main() {
     assert_eq!(0b0000000000000000000000000010000000000000000000000000000000000000_0000000000000000000000000000000000001000000000000000000010000000u128.trailing_zeros(), 7);
     assert_eq!(core::intrinsics::saturating_sub(0, -170141183460469231731687303715884105728i128), 170141183460469231731687303715884105727i128);
 
-    let _d = 0i128.checked_div(2i128);
-    let _d = 0u128.checked_div(2u128);
+    std::hint::black_box(std::hint::black_box(7571400400375753350092698930310845914i128) * 10);
+    assert!(0i128.checked_div(2i128).is_some());
+    assert!(0u128.checked_div(2u128).is_some());
     assert_eq!(1u128 + 2, 3);
 
     assert_eq!(0b100010000000000000000000000000000u128 >> 10, 0b10001000000000000000000u128);
@@ -84,6 +86,10 @@ fn main() {
     assert_eq!(houndred_i128 as f64, 100.0);
     assert_eq!(houndred_f32 as i128, 100);
     assert_eq!(houndred_f64 as i128, 100);
+    assert_eq!(1u128.rotate_left(2), 4);
+
+    assert_eq!(black_box(f32::NAN) as i128, 0);
+    assert_eq!(black_box(f32::NAN) as u128, 0);
 
     // Test signed 128bit comparing
     let max = usize::MAX as i128;
@@ -123,6 +129,25 @@ fn main() {
         0 => loop {},
         v => panic(v),
     };
+
+    if black_box(false) {
+        // Based on https://github.com/rust-lang/rust/blob/2f320a224e827b400be25966755a621779f797cc/src/test/ui/debuginfo/debuginfo_with_uninhabitable_field_and_unsized.rs
+        let _ = Foo::<dyn Send>::new();
+
+        #[allow(dead_code)]
+        struct Foo<T: ?Sized> {
+            base: Never,
+            value: T,
+        }
+
+        impl<T: ?Sized> Foo<T> {
+            pub fn new() -> Box<Foo<T>> {
+                todo!()
+            }
+        }
+
+        enum Never {}
+    }
 }
 
 fn panic(_: u128) {
@@ -140,6 +165,8 @@ unsafe fn test_simd() {
     let cmp_eq = _mm_cmpeq_epi8(y, y);
     let cmp_lt = _mm_cmplt_epi8(y, y);
 
+    let (zero0, zero1) = std::mem::transmute::<_, (u64, u64)>(x);
+    assert_eq!((zero0, zero1), (0, 0));
     assert_eq!(std::mem::transmute::<_, [u16; 8]>(or), [7, 7, 7, 7, 7, 7, 7, 7]);
     assert_eq!(std::mem::transmute::<_, [u16; 8]>(cmp_eq), [0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff]);
     assert_eq!(std::mem::transmute::<_, [u16; 8]>(cmp_lt), [0, 0, 0, 0, 0, 0, 0, 0]);
@@ -183,20 +210,6 @@ unsafe fn test_mm_slli_si128() {
         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
     );
     let r = _mm_slli_si128(a, 16);
-    assert_eq_m128i(r, _mm_set1_epi8(0));
-
-    #[rustfmt::skip]
-    let a = _mm_setr_epi8(
-        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
-    );
-    let r = _mm_slli_si128(a, -1);
-    assert_eq_m128i(_mm_set1_epi8(0), r);
-
-    #[rustfmt::skip]
-    let a = _mm_setr_epi8(
-        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
-    );
-    let r = _mm_slli_si128(a, -0x80000000);
     assert_eq_m128i(r, _mm_set1_epi8(0));
 }
 
@@ -292,7 +305,7 @@ unsafe fn test_mm_extract_epi8() {
         8, 9, 10, 11, 12, 13, 14, 15
     );
     let r1 = _mm_extract_epi8(a, 0);
-    let r2 = _mm_extract_epi8(a, 19);
+    let r2 = _mm_extract_epi8(a, 3);
     assert_eq!(r1, 0xFF);
     assert_eq!(r2, 3);
 }

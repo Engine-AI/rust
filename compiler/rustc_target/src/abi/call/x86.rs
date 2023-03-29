@@ -1,35 +1,17 @@
 use crate::abi::call::{ArgAttribute, FnAbi, PassMode, Reg, RegKind};
-use crate::abi::{self, HasDataLayout, LayoutOf, TyAndLayout, TyAndLayoutMethods};
+use crate::abi::{HasDataLayout, TyAbiInterface};
 use crate::spec::HasTargetSpec;
 
 #[derive(PartialEq)]
 pub enum Flavor {
     General,
-    Fastcall,
-}
-
-fn is_single_fp_element<'a, Ty, C>(cx: &C, layout: TyAndLayout<'a, Ty>) -> bool
-where
-    Ty: TyAndLayoutMethods<'a, C> + Copy,
-    C: LayoutOf<Ty = Ty, TyAndLayout = TyAndLayout<'a, Ty>> + HasDataLayout,
-{
-    match layout.abi {
-        abi::Abi::Scalar(ref scalar) => scalar.value.is_float(),
-        abi::Abi::Aggregate { .. } => {
-            if layout.fields.count() == 1 && layout.fields.offset(0).bytes() == 0 {
-                is_single_fp_element(cx, layout.field(cx, 0))
-            } else {
-                false
-            }
-        }
-        _ => false,
-    }
+    FastcallOrVectorcall,
 }
 
 pub fn compute_abi_info<'a, Ty, C>(cx: &C, fn_abi: &mut FnAbi<'a, Ty>, flavor: Flavor)
 where
-    Ty: TyAndLayoutMethods<'a, C> + Copy,
-    C: LayoutOf<Ty = Ty, TyAndLayout = TyAndLayout<'a, Ty>> + HasDataLayout + HasTargetSpec,
+    Ty: TyAbiInterface<'a, C> + Copy,
+    C: HasDataLayout + HasTargetSpec,
 {
     if !fn_abi.ret.is_ignore() {
         if fn_abi.ret.layout.is_aggregate() {
@@ -38,13 +20,13 @@ where
             // small structs are returned as integers.
             //
             // Some links:
-            // http://www.angelcode.com/dev/callconv/callconv.html
+            // https://www.angelcode.com/dev/callconv/callconv.html
             // Clang's ABI handling is in lib/CodeGen/TargetInfo.cpp
             let t = cx.target_spec();
             if t.abi_return_struct_as_int {
                 // According to Clang, everyone but MSVC returns single-element
                 // float aggregates directly in a floating-point register.
-                if !t.is_like_msvc && is_single_fp_element(cx, fn_abi.ret.layout) {
+                if !t.is_like_msvc && fn_abi.ret.layout.is_single_fp_element(cx) {
                     match fn_abi.ret.layout.size.bytes() {
                         4 => fn_abi.ret.cast_to(Reg::f32()),
                         8 => fn_abi.ret.cast_to(Reg::f64()),
@@ -67,7 +49,7 @@ where
         }
     }
 
-    for arg in &mut fn_abi.args {
+    for arg in fn_abi.args.iter_mut() {
         if arg.is_ignore() {
             continue;
         }
@@ -78,9 +60,9 @@ where
         }
     }
 
-    if flavor == Flavor::Fastcall {
+    if flavor == Flavor::FastcallOrVectorcall {
         // Mark arguments as InReg like clang does it,
-        // so our fastcall is compatible with C/C++ fastcall.
+        // so our fastcall/vectorcall is compatible with C/C++ fastcall/vectorcall.
 
         // Clang reference: lib/CodeGen/TargetInfo.cpp
         // See X86_32ABIInfo::shouldPrimitiveUseInReg(), X86_32ABIInfo::updateFreeRegs()
@@ -90,7 +72,7 @@ where
 
         let mut free_regs = 2;
 
-        for arg in &mut fn_abi.args {
+        for arg in fn_abi.args.iter_mut() {
             let attrs = match arg.mode {
                 PassMode::Ignore
                 | PassMode::Indirect { attrs: _, extra_attrs: None, on_stack: _ } => {
@@ -99,7 +81,7 @@ where
                 PassMode::Direct(ref mut attrs) => attrs,
                 PassMode::Pair(..)
                 | PassMode::Indirect { attrs: _, extra_attrs: Some(_), on_stack: _ }
-                | PassMode::Cast(_) => {
+                | PassMode::Cast(..) => {
                     unreachable!("x86 shouldn't be passing arguments by {:?}", arg.mode)
                 }
             };

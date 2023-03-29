@@ -64,20 +64,20 @@ mod as_keyword {}
 /// }
 ///
 /// assert_eq!(last, 12);
-/// println!("{}", last);
+/// println!("{last}");
 /// ```
 ///
 /// A break expression is normally associated with the innermost loop enclosing the
 /// `break` but a label can be used to specify which enclosing loop is affected.
 ///
-///```rust
+/// ```rust
 /// 'outer: for i in 1..=5 {
-///     println!("outer iteration (i): {}", i);
+///     println!("outer iteration (i): {i}");
 ///
 ///     '_inner: for j in 1..=200 {
-///         println!("    inner iteration (j): {}", j);
+///         println!("    inner iteration (j): {j}");
 ///         if j >= 3 {
-///             // breaks from inner loop, let's outer loop continue.
+///             // breaks from inner loop, lets outer loop continue.
 ///             break;
 ///         }
 ///         if i >= 2 {
@@ -87,7 +87,7 @@ mod as_keyword {}
 ///     }
 /// }
 /// println!("Bye.");
-///```
+/// ```
 ///
 /// When associated with `loop`, a break expression may be used to return a value from that loop.
 /// This is only valid with `loop` and not with any other type of loop.
@@ -106,7 +106,7 @@ mod as_keyword {}
 /// };
 /// // first number in Fibonacci sequence over 10:
 /// assert_eq!(result, 13);
-/// println!("{}", result);
+/// println!("{result}");
 /// ```
 ///
 /// For more details consult the [Reference on "break expression"] and the [Reference on "break and
@@ -119,7 +119,7 @@ mod break_keyword {}
 
 #[doc(keyword = "const")]
 //
-/// Compile-time constants and compile-time evaluable functions.
+/// Compile-time constants, compile-time evaluable functions, and raw pointers.
 ///
 /// ## Compile-time constants
 ///
@@ -182,7 +182,7 @@ mod break_keyword {}
 /// T` and `*mut T`. More about `const` as used in raw pointers can be read at the Rust docs for the [pointer primitive].
 ///
 /// [pointer primitive]: pointer
-/// [Rust Book]: ../book/ch03-01-variables-and-mutability.html#differences-between-variables-and-constants
+/// [Rust Book]: ../book/ch03-01-variables-and-mutability.html#constants
 /// [Reference]: ../reference/items/constant-items.html
 /// [const-eval]: ../reference/const_eval.html
 mod const_keyword {}
@@ -194,20 +194,20 @@ mod const_keyword {}
 /// When `continue` is encountered, the current iteration is terminated, returning control to the
 /// loop head, typically continuing with the next iteration.
 ///
-///```rust
+/// ```rust
 /// // Printing odd numbers by skipping even ones
 /// for number in 1..=10 {
 ///     if number % 2 == 0 {
 ///         continue;
 ///     }
-///     println!("{}", number);
+///     println!("{number}");
 /// }
-///```
+/// ```
 ///
 /// Like `break`, `continue` is normally associated with the innermost enclosing loop, but labels
 /// may be used to specify the affected loop.
 ///
-///```rust
+/// ```rust
 /// // Print Odd numbers under 30 with unit <= 5
 /// 'tens: for ten in 0..3 {
 ///     '_units: for unit in 0..=9 {
@@ -220,7 +220,7 @@ mod const_keyword {}
 ///         println!("{}", ten * 10 + unit);
 ///     }
 /// }
-///```
+/// ```
 ///
 /// See [continue expressions] from the reference for more details.
 ///
@@ -515,7 +515,7 @@ mod fn_keyword {}
 /// }
 ///
 /// for i in std::iter::repeat(5) {
-///     println!("turns out {} never stops being 5", i);
+///     println!("turns out {i} never stops being 5");
 ///     break; // would loop forever otherwise
 /// }
 ///
@@ -549,13 +549,10 @@ mod fn_keyword {}
 /// {
 ///     let result = match IntoIterator::into_iter(iterator) {
 ///         mut iter => loop {
-///             let next;
 ///             match iter.next() {
-///                 Some(val) => next = val,
 ///                 None => break,
+///                 Some(loop_variable) => { code(); },
 ///             };
-///             let loop_variable = next;
-///             let () = { code(); };
 ///         },
 ///     };
 ///     result
@@ -731,6 +728,20 @@ mod impl_keyword {}
 /// [`IntoIterator`]: ../book/ch13-04-performance.html
 /// [range patterns]: ../reference/patterns.html?highlight=range#range-patterns
 /// [`for`]: keyword.for.html
+///
+/// The other use of `in` is with the keyword `pub`. It allows users to declare an item as visible
+/// only within a given scope.
+///
+/// ## Literal Example:
+///
+///    * `pub(in crate::outer_mod) fn outer_mod_visible_fn() {}` - fn is visible in `outer_mod`
+///
+/// Starting with the 2018 edition, paths for `pub(in path)` must start with `crate`, `self` or
+/// `super`. The 2015 edition may also use paths starting with `::` or modules from the crate root.
+///
+/// For more information, see the [Reference].
+///
+/// [Reference]: ../reference/visibility-and-privacy.html#pubin-path-pubcrate-pubsuper-and-pubself
 mod in_keyword {}
 
 #[doc(keyword = "let")]
@@ -779,7 +790,7 @@ mod in_keyword {}
 /// let shadowing_example = true;
 /// let shadowing_example = 123.4;
 /// let shadowing_example = shadowing_example as u32;
-/// let mut shadowing_example = format!("cool! {}", shadowing_example);
+/// let mut shadowing_example = format!("cool! {shadowing_example}");
 /// shadowing_example += " something else!"; // not shadowing
 /// ```
 ///
@@ -808,7 +819,7 @@ mod let_keyword {}
 /// let mut counter = 0;
 ///
 /// while counter < 10 {
-///     println!("{}", counter);
+///     println!("{counter}");
 ///     counter += 1;
 /// }
 /// ```
@@ -839,7 +850,7 @@ mod let_keyword {}
 ///     if i == 10 {
 ///         counter = None;
 ///     } else {
-///         println!("{}", i);
+///         println!("{i}");
 ///         counter = Some (i + 1);
 ///     }
 /// }
@@ -869,7 +880,7 @@ mod while_keyword {}
 ///
 /// let mut i = 1;
 /// loop {
-///     println!("i is {}", i);
+///     println!("i is {i}");
 ///     if i > 100 {
 ///         break;
 ///     }
@@ -923,8 +934,8 @@ mod loop_keyword {}
 ///
 /// let a_number = Option::Some(10);
 /// match a_number {
-///     Some(x) if x <= 5 => println!("0 to 5 num = {}", x),
-///     Some(x @ 6..=10) => println!("6 to 10 num = {}", x),
+///     Some(x) if x <= 5 => println!("0 to 5 num = {x}"),
+///     Some(x @ 6..=10) => println!("6 to 10 num = {x}"),
 ///     None => panic!(),
 ///     // all other numbers
 ///     _ => panic!(),
@@ -943,8 +954,8 @@ mod loop_keyword {}
 ///
 /// let get_inner = Outer::Double(None, Some(String::new()));
 /// match get_inner {
-///     Outer::Double(None, Some(st)) => println!("{}", st),
-///     Outer::Single(opt) => println!("{:?}", opt),
+///     Outer::Double(None, Some(st)) => println!("{st}"),
+///     Outer::Single(opt) => println!("{opt:?}"),
 ///     _ => panic!(),
 /// }
 /// ```
@@ -971,7 +982,7 @@ mod match_keyword {}
 /// ```
 ///
 /// Like [`struct`]s and [`enum`]s, a module and its content are private by
-/// default, unaccessible to code outside of the module.
+/// default, inaccessible to code outside of the module.
 ///
 /// To learn more about allowing access, see the documentation for the [`pub`]
 /// keyword.
@@ -987,13 +998,13 @@ mod mod_keyword {}
 /// Capture a [closure]'s environment by value.
 ///
 /// `move` converts any variables captured by reference or mutable reference
-/// to owned by value variables.
+/// to variables captured by value.
 ///
 /// ```rust
-/// let capture = "hello";
-/// let closure = move || {
-///     println!("rust says {}", capture);
-/// };
+/// let data = vec![1, 2, 3];
+/// let closure = move || println!("captured {data:?} by value");
+///
+/// // data is no longer available, it is owned by the closure
 /// ```
 ///
 /// Note: `move` closures may still implement [`Fn`] or [`FnMut`], even though
@@ -1004,33 +1015,31 @@ mod mod_keyword {}
 /// ```rust
 /// fn create_fn() -> impl Fn() {
 ///     let text = "Fn".to_owned();
-///
-///     move || println!("This is a: {}", text)
+///     move || println!("This is a: {text}")
 /// }
 ///
-///     let fn_plain = create_fn();
-///
-///     fn_plain();
+/// let fn_plain = create_fn();
+/// fn_plain();
 /// ```
 ///
 /// `move` is often used when [threads] are involved.
 ///
 /// ```rust
-/// let x = 5;
+/// let data = vec![1, 2, 3];
 ///
 /// std::thread::spawn(move || {
-///     println!("captured {} by value", x)
+///     println!("captured {data:?} by value")
 /// }).join().unwrap();
 ///
-/// // x is no longer available
+/// // data was moved to the spawned thread, so we cannot use it here
 /// ```
 ///
 /// `move` is also valid before an async block.
 ///
 /// ```rust
-/// let capture = "hello";
+/// let capture = "hello".to_owned();
 /// let block = async move {
-///     println!("rust says {} from async block", capture);
+///     println!("rust says {capture} from async block");
 /// };
 /// ```
 ///
@@ -1094,8 +1103,7 @@ mod move_keyword {}
 /// Mutable raw pointers work much like mutable references, with the added
 /// possibility of not pointing to a valid object. The syntax is `*mut Type`.
 ///
-/// More information on mutable references and pointers can be found in```
-/// [Reference].
+/// More information on mutable references and pointers can be found in the [Reference].
 ///
 /// [Reference]: ../reference/types/pointer.html#mutable-references-mut
 mod mut_keyword {}
@@ -1130,7 +1138,7 @@ mod pub_keyword {}
 /// let maybe_name = Some(String::from("Alice"));
 /// // The variable 'maybe_name' is consumed here ...
 /// match maybe_name {
-///     Some(n) => println!("Hello, {}", n),
+///     Some(n) => println!("Hello, {n}"),
 ///     _ => println!("Hello, world"),
 /// }
 /// // ... and is now unavailable.
@@ -1144,7 +1152,7 @@ mod pub_keyword {}
 /// let maybe_name = Some(String::from("Alice"));
 /// // Using `ref`, the value is borrowed, not moved ...
 /// match maybe_name {
-///     Some(ref n) => println!("Hello, {}", n),
+///     Some(ref n) => println!("Hello, {n}"),
 ///     _ => println!("Hello, world"),
 /// }
 /// // ... so it's available here!
@@ -1429,7 +1437,7 @@ mod self_upper_keyword {}
 /// // With a strictly read-only static, references will have the same address
 /// assert_eq!(r1, r2);
 /// // A static item can be used just like a variable in many cases
-/// println!("{:?}", FOO);
+/// println!("{FOO:?}");
 /// ```
 ///
 /// # Mutable `static`s
@@ -1560,7 +1568,7 @@ mod static_keyword {}
 ///
 /// # Style conventions
 ///
-/// Structs are always written in CamelCase, with few exceptions. While the trailing comma on a
+/// Structs are always written in UpperCamelCase, with few exceptions. While the trailing comma on a
 /// struct's list of fields can be omitted, it's usually kept for convenience in adding and
 /// removing fields down the line.
 ///
@@ -1681,7 +1689,7 @@ mod super_keyword {}
 /// # #![allow(dead_code)]
 /// fn debug_iter<I: Iterator>(it: I) where I::Item: std::fmt::Debug {
 ///     for elem in it {
-///         println!("{:#?}", elem);
+///         println!("{elem:#?}");
 ///     }
 /// }
 ///
@@ -1768,6 +1776,7 @@ mod super_keyword {}
 /// In the 2015 edition the parameters pattern was not needed for traits:
 ///
 /// ```rust,edition2015
+/// # #![allow(anonymous_parameters)]
 /// trait Tr {
 ///     fn f(i32);
 /// }
@@ -1858,11 +1867,15 @@ mod type_keyword {}
 /// Code or interfaces whose [memory safety] cannot be verified by the type
 /// system.
 ///
-/// The `unsafe` keyword has two uses: to declare the existence of contracts the
-/// compiler can't check (`unsafe fn` and `unsafe trait`), and to declare that a
-/// programmer has checked that these contracts have been upheld (`unsafe {}`
-/// and `unsafe impl`, but also `unsafe fn` -- see below). They are not mutually
-/// exclusive, as can be seen in `unsafe fn`.
+/// The `unsafe` keyword has two uses:
+/// - to declare the existence of contracts the compiler can't check (`unsafe fn` and `unsafe
+/// trait`),
+/// - and to declare that a programmer has checked that these contracts have been upheld (`unsafe
+/// {}` and `unsafe impl`, but also `unsafe fn` -- see below).
+///
+/// They are not mutually exclusive, as can be seen in `unsafe fn`: the body of an `unsafe fn` is,
+/// by default, treated like an unsafe block. The `unsafe_op_in_unsafe_fn` lint can be enabled to
+/// change that.
 ///
 /// # Unsafe abilities
 ///
@@ -1905,14 +1918,14 @@ mod type_keyword {}
 /// - `unsafe impl`: the contract necessary to implement the trait has been
 /// checked by the programmer and is guaranteed to be respected.
 ///
-/// `unsafe fn` also acts like an `unsafe {}` block
+/// By default, `unsafe fn` also acts like an `unsafe {}` block
 /// around the code inside the function. This means it is not just a signal to
 /// the caller, but also promises that the preconditions for the operations
-/// inside the function are upheld. Mixing these two meanings can be confusing
-/// and [proposal]s exist to use `unsafe {}` blocks inside such functions when
-/// making `unsafe` operations.
+/// inside the function are upheld. Mixing these two meanings can be confusing, so the
+/// `unsafe_op_in_unsafe_fn` lint can be enabled to warn against that and require explicit unsafe
+/// blocks even inside `unsafe fn`.
 ///
-/// See the [Rustnomicon] and the [Reference] for more informations.
+/// See the [Rustnomicon] and the [Reference] for more information.
 ///
 /// # Examples
 ///
@@ -1978,13 +1991,16 @@ mod type_keyword {}
 ///
 /// ```rust
 /// # #![allow(dead_code)]
+/// #![deny(unsafe_op_in_unsafe_fn)]
+///
 /// /// Dereference the given pointer.
 /// ///
 /// /// # Safety
 /// ///
 /// /// `ptr` must be aligned and must not be dangling.
 /// unsafe fn deref_unchecked(ptr: *const i32) -> i32 {
-///     *ptr
+///     // SAFETY: the caller is required to ensure that `ptr` is aligned and dereferenceable.
+///     unsafe { *ptr }
 /// }
 ///
 /// let a = 3;
@@ -1994,34 +2010,117 @@ mod type_keyword {}
 /// unsafe { assert_eq!(*b, deref_unchecked(b)); };
 /// ```
 ///
-/// Traits marked as `unsafe` must be [`impl`]emented using `unsafe impl`. This
-/// makes a guarantee to other `unsafe` code that the implementation satisfies
-/// the trait's safety contract. The [Send] and [Sync] traits are examples of
-/// this behaviour in the standard library.
+/// ## `unsafe` and traits
+///
+/// The interactions of `unsafe` and traits can be surprising, so let us contrast the
+/// two combinations of safe `fn` in `unsafe trait` and `unsafe fn` in safe trait using two
+/// examples:
 ///
 /// ```rust
-/// /// Implementors of this trait must guarantee an element is always
-/// /// accessible with index 3.
-/// unsafe trait ThreeIndexable<T> {
-///     /// Returns a reference to the element with index 3 in `&self`.
-///     fn three(&self) -> &T;
+/// /// # Safety
+/// ///
+/// /// `make_even` must return an even number.
+/// unsafe trait MakeEven {
+///     fn make_even(&self) -> i32;
 /// }
 ///
-/// // The implementation of `ThreeIndexable` for `[T; 4]` is `unsafe`
-/// // because the implementor must abide by a contract the compiler cannot
-/// // check but as a programmer we know there will always be a valid element
-/// // at index 3 to access.
-/// unsafe impl<T> ThreeIndexable<T> for [T; 4] {
-///     fn three(&self) -> &T {
-///         // SAFETY: implementing the trait means there always is an element
-///         // with index 3 accessible.
-///         unsafe { self.get_unchecked(3) }
+/// // SAFETY: Our `make_even` always returns something even.
+/// unsafe impl MakeEven for i32 {
+///     fn make_even(&self) -> i32 {
+///         self << 1
 ///     }
 /// }
 ///
-/// let a = [1, 2, 4, 8];
-/// assert_eq!(a.three(), &8);
+/// fn use_make_even(x: impl MakeEven) {
+///     if x.make_even() % 2 == 1 {
+///         // SAFETY: this can never happen, because all `MakeEven` implementations
+///         // ensure that `make_even` returns something even.
+///         unsafe { std::hint::unreachable_unchecked() };
+///     }
+/// }
 /// ```
+///
+/// Note how the safety contract of the trait is upheld by the implementation, and is itself used to
+/// uphold the safety contract of the unsafe function `unreachable_unchecked` called by
+/// `use_make_even`. `make_even` itself is a safe function because its *callers* do not have to
+/// worry about any contract, only the *implementation* of `MakeEven` is required to uphold a
+/// certain contract. `use_make_even` is safe because it can use the promise made by `MakeEven`
+/// implementations to uphold the safety contract of the `unsafe fn unreachable_unchecked` it calls.
+///
+/// It is also possible to have `unsafe fn` in a regular safe `trait`:
+///
+/// ```rust
+/// # #![feature(never_type)]
+/// #![deny(unsafe_op_in_unsafe_fn)]
+///
+/// trait Indexable {
+///     const LEN: usize;
+///
+///     /// # Safety
+///     ///
+///     /// The caller must ensure that `idx < LEN`.
+///     unsafe fn idx_unchecked(&self, idx: usize) -> i32;
+/// }
+///
+/// // The implementation for `i32` doesn't need to do any contract reasoning.
+/// impl Indexable for i32 {
+///     const LEN: usize = 1;
+///
+///     unsafe fn idx_unchecked(&self, idx: usize) -> i32 {
+///         debug_assert_eq!(idx, 0);
+///         *self
+///     }
+/// }
+///
+/// // The implementation for arrays exploits the function contract to
+/// // make use of `get_unchecked` on slices and avoid a run-time check.
+/// impl Indexable for [i32; 42] {
+///     const LEN: usize = 42;
+///
+///     unsafe fn idx_unchecked(&self, idx: usize) -> i32 {
+///         // SAFETY: As per this trait's documentation, the caller ensures
+///         // that `idx < 42`.
+///         unsafe { *self.get_unchecked(idx) }
+///     }
+/// }
+///
+/// // The implementation for the never type declares a length of 0,
+/// // which means `idx_unchecked` can never be called.
+/// impl Indexable for ! {
+///     const LEN: usize = 0;
+///
+///     unsafe fn idx_unchecked(&self, idx: usize) -> i32 {
+///         // SAFETY: As per this trait's documentation, the caller ensures
+///         // that `idx < 0`, which is impossible, so this is dead code.
+///         unsafe { std::hint::unreachable_unchecked() }
+///     }
+/// }
+///
+/// fn use_indexable<I: Indexable>(x: I, idx: usize) -> i32 {
+///     if idx < I::LEN {
+///         // SAFETY: We have checked that `idx < I::LEN`.
+///         unsafe { x.idx_unchecked(idx) }
+///     } else {
+///         panic!("index out-of-bounds")
+///     }
+/// }
+/// ```
+///
+/// This time, `use_indexable` is safe because it uses a run-time check to discharge the safety
+/// contract of `idx_unchecked`. Implementing `Indexable` is safe because when writing
+/// `idx_unchecked`, we don't have to worry: our *callers* need to discharge a proof obligation
+/// (like `use_indexable` does), but the *implementation* of `get_unchecked` has no proof obligation
+/// to contend with. Of course, the implementation of `Indexable` may choose to call other unsafe
+/// operations, and then it needs an `unsafe` *block* to indicate it discharged the proof
+/// obligations of its callees. (We enabled `unsafe_op_in_unsafe_fn`, so the body of `idx_unchecked`
+/// is not implicitly an unsafe block.) For that purpose it can make use of the contract that all
+/// its callers must uphold -- the fact that `idx < LEN`.
+///
+/// Formally speaking, an `unsafe fn` in a trait is a function with *preconditions* that go beyond
+/// those encoded by the argument types (such as `idx < LEN`), whereas an `unsafe trait` can declare
+/// that some of its functions have *postconditions* that go beyond those encoded in the return type
+/// (such as returning an even integer). If a trait needs a function with both extra precondition
+/// and extra postcondition, then it needs an `unsafe fn` in an `unsafe trait`.
 ///
 /// [`extern`]: keyword.extern.html
 /// [`trait`]: keyword.trait.html
@@ -2034,7 +2133,6 @@ mod type_keyword {}
 /// [nomicon-soundness]: ../nomicon/safe-unsafe-meaning.html
 /// [soundness]: https://rust-lang.github.io/unsafe-code-guidelines/glossary.html#soundness-of-code--of-a-library
 /// [Reference]: ../reference/unsafety.html
-/// [proposal]: https://github.com/rust-lang/rfcs/pull/2585
 /// [discussion on Rust Internals]: https://internals.rust-lang.org/t/what-does-unsafe-mean/6696
 mod unsafe_keyword {}
 
@@ -2104,7 +2202,7 @@ mod use_keyword {}
 /// Add constraints that must be upheld to use an item.
 ///
 /// `where` allows specifying constraints on lifetime and generic parameters.
-/// The [RFC] introducing `where` contains detailed informations about the
+/// The [RFC] introducing `where` contains detailed information about the
 /// keyword.
 ///
 /// # Examples
@@ -2158,7 +2256,7 @@ mod use_keyword {}
 /// is missing: the `'b` lifetime is not known to live at least as long as `'a`
 /// which means this function cannot ensure it always returns a valid reference:
 ///
-/// ```rust,compile_fail,E0623
+/// ```rust,compile_fail
 /// fn select<'a, 'b>(s1: &'a str, s2: &'b str, second: bool) -> &'a str
 /// {
 ///     if second { s2 } else { s1 }
@@ -2177,7 +2275,7 @@ mod use_keyword {}
 ///     i.next().unwrap_or_else(I::Item::default)
 /// }
 ///
-/// assert_eq!(first_or_default(vec![1, 2, 3].into_iter()), 1);
+/// assert_eq!(first_or_default([1, 2, 3].into_iter()), 1);
 /// assert_eq!(first_or_default(Vec::<i32>::new().into_iter()), 0);
 /// ```
 ///
@@ -2190,7 +2288,7 @@ mod use_keyword {}
 /// pub enum Cow<'a, B>
 /// where
 ///     B: 'a + ToOwned + ?Sized,
-///  {
+/// {
 ///     Borrowed(&'a B),
 ///     Owned(<B as ToOwned>::Owned),
 /// }
@@ -2208,17 +2306,18 @@ mod where_keyword {}
 ///
 /// Use `async` in front of `fn`, `closure`, or a `block` to turn the marked code into a `Future`.
 /// As such the code will not be run immediately, but will only be evaluated when the returned
-/// future is `.await`ed.
+/// future is [`.await`]ed.
 ///
-/// We have written an [async book] detailing async/await and trade-offs compared to using threads.
+/// We have written an [async book] detailing `async`/`await` and trade-offs compared to using threads.
 ///
 /// ## Editions
 ///
 /// `async` is a keyword from the 2018 edition onwards.
 ///
-/// It is available for use in stable rust from version 1.39 onwards.
+/// It is available for use in stable Rust from version 1.39 onwards.
 ///
 /// [`Future`]: future::Future
+/// [`.await`]: ../std/keyword.await.html
 /// [async book]: https://rust-lang.github.io/async-book/
 mod async_keyword {}
 
@@ -2226,19 +2325,20 @@ mod async_keyword {}
 //
 /// Suspend execution until the result of a [`Future`] is ready.
 ///
-/// `.await`ing a future will suspend the current function's execution until the `executor`
+/// `.await`ing a future will suspend the current function's execution until the executor
 /// has run the future to completion.
 ///
-/// Read the [async book] for details on how async/await and executors work.
+/// Read the [async book] for details on how [`async`]/`await` and executors work.
 ///
 /// ## Editions
 ///
 /// `await` is a keyword from the 2018 edition onwards.
 ///
-/// It is available for use in stable rust from version 1.39 onwards.
+/// It is available for use in stable Rust from version 1.39 onwards.
 ///
 /// [`Future`]: future::Future
 /// [async book]: https://rust-lang.github.io/async-book/
+/// [`async`]: ../std/keyword.async.html
 mod await_keyword {}
 
 #[doc(keyword = "dyn")]
@@ -2246,7 +2346,7 @@ mod await_keyword {}
 /// `dyn` is a prefix of a [trait object]'s type.
 ///
 /// The `dyn` keyword is used to highlight that calls to methods on the associated `Trait`
-/// are dynamically dispatched. To use the trait this way, it must be 'object safe'.
+/// are [dynamically dispatched]. To use the trait this way, it must be 'object safe'.
 ///
 /// Unlike generic parameters or `impl Trait`, the compiler does not know the concrete type that
 /// is being passed. That is, the type has been [erased].
@@ -2258,6 +2358,9 @@ mod await_keyword {}
 /// At run-time, when a method needs to be called on the `dyn Trait`, the vtable is consulted to get
 /// the function pointer and then that function pointer is called.
 ///
+/// See the Reference for more information on [trait objects][ref-trait-obj]
+/// and [object safety][ref-obj-safety].
+///
 /// ## Trade-offs
 ///
 /// The above indirection is the additional runtime cost of calling a function on a `dyn Trait`.
@@ -2266,9 +2369,10 @@ mod await_keyword {}
 /// However, `dyn Trait` is likely to produce smaller code than `impl Trait` / generic parameters as
 /// the method won't be duplicated for each concrete type.
 ///
-/// Read more about `object safety` and [trait object]s.
-///
 /// [trait object]: ../book/ch17-02-trait-objects.html
+/// [dynamically dispatched]: https://en.wikipedia.org/wiki/Dynamic_dispatch
+/// [ref-trait-obj]: ../reference/types/trait-object.html
+/// [ref-obj-safety]: ../reference/items/traits.html#object-safety
 /// [erased]: https://en.wikipedia.org/wiki/Type_erasure
 mod dyn_keyword {}
 
@@ -2288,7 +2392,7 @@ mod dyn_keyword {}
 /// }
 ///
 /// let mut u = IntOrFloat { f: 1.0 };
-/// // Reading the fields of an union is always unsafe
+/// // Reading the fields of a union is always unsafe
 /// assert_eq!(unsafe { u.i }, 1065353216);
 /// // Updating through any of the field will modify all of them
 /// u.i = 1073741824;
@@ -2313,7 +2417,7 @@ mod dyn_keyword {}
 ///     match u {
 ///         IntOrFloat { i: 10 } => println!("Found exactly ten!"),
 ///         // Matching the field `f` provides an `f32`.
-///         IntOrFloat { f } => println!("Found f = {} !", f),
+///         IntOrFloat { f } => println!("Found f = {f} !"),
 ///     }
 /// }
 /// ```
@@ -2337,10 +2441,10 @@ mod dyn_keyword {}
 /// let i = unsafe { &mut u.i };
 ///
 /// *i = 10;
-/// println!("f = {} and i = {}", f, i);
+/// println!("f = {f} and i = {i}");
 /// ```
 ///
-/// See the [Reference][union] for more informations on `union`s.
+/// See the [Reference][union] for more information on `union`s.
 ///
 /// [`struct`]: keyword.struct.html
 /// [union]: ../reference/items/unions.html
