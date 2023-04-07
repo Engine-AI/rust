@@ -13,18 +13,15 @@ use rustc_hir::def_id::DefId;
 use rustc_infer::infer::canonical::{Canonical, CanonicalVarValues};
 use rustc_infer::traits::query::NoSolution;
 use rustc_middle::traits::solve::{
-    CanonicalGoal, CanonicalResponse, Certainty, ExternalConstraints, ExternalConstraintsData,
-    Goal, QueryResult, Response,
+    CanonicalResponse, Certainty, ExternalConstraintsData, Goal, QueryResult, Response,
 };
 use rustc_middle::ty::{self, Ty, TyCtxt};
 use rustc_middle::ty::{
     CoercePredicate, RegionOutlivesPredicate, SubtypePredicate, TypeOutlivesPredicate,
 };
 
-use crate::traits::ObligationCause;
-
 mod assembly;
-mod canonical;
+mod canonicalize;
 mod eval_ctxt;
 mod fulfill;
 mod project_goals;
@@ -66,7 +63,7 @@ impl<'a, 'tcx> EvalCtxt<'a, 'tcx> {
         goal: Goal<'tcx, TypeOutlivesPredicate<'tcx>>,
     ) -> QueryResult<'tcx> {
         let ty::OutlivesPredicate(ty, lt) = goal.predicate;
-        self.infcx.register_region_obligation_with_cause(ty, lt, &ObligationCause::dummy());
+        self.register_ty_outlives(ty, lt);
         self.evaluate_added_goals_and_make_canonical_response(Certainty::Yes)
     }
 
@@ -75,10 +72,8 @@ impl<'a, 'tcx> EvalCtxt<'a, 'tcx> {
         &mut self,
         goal: Goal<'tcx, RegionOutlivesPredicate<'tcx>>,
     ) -> QueryResult<'tcx> {
-        self.infcx.region_outlives_predicate(
-            &ObligationCause::dummy(),
-            ty::Binder::dummy(goal.predicate),
-        );
+        let ty::OutlivesPredicate(a, b) = goal.predicate;
+        self.register_region_outlives(a, b);
         self.evaluate_added_goals_and_make_canonical_response(Certainty::Yes)
     }
 
@@ -142,13 +137,9 @@ impl<'a, 'tcx> EvalCtxt<'a, 'tcx> {
         &mut self,
         goal: Goal<'tcx, ty::GenericArg<'tcx>>,
     ) -> QueryResult<'tcx> {
-        match crate::traits::wf::unnormalized_obligations(
-            self.infcx,
-            goal.param_env,
-            goal.predicate,
-        ) {
-            Some(obligations) => {
-                self.add_goals(obligations.into_iter().map(|o| o.into()));
+        match self.well_formed_goals(goal.param_env, goal.predicate) {
+            Some(goals) => {
+                self.add_goals(goals);
                 self.evaluate_added_goals_and_make_canonical_response(Certainty::Yes)
             }
             None => self.evaluate_added_goals_and_make_canonical_response(Certainty::AMBIGUOUS),
@@ -162,13 +153,22 @@ impl<'a, 'tcx> EvalCtxt<'a, 'tcx> {
     ) -> QueryResult<'tcx> {
         let tcx = self.tcx();
         // We may need to invert the alias relation direction if dealing an alias on the RHS.
+        #[derive(Debug)]
         enum Invert {
             No,
             Yes,
         }
         let evaluate_normalizes_to =
             |ecx: &mut EvalCtxt<'_, 'tcx>, alias, other, direction, invert| {
-                debug!("evaluate_normalizes_to(alias={:?}, other={:?})", alias, other);
+                let span = tracing::span!(
+                    tracing::Level::DEBUG,
+                    "compute_alias_relate_goal(evaluate_normalizes_to)",
+                    ?alias,
+                    ?other,
+                    ?direction,
+                    ?invert
+                );
+                let _enter = span.enter();
                 let result = ecx.probe(|ecx| {
                     let other = match direction {
                         // This is purely an optimization.
@@ -193,7 +193,7 @@ impl<'a, 'tcx> EvalCtxt<'a, 'tcx> {
                     ));
                     ecx.evaluate_added_goals_and_make_canonical_response(Certainty::Yes)
                 });
-                debug!("evaluate_normalizes_to({alias}, {other}, {direction:?}) -> {result:?}");
+                debug!(?result);
                 result
             };
 
@@ -219,7 +219,7 @@ impl<'a, 'tcx> EvalCtxt<'a, 'tcx> {
             }
 
             (Some(alias_lhs), Some(alias_rhs)) => {
-                debug!("compute_alias_relate_goal: both sides are aliases");
+                debug!("both sides are aliases");
 
                 let candidates = vec![
                     // LHS normalizes-to RHS
@@ -228,9 +228,14 @@ impl<'a, 'tcx> EvalCtxt<'a, 'tcx> {
                     evaluate_normalizes_to(self, alias_rhs, lhs, direction, Invert::Yes),
                     // Relate via substs
                     self.probe(|ecx| {
-                        debug!(
-                            "compute_alias_relate_goal: alias defids are equal, equating substs"
+                        let span = tracing::span!(
+                            tracing::Level::DEBUG,
+                            "compute_alias_relate_goal(relate_via_substs)",
+                            ?alias_lhs,
+                            ?alias_rhs,
+                            ?direction
                         );
+                        let _enter = span.enter();
 
                         match direction {
                             ty::AliasRelationDirection::Equate => {
@@ -284,6 +289,7 @@ impl<'tcx> EvalCtxt<'_, 'tcx> {
         debug!("added_goals={:?}", &self.nested_goals.goals[current_len..]);
     }
 
+    #[instrument(level = "debug", skip(self, responses))]
     fn try_merge_responses(
         &mut self,
         responses: impl Iterator<Item = QueryResult<'tcx>>,
@@ -313,6 +319,7 @@ impl<'tcx> EvalCtxt<'_, 'tcx> {
         });
         // FIXME(-Ztrait-solver=next): We should take the intersection of the constraints on all the
         // responses and use that for the constraints of this ambiguous response.
+        debug!(">1 response, bailing with {certainty:?}");
         let response = self.evaluate_added_goals_and_make_canonical_response(certainty);
         if let Ok(response) = &response {
             assert!(response.has_no_inference_or_external_constraints());

@@ -482,12 +482,21 @@ impl<'a> Visitor<'a> for PostExpansionVisitor<'a> {
 
     fn visit_assoc_constraint(&mut self, constraint: &'a AssocConstraint) {
         if let AssocConstraintKind::Bound { .. } = constraint.kind {
-            gate_feature_post!(
-                &self,
-                associated_type_bounds,
-                constraint.span,
-                "associated type bounds are unstable"
-            )
+            if let Some(args) = constraint.gen_args.as_ref()
+                && matches!(
+                    args,
+                    ast::GenericArgs::ReturnTypeNotation(..)
+                )
+            {
+                // RTN is gated below with a `gate_all`.
+            } else {
+                gate_feature_post!(
+                    &self,
+                    associated_type_bounds,
+                    constraint.span,
+                    "associated type bounds are unstable"
+                )
+            }
         }
         visit::walk_assoc_constraint(self, constraint)
     }
@@ -577,6 +586,7 @@ pub fn check_crate(krate: &ast::Crate, sess: &Session) {
     gate_all!(yeet_expr, "`do yeet` expression is experimental");
     gate_all!(dyn_star, "`dyn*` trait objects are experimental");
     gate_all!(const_closures, "const closures are experimental");
+    gate_all!(return_type_notation, "return type notation is experimental");
 
     // All uses of `gate_all!` below this point were added in #65742,
     // and subsequently disabled (with the non-early gating readded).

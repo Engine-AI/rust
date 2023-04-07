@@ -1,7 +1,5 @@
 //! Dealing with trait goals, i.e. `T: Trait<'a, U>`.
 
-use std::iter;
-
 use super::{assembly, EvalCtxt, SolverMode};
 use rustc_hir::def_id::DefId;
 use rustc_hir::LangItem;
@@ -41,9 +39,10 @@ impl<'tcx> assembly::GoalKind<'tcx> for TraitPredicate<'tcx> {
 
         let impl_trait_ref = tcx.impl_trait_ref(impl_def_id).unwrap();
         let drcx = DeepRejectCtxt { treat_obligation_params: TreatParams::ForLookup };
-        if iter::zip(goal.predicate.trait_ref.substs, impl_trait_ref.skip_binder().substs)
-            .any(|(goal, imp)| !drcx.generic_args_may_unify(goal, imp))
-        {
+        if !drcx.substs_refs_may_unify(
+            goal.predicate.trait_ref.substs,
+            impl_trait_ref.skip_binder().substs,
+        ) {
             return Err(NoSolution);
         }
 
@@ -408,6 +407,7 @@ impl<'tcx> assembly::GoalKind<'tcx> for TraitPredicate<'tcx> {
                     let tail_field = a_def
                         .non_enum_variant()
                         .fields
+                        .raw
                         .last()
                         .expect("expected unsized ADT to have a tail field");
                     let tail_field_ty = tcx.type_of(tail_field.did);

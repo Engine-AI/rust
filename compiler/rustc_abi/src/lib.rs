@@ -11,7 +11,7 @@ use bitflags::bitflags;
 use rustc_data_structures::intern::Interned;
 #[cfg(feature = "nightly")]
 use rustc_data_structures::stable_hasher::StableOrd;
-use rustc_index::vec::{Idx, IndexVec};
+use rustc_index::vec::{Idx, IndexSlice, IndexVec};
 #[cfg(feature = "nightly")]
 use rustc_macros::HashStable_Generic;
 #[cfg(feature = "nightly")]
@@ -1057,6 +1057,32 @@ impl Scalar {
     }
 }
 
+rustc_index::newtype_index! {
+    /// The *source-order* index of a field in a variant.
+    ///
+    /// This is how most code after type checking refers to fields, rather than
+    /// using names (as names have hygiene complications and more complex lookup).
+    ///
+    /// Particularly for `repr(Rust)` types, this may not be the same as *layout* order.
+    /// (It is for `repr(C)` `struct`s, however.)
+    ///
+    /// For example, in the following types,
+    /// ```rust
+    /// # enum Never {}
+    /// # #[repr(u16)]
+    /// enum Demo1 {
+    ///    Variant0 { a: Never, b: i32 } = 100,
+    ///    Variant1 { c: u8, d: u64 } = 10,
+    /// }
+    /// struct Demo2 { e: u8, f: u16, g: u8 }
+    /// ```
+    /// `b` is `FieldIdx(1)` in `VariantIdx(0)`,
+    /// `d` is `FieldIdx(1)` in `VariantIdx(1)`, and
+    /// `f` is `FieldIdx(1)` in `VariantIdx(0)`.
+    #[derive(HashStable_Generic)]
+    pub struct FieldIdx {}
+}
+
 /// Describes how the fields of a type are located in memory.
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
 #[cfg_attr(feature = "nightly", derive(HashStable_Generic))]
@@ -1082,7 +1108,7 @@ pub enum FieldsShape {
         /// ordered to match the source definition order.
         /// This vector does not go in increasing order.
         // FIXME(eddyb) use small vector optimization for the common case.
-        offsets: Vec<Size>,
+        offsets: IndexVec<FieldIdx, Size>,
 
         /// Maps source order field indices to memory order indices,
         /// depending on how the fields were reordered (if at all).
@@ -1096,7 +1122,7 @@ pub enum FieldsShape {
         ///
         // FIXME(eddyb) build a better abstraction for permutations, if possible.
         // FIXME(camlorn) also consider small vector optimization here.
-        memory_index: Vec<u32>,
+        memory_index: IndexVec<FieldIdx, u32>,
     },
 }
 
@@ -1131,7 +1157,7 @@ impl FieldsShape {
                 assert!(i < count);
                 stride * i
             }
-            FieldsShape::Arbitrary { ref offsets, .. } => offsets[i],
+            FieldsShape::Arbitrary { ref offsets, .. } => offsets[FieldIdx::from_usize(i)],
         }
     }
 
@@ -1142,7 +1168,9 @@ impl FieldsShape {
                 unreachable!("FieldsShape::memory_index: `Primitive`s have no fields")
             }
             FieldsShape::Union(_) | FieldsShape::Array { .. } => i,
-            FieldsShape::Arbitrary { ref memory_index, .. } => memory_index[i].try_into().unwrap(),
+            FieldsShape::Arbitrary { ref memory_index, .. } => {
+                memory_index[FieldIdx::from_usize(i)].try_into().unwrap()
+            }
         }
     }
 
@@ -1150,20 +1178,17 @@ impl FieldsShape {
     #[inline]
     pub fn index_by_increasing_offset<'a>(&'a self) -> impl Iterator<Item = usize> + 'a {
         let mut inverse_small = [0u8; 64];
-        let mut inverse_big = vec![];
+        let mut inverse_big = IndexVec::new();
         let use_small = self.count() <= inverse_small.len();
 
         // We have to write this logic twice in order to keep the array small.
         if let FieldsShape::Arbitrary { ref memory_index, .. } = *self {
             if use_small {
-                for i in 0..self.count() {
-                    inverse_small[memory_index[i] as usize] = i as u8;
+                for (field_idx, &mem_idx) in memory_index.iter_enumerated() {
+                    inverse_small[mem_idx as usize] = field_idx.as_u32() as u8;
                 }
             } else {
-                inverse_big = vec![0; self.count()];
-                for i in 0..self.count() {
-                    inverse_big[memory_index[i] as usize] = i as u32;
-                }
+                inverse_big = memory_index.invert_bijective_mapping();
             }
         }
 
@@ -1173,7 +1198,7 @@ impl FieldsShape {
                 if use_small {
                     inverse_small[i] as usize
                 } else {
-                    inverse_big[i] as usize
+                    inverse_big[i as u32].as_usize()
                 }
             }
         })

@@ -45,7 +45,6 @@ use rustc_infer::traits::TraitEngineExt;
 use rustc_middle::dep_graph::{DepKind, DepNodeIndex};
 use rustc_middle::mir::interpret::ErrorHandled;
 use rustc_middle::ty::abstract_const::NotConstEvaluatable;
-use rustc_middle::ty::fast_reject::{DeepRejectCtxt, TreatParams};
 use rustc_middle::ty::fold::BottomUpFolder;
 use rustc_middle::ty::relate::TypeRelation;
 use rustc_middle::ty::SubstsRef;
@@ -178,14 +177,14 @@ struct TraitObligationStack<'prev, 'tcx> {
 }
 
 struct SelectionCandidateSet<'tcx> {
-    // A list of candidates that definitely apply to the current
-    // obligation (meaning: types unify).
+    /// A list of candidates that definitely apply to the current
+    /// obligation (meaning: types unify).
     vec: Vec<SelectionCandidate<'tcx>>,
 
-    // If `true`, then there were candidates that might or might
-    // not have applied, but we couldn't tell. This occurs when some
-    // of the input types are type variables, in which case there are
-    // various "builtin" rules that might or might not trigger.
+    /// If `true`, then there were candidates that might or might
+    /// not have applied, but we couldn't tell. This occurs when some
+    /// of the input types are type variables, in which case there are
+    /// various "builtin" rules that might or might not trigger.
     ambiguous: bool,
 }
 
@@ -2531,19 +2530,6 @@ impl<'tcx> SelectionContext<'_, 'tcx> {
         }
 
         Ok(Normalized { value: impl_substs, obligations: nested_obligations })
-    }
-
-    fn fast_reject_trait_refs(
-        &mut self,
-        obligation: &TraitObligation<'tcx>,
-        impl_trait_ref: &ty::TraitRef<'tcx>,
-    ) -> bool {
-        // We can avoid creating type variables and doing the full
-        // substitution if we find that any of the input types, when
-        // simplified, do not match.
-        let drcx = DeepRejectCtxt { treat_obligation_params: TreatParams::ForLookup };
-        iter::zip(obligation.predicate.skip_binder().trait_ref.substs, impl_trait_ref.substs)
-            .any(|(obl, imp)| !drcx.generic_args_may_unify(obl, imp))
     }
 
     /// Normalize `where_clause_trait_ref` and try to match it against

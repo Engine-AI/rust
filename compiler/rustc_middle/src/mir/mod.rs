@@ -21,13 +21,13 @@ use rustc_hir::def_id::{DefId, LocalDefId, CRATE_DEF_ID};
 use rustc_hir::{self, GeneratorKind, ImplicitSelfKind};
 use rustc_hir::{self as hir, HirId};
 use rustc_session::Session;
-use rustc_target::abi::{Size, VariantIdx};
+use rustc_target::abi::{FieldIdx, Size, VariantIdx};
 
 use polonius_engine::Atom;
 pub use rustc_ast::Mutability;
 use rustc_data_structures::fx::FxHashSet;
 use rustc_data_structures::graph::dominators::Dominators;
-use rustc_index::vec::{Idx, IndexVec};
+use rustc_index::vec::{Idx, IndexSlice, IndexVec};
 use rustc_serialize::{Decodable, Encodable};
 use rustc_span::symbol::Symbol;
 use rustc_span::{Span, DUMMY_SP};
@@ -70,10 +70,17 @@ pub use self::pretty::{
 };
 
 /// Types for locals
-pub type LocalDecls<'tcx> = IndexVec<Local, LocalDecl<'tcx>>;
+pub type LocalDecls<'tcx> = IndexSlice<Local, LocalDecl<'tcx>>;
 
 pub trait HasLocalDecls<'tcx> {
     fn local_decls(&self) -> &LocalDecls<'tcx>;
+}
+
+impl<'tcx> HasLocalDecls<'tcx> for IndexVec<Local, LocalDecl<'tcx>> {
+    #[inline]
+    fn local_decls(&self) -> &LocalDecls<'tcx> {
+        self
+    }
 }
 
 impl<'tcx> HasLocalDecls<'tcx> for LocalDecls<'tcx> {
@@ -250,7 +257,7 @@ pub struct Body<'tcx> {
     /// The first local is the return value pointer, followed by `arg_count`
     /// locals for the function arguments, followed by any user-declared
     /// variables and temporaries.
-    pub local_decls: LocalDecls<'tcx>,
+    pub local_decls: IndexVec<Local, LocalDecl<'tcx>>,
 
     /// User type annotations.
     pub user_type_annotations: ty::CanonicalUserTypeAnnotations<'tcx>,
@@ -311,7 +318,7 @@ impl<'tcx> Body<'tcx> {
         source: MirSource<'tcx>,
         basic_blocks: IndexVec<BasicBlock, BasicBlockData<'tcx>>,
         source_scopes: IndexVec<SourceScope, SourceScopeData<'tcx>>,
-        local_decls: LocalDecls<'tcx>,
+        local_decls: IndexVec<Local, LocalDecl<'tcx>>,
         user_type_annotations: ty::CanonicalUserTypeAnnotations<'tcx>,
         arg_count: usize,
         var_debug_info: Vec<VarDebugInfo<'tcx>>,
@@ -1029,8 +1036,7 @@ impl<'tcx> LocalDecl<'tcx> {
 
 #[derive(Clone, TyEncodable, TyDecodable, HashStable, TypeFoldable, TypeVisitable)]
 pub enum VarDebugInfoContents<'tcx> {
-    /// NOTE(eddyb) There's an unenforced invariant that this `Place` is
-    /// based on a `Local`, not a `Static`, and contains no indexing.
+    /// This `Place` only contains projection which satisfy `can_use_in_debuginfo`.
     Place(Place<'tcx>),
     Const(Constant<'tcx>),
     /// The user variable's data is split across several fragments,
@@ -1040,6 +1046,7 @@ pub enum VarDebugInfoContents<'tcx> {
     /// the underlying debuginfo feature this relies on.
     Composite {
         /// Type of the original user variable.
+        /// This cannot contain a union or an enum.
         ty: Ty<'tcx>,
         /// All the parts of the original user variable, which ended
         /// up in disjoint places, due to optimizations.
@@ -1068,17 +1075,16 @@ pub struct VarDebugInfoFragment<'tcx> {
     /// Where in the composite user variable this fragment is,
     /// represented as a "projection" into the composite variable.
     /// At lower levels, this corresponds to a byte/bit range.
-    // NOTE(eddyb) there's an unenforced invariant that this contains
-    // only `Field`s, and not into `enum` variants or `union`s.
-    // FIXME(eddyb) support this for `enum`s by either using DWARF's
+    ///
+    /// This can only contain `PlaceElem::Field`.
+    // FIXME support this for `enum`s by either using DWARF's
     // more advanced control-flow features (unsupported by LLVM?)
     // to match on the discriminant, or by using custom type debuginfo
     // with non-overlapping variants for the composite variable.
     pub projection: Vec<PlaceElem<'tcx>>,
 
     /// Where the data for this fragment can be found.
-    // NOTE(eddyb) There's an unenforced invariant that this `Place` is
-    // contains no indexing (with a non-constant index).
+    /// This `Place` only contains projection which satisfy `can_use_in_debuginfo`.
     pub contents: Place<'tcx>,
 }
 
@@ -1277,7 +1283,7 @@ impl<O> AssertKind<O> {
 
     /// Getting a description does not require `O` to be printable, and does not
     /// require allocation.
-    /// The caller is expected to handle `BoundsCheck` separately.
+    /// The caller is expected to handle `BoundsCheck` and `MisalignedPointerDereference` separately.
     pub fn description(&self) -> &'static str {
         use AssertKind::*;
         match self {
@@ -1296,7 +1302,9 @@ impl<O> AssertKind<O> {
             ResumedAfterReturn(GeneratorKind::Async(_)) => "`async fn` resumed after completion",
             ResumedAfterPanic(GeneratorKind::Gen) => "generator resumed after panicking",
             ResumedAfterPanic(GeneratorKind::Async(_)) => "`async fn` resumed after panicking",
-            BoundsCheck { .. } => bug!("Unexpected AssertKind"),
+            BoundsCheck { .. } | MisalignedPointerDereference { .. } => {
+                bug!("Unexpected AssertKind")
+            }
         }
     }
 
@@ -1353,6 +1361,13 @@ impl<O> AssertKind<O> {
             Overflow(BinOp::Shl, _, r) => {
                 write!(f, "\"attempt to shift left by `{{}}`, which would overflow\", {:?}", r)
             }
+            MisalignedPointerDereference { required, found } => {
+                write!(
+                    f,
+                    "\"misaligned pointer dereference: address must be a multiple of {{}} but is {{}}\", {:?}, {:?}",
+                    required, found
+                )
+            }
             _ => write!(f, "\"{}\"", self.description()),
         }
     }
@@ -1396,6 +1411,13 @@ impl<O: fmt::Debug> fmt::Debug for AssertKind<O> {
             }
             Overflow(BinOp::Shl, _, r) => {
                 write!(f, "attempt to shift left by `{:#?}`, which would overflow", r)
+            }
+            MisalignedPointerDereference { required, found } => {
+                write!(
+                    f,
+                    "misaligned pointer dereference: address must be a multiple of {:?} but is {:?}",
+                    required, found
+                )
             }
             _ => write!(f, "{}", self.description()),
         }
@@ -1512,30 +1534,25 @@ impl<V, T> ProjectionElem<V, T> {
     }
 
     /// Returns `true` if this is a `Field` projection with the given index.
-    pub fn is_field_to(&self, f: Field) -> bool {
+    pub fn is_field_to(&self, f: FieldIdx) -> bool {
         matches!(*self, Self::Field(x, _) if x == f)
+    }
+
+    /// Returns `true` if this is accepted inside `VarDebugInfoContents::Place`.
+    pub fn can_use_in_debuginfo(&self) -> bool {
+        match self {
+            Self::Deref | Self::Downcast(_, _) | Self::Field(_, _) => true,
+            Self::ConstantIndex { .. }
+            | Self::Index(_)
+            | Self::OpaqueCast(_)
+            | Self::Subslice { .. } => false,
+        }
     }
 }
 
 /// Alias for projections as they appear in `UserTypeProjection`, where we
 /// need neither the `V` parameter for `Index` nor the `T` for `Field`.
 pub type ProjectionKind = ProjectionElem<(), ()>;
-
-rustc_index::newtype_index! {
-    /// A [newtype'd][wrapper] index type in the MIR [control-flow graph][CFG]
-    ///
-    /// A field (e.g., `f` in `_1.f`) is one variant of [`ProjectionElem`]. Conceptually,
-    /// rustc can identify that a field projection refers to either two different regions of memory
-    /// or the same one between the base and the 'projection element'.
-    /// Read more about projections in the [rustc-dev-guide][mir-datatypes]
-    ///
-    /// [wrapper]: https://rustc-dev-guide.rust-lang.org/appendix/glossary.html#newtype
-    /// [CFG]: https://rustc-dev-guide.rust-lang.org/appendix/background.html#cfg
-    /// [mir-datatypes]: https://rustc-dev-guide.rust-lang.org/mir/index.html#mir-data-types
-    #[derive(HashStable)]
-    #[debug_format = "field[{}]"]
-    pub struct Field {}
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PlaceRef<'tcx> {
@@ -1779,7 +1796,7 @@ impl SourceScope {
     /// from the function that was inlined instead of the function call site.
     pub fn lint_root(
         self,
-        source_scopes: &IndexVec<SourceScope, SourceScopeData<'_>>,
+        source_scopes: &IndexSlice<SourceScope, SourceScopeData<'_>>,
     ) -> Option<HirId> {
         let mut data = &source_scopes[self];
         // FIXME(oli-obk): we should be able to just walk the `inlined_parent_scope`, but it
@@ -1799,7 +1816,7 @@ impl SourceScope {
     #[inline]
     pub fn inlined_instance<'tcx>(
         self,
-        source_scopes: &IndexVec<SourceScope, SourceScopeData<'tcx>>,
+        source_scopes: &IndexSlice<SourceScope, SourceScopeData<'tcx>>,
     ) -> Option<ty::Instance<'tcx>> {
         let scope_data = &source_scopes[self];
         if let Some((inlined_instance, _)) = scope_data.inlined {
@@ -1984,6 +2001,13 @@ impl<'tcx> Rvalue<'tcx> {
 }
 
 impl BorrowKind {
+    pub fn mutability(&self) -> Mutability {
+        match *self {
+            BorrowKind::Shared | BorrowKind::Shallow | BorrowKind::Unique => Mutability::Not,
+            BorrowKind::Mut { .. } => Mutability::Mut,
+        }
+    }
+
     pub fn allows_two_phase_borrow(&self) -> bool {
         match *self {
             BorrowKind::Shared | BorrowKind::Shallow | BorrowKind::Unique => false,
@@ -2685,12 +2709,17 @@ impl<'tcx> UserTypeProjections {
         self.map_projections(|pat_ty_proj| pat_ty_proj.deref())
     }
 
-    pub fn leaf(self, field: Field) -> Self {
+    pub fn leaf(self, field: FieldIdx) -> Self {
         self.map_projections(|pat_ty_proj| pat_ty_proj.leaf(field))
     }
 
-    pub fn variant(self, adt_def: AdtDef<'tcx>, variant_index: VariantIdx, field: Field) -> Self {
-        self.map_projections(|pat_ty_proj| pat_ty_proj.variant(adt_def, variant_index, field))
+    pub fn variant(
+        self,
+        adt_def: AdtDef<'tcx>,
+        variant_index: VariantIdx,
+        field_index: FieldIdx,
+    ) -> Self {
+        self.map_projections(|pat_ty_proj| pat_ty_proj.variant(adt_def, variant_index, field_index))
     }
 }
 
@@ -2733,7 +2762,7 @@ impl UserTypeProjection {
         self
     }
 
-    pub(crate) fn leaf(mut self, field: Field) -> Self {
+    pub(crate) fn leaf(mut self, field: FieldIdx) -> Self {
         self.projs.push(ProjectionElem::Field(field, ()));
         self
     }
@@ -2742,13 +2771,13 @@ impl UserTypeProjection {
         mut self,
         adt_def: AdtDef<'_>,
         variant_index: VariantIdx,
-        field: Field,
+        field_index: FieldIdx,
     ) -> Self {
         self.projs.push(ProjectionElem::Downcast(
             Some(adt_def.variant(variant_index).name),
             variant_index,
         ));
-        self.projs.push(ProjectionElem::Field(field, ()));
+        self.projs.push(ProjectionElem::Field(field_index, ()));
         self
     }
 }

@@ -9,8 +9,8 @@
 use itertools::{Either, Itertools};
 use rustc_ast::ptr::P;
 use rustc_ast::visit::{self, AssocCtxt, BoundKind, FnCtxt, FnKind, Visitor};
-use rustc_ast::walk_list;
 use rustc_ast::*;
+use rustc_ast::{walk_list, StaticItem};
 use rustc_ast_pretty::pprust::{self, State};
 use rustc_data_structures::fx::FxIndexMap;
 use rustc_macros::Subdiagnostic;
@@ -983,14 +983,14 @@ impl<'a> Visitor<'a> for AstValidator<'a> {
                     self.err_handler().emit_err(errors::FieldlessUnion { span: item.span });
                 }
             }
-            ItemKind::Const(def, .., None) => {
-                self.check_defaultness(item.span, *def);
+            ItemKind::Const(box ConstItem { defaultness, expr: None, .. }) => {
+                self.check_defaultness(item.span, *defaultness);
                 self.session.emit_err(errors::ConstWithoutBody {
                     span: item.span,
                     replace_span: self.ending_semi_or_hi(item.span),
                 });
             }
-            ItemKind::Static(.., None) => {
+            ItemKind::Static(box StaticItem { expr: None, .. }) => {
                 self.session.emit_err(errors::StaticWithoutBody {
                     span: item.span,
                     replace_span: self.ending_semi_or_hi(item.span),
@@ -1075,6 +1075,7 @@ impl<'a> Visitor<'a> for AstValidator<'a> {
                     self.with_impl_trait(None, |this| this.visit_ty(ty));
                 }
             }
+            GenericArgs::ReturnTypeNotation(_span) => {}
         }
     }
 
@@ -1258,13 +1259,11 @@ impl<'a> Visitor<'a> for AstValidator<'a> {
 
         if ctxt == AssocCtxt::Impl {
             match &item.kind {
-                AssocItemKind::Const(_, _, body) => {
-                    if body.is_none() {
-                        self.session.emit_err(errors::AssocConstWithoutBody {
-                            span: item.span,
-                            replace_span: self.ending_semi_or_hi(item.span),
-                        });
-                    }
+                AssocItemKind::Const(box ConstItem { expr: None, .. }) => {
+                    self.session.emit_err(errors::AssocConstWithoutBody {
+                        span: item.span,
+                        replace_span: self.ending_semi_or_hi(item.span),
+                    });
                 }
                 AssocItemKind::Fn(box Fn { body, .. }) => {
                     if body.is_none() {
@@ -1387,16 +1386,19 @@ fn deny_equality_constraints(
                                     match &mut assoc_path.segments[len].args {
                                         Some(args) => match args.deref_mut() {
                                             GenericArgs::Parenthesized(_) => continue,
+                                            GenericArgs::ReturnTypeNotation(_span) => continue,
                                             GenericArgs::AngleBracketed(args) => {
                                                 args.args.push(arg);
                                             }
                                         },
                                         empty_args => {
-                                            *empty_args = AngleBracketedArgs {
-                                                span: ident.span,
-                                                args: thin_vec![arg],
-                                            }
-                                            .into();
+                                            *empty_args = Some(
+                                                AngleBracketedArgs {
+                                                    span: ident.span,
+                                                    args: thin_vec![arg],
+                                                }
+                                                .into(),
+                                            );
                                         }
                                     }
                                     err.assoc = Some(errors::AssociatedSuggestion {

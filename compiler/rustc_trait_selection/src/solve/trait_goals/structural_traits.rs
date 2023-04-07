@@ -1,7 +1,9 @@
 use rustc_data_structures::fx::FxHashMap;
 use rustc_hir::{def_id::DefId, Movability, Mutability};
 use rustc_infer::traits::query::NoSolution;
-use rustc_middle::ty::{self, Ty, TyCtxt, TypeFoldable, TypeFolder, TypeSuperFoldable};
+use rustc_middle::ty::{
+    self, Ty, TyCtxt, TypeFoldable, TypeFolder, TypeSuperFoldable, TypeVisitableExt,
+};
 
 use crate::solve::EvalCtxt;
 
@@ -60,7 +62,16 @@ pub(super) fn instantiate_constituent_tys_for_auto_trait<'tcx>(
 
         ty::GeneratorWitness(types) => Ok(ecx.instantiate_binder_with_placeholders(types).to_vec()),
 
-        ty::GeneratorWitnessMIR(..) => todo!(),
+        ty::GeneratorWitnessMIR(def_id, substs) => Ok(ecx
+            .tcx()
+            .generator_hidden_types(def_id)
+            .map(|bty| {
+                ecx.instantiate_binder_with_placeholders(replace_erased_lifetimes_with_bound_vars(
+                    tcx,
+                    bty.subst(tcx, substs),
+                ))
+            })
+            .collect()),
 
         // For `PhantomData<T>`, we pass `T`.
         ty::Adt(def, substs) if def.is_phantom_data() => Ok(vec![substs.type_at(0)]),
@@ -74,6 +85,29 @@ pub(super) fn instantiate_constituent_tys_for_auto_trait<'tcx>(
             Ok(vec![tcx.type_of(def_id).subst(tcx, substs)])
         }
     }
+}
+
+fn replace_erased_lifetimes_with_bound_vars<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    ty: Ty<'tcx>,
+) -> ty::Binder<'tcx, Ty<'tcx>> {
+    debug_assert!(!ty.has_late_bound_regions());
+    let mut counter = 0;
+    let ty = tcx.fold_regions(ty, |mut r, current_depth| {
+        if let ty::ReErased = r.kind() {
+            let br = ty::BoundRegion {
+                var: ty::BoundVar::from_u32(counter),
+                kind: ty::BrAnon(counter, None),
+            };
+            counter += 1;
+            r = tcx.mk_re_late_bound(current_depth, br);
+        }
+        r
+    });
+    let bound_vars = tcx.mk_bound_variable_kinds_from_iter(
+        (0..counter).map(|i| ty::BoundVariableKind::Region(ty::BrAnon(i, None))),
+    );
+    ty::Binder::bind_with_vars(ty, bound_vars)
 }
 
 pub(super) fn instantiate_constituent_tys_for_sized_trait<'tcx>(
@@ -178,7 +212,16 @@ pub(super) fn instantiate_constituent_tys_for_copy_clone_trait<'tcx>(
 
         ty::GeneratorWitness(types) => Ok(ecx.instantiate_binder_with_placeholders(types).to_vec()),
 
-        ty::GeneratorWitnessMIR(..) => todo!(),
+        ty::GeneratorWitnessMIR(def_id, substs) => Ok(ecx
+            .tcx()
+            .generator_hidden_types(def_id)
+            .map(|bty| {
+                ecx.instantiate_binder_with_placeholders(replace_erased_lifetimes_with_bound_vars(
+                    ecx.tcx(),
+                    bty.subst(ecx.tcx(), substs),
+                ))
+            })
+            .collect()),
     }
 }
 
@@ -214,9 +257,20 @@ pub(crate) fn extract_tupled_inputs_and_output_from_callable<'tcx>(
         ty::Closure(_, substs) => {
             let closure_substs = substs.as_closure();
             match closure_substs.kind_ty().to_opt_closure_kind() {
-                Some(closure_kind) if closure_kind.extends(goal_kind) => {}
-                None => return Ok(None),
-                _ => return Err(NoSolution),
+                // If the closure's kind doesn't extend the goal kind,
+                // then the closure doesn't implement the trait.
+                Some(closure_kind) => {
+                    if !closure_kind.extends(goal_kind) {
+                        return Err(NoSolution);
+                    }
+                }
+                // Closure kind is not yet determined, so we return ambiguity unless
+                // the expected kind is `FnOnce` as that is always implemented.
+                None => {
+                    if goal_kind != ty::ClosureKind::FnOnce {
+                        return Ok(None);
+                    }
+                }
             }
             Ok(Some(closure_substs.sig().map_bound(|sig| (sig.inputs()[0], sig.output()))))
         }

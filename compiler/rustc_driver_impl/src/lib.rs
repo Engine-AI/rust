@@ -6,7 +6,7 @@
 
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
 #![feature(is_terminal)]
-#![feature(once_cell)]
+#![feature(lazy_cell)]
 #![feature(decl_macro)]
 #![recursion_limit = "256"]
 #![allow(rustc::potential_query_instability)]
@@ -44,8 +44,10 @@ use rustc_session::{early_error, early_error_no_abort, early_warn};
 use rustc_span::source_map::{FileLoader, FileName};
 use rustc_span::symbol::sym;
 use rustc_target::json::ToJson;
+use rustc_target::spec::{Target, TargetTriple};
 
 use std::cmp::max;
+use std::collections::BTreeMap;
 use std::env;
 use std::ffi::OsString;
 use std::fs;
@@ -647,6 +649,15 @@ fn print_crate_info(
             TargetLibdir => println!("{}", sess.target_tlib_path.dir.display()),
             TargetSpec => {
                 println!("{}", serde_json::to_string_pretty(&sess.target.to_json()).unwrap());
+            }
+            AllTargetSpecs => {
+                let mut targets = BTreeMap::new();
+                for name in rustc_target::spec::TARGETS {
+                    let triple = TargetTriple::from_triple(name);
+                    let target = Target::expect_builtin(&triple);
+                    targets.insert(name, target.to_json());
+                }
+                println!("{}", serde_json::to_string_pretty(&targets).unwrap());
             }
             FileNames | CrateName => {
                 let Some(attrs) = attrs.as_ref() else {

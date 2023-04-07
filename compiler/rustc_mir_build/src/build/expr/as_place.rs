@@ -13,7 +13,7 @@ use rustc_middle::thir::*;
 use rustc_middle::ty::AdtDef;
 use rustc_middle::ty::{self, CanonicalUserTypeAnnotation, Ty, Variance};
 use rustc_span::Span;
-use rustc_target::abi::{VariantIdx, FIRST_VARIANT};
+use rustc_target::abi::{FieldIdx, VariantIdx, FIRST_VARIANT};
 
 use std::assert_matches::assert_matches;
 use std::iter;
@@ -90,7 +90,7 @@ fn convert_to_hir_projections_and_truncate_for_capture(
             ProjectionElem::Deref => HirProjectionKind::Deref,
             ProjectionElem::Field(field, _) => {
                 let variant = variant.unwrap_or(FIRST_VARIANT);
-                HirProjectionKind::Field(field.index() as u32, variant)
+                HirProjectionKind::Field(*field, variant)
             }
             ProjectionElem::Downcast(.., idx) => {
                 // We don't expect to see multi-variant enums here, as earlier
@@ -293,7 +293,7 @@ impl<'tcx> PlaceBuilder<'tcx> {
         &self.projection
     }
 
-    pub(crate) fn field(self, f: Field, ty: Ty<'tcx>) -> Self {
+    pub(crate) fn field(self, f: FieldIdx, ty: Ty<'tcx>) -> Self {
         self.project(PlaceElem::Field(f, ty))
     }
 

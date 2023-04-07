@@ -423,11 +423,11 @@ impl<'a> Parser<'a> {
         if let token::Literal(Lit {
             kind: token::LitKind::Integer | token::LitKind::Float,
             symbol,
-            suffix,
+            suffix: Some(suffix), // no suffix makes it a valid literal
         }) = self.token.kind
             && rustc_ast::MetaItemLit::from_token(&self.token).is_none()
         {
-            Some((symbol.as_str().len(), suffix.unwrap()))
+            Some((symbol.as_str().len(), suffix))
         } else {
             None
         }
@@ -989,8 +989,7 @@ impl<'a> Parser<'a> {
                     }
                     if self.token.kind == token::OpenDelim(Delimiter::Parenthesis) {
                         // Recover from bad turbofish: `foo.collect::Vec<_>()`.
-                        let args = AngleBracketedArgs { args, span }.into();
-                        segment.args = args;
+                        segment.args = Some(AngleBracketedArgs { args, span }.into());
 
                         self.sess.emit_err(GenericParamsWithoutAngleBrackets {
                             span,
