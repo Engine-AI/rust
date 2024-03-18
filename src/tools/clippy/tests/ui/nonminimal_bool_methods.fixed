@@ -1,5 +1,6 @@
-// run-rustfix
-#![allow(unused, clippy::diverging_sub_expression)]
+//@compile-flags: -Zdeduplicate-diagnostics=yes
+
+#![allow(unused, clippy::diverging_sub_expression, clippy::needless_if)]
 #![warn(clippy::nonminimal_bool)]
 
 fn methods_with_negation() {

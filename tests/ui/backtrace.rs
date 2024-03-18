@@ -1,12 +1,12 @@
-// run-pass
-// ignore-android FIXME #17520
-// ignore-emscripten spawning processes is not supported
-// ignore-openbsd no support for libbacktrace without filename
-// ignore-sgx no processes
-// ignore-msvc see #62897 and `backtrace-debuginfo.rs` test
-// ignore-fuchsia Backtraces not symbolized
-// compile-flags:-g
-// compile-flags:-Cstrip=none
+//@ run-pass
+//@ ignore-android FIXME #17520
+//@ ignore-wasm32 spawning processes is not supported
+//@ ignore-openbsd no support for libbacktrace without filename
+//@ ignore-sgx no processes
+//@ ignore-msvc see #62897 and `backtrace-debuginfo.rs` test
+//@ ignore-fuchsia Backtraces not symbolized
+//@ compile-flags:-g
+//@ compile-flags:-Cstrip=none
 
 use std::env;
 use std::process::{Command, Stdio};
@@ -94,16 +94,23 @@ fn runtest(me: &str) {
     #[cfg(not(panic = "abort"))]
     {
         // Make sure a stack trace is printed
-        let p = template(me).arg("double-fail").spawn().unwrap();
+        let p = template(me).arg("double-fail").env("RUST_BACKTRACE","0").spawn().unwrap();
         let out = p.wait_with_output().unwrap();
         assert!(!out.status.success());
         let s = str::from_utf8(&out.stderr).unwrap();
         // loosened the following from double::h to double:: due to
         // spurious failures on mac, 32bit, optimized
-        assert!(s.contains("stack backtrace") && contains_verbose_expected(s, "double"),
-                "bad output3: {}", s);
+        assert!(
+            s.contains("stack backtrace") &&
+                s.contains("panic in a destructor during cleanup") &&
+                contains_verbose_expected(s, "double"),
+            "bad output3: {}", s
+        );
+        // Make sure it's only one stack trace.
+        assert_eq!(s.split("stack backtrace").count(), 2);
 
         // Make sure a stack trace isn't printed too many times
+        // even with RUST_BACKTRACE=1. It should be printed twice.
         let p = template(me).arg("double-fail")
                                     .env("RUST_BACKTRACE", "1").spawn().unwrap();
         let out = p.wait_with_output().unwrap();

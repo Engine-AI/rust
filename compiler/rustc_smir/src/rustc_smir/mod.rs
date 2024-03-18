@@ -1,5 +1,5 @@
 //! Module that implements what will become the rustc side of Stable MIR.
-//!
+
 //! This module is responsible for building Stable MIR components from internal components.
 //!
 //! This module is not intended to be invoked directly by users. It will eventually
@@ -7,152 +7,172 @@
 //!
 //! For now, we are developing everything inside `rustc`, thus, we keep this module private.
 
-use crate::{
-    rustc_internal::{crate_item, item_def_id},
-    stable_mir::{self},
-};
-use rustc_middle::ty::{tls::with, TyCtxt};
-use rustc_span::def_id::{CrateNum, LOCAL_CRATE};
+use rustc_hir::def::DefKind;
+use rustc_middle::mir;
+use rustc_middle::mir::interpret::AllocId;
+use rustc_middle::ty::{self, Instance, Ty, TyCtxt};
+use rustc_span::def_id::{CrateNum, DefId, LOCAL_CRATE};
+use stable_mir::abi::Layout;
+use stable_mir::mir::mono::InstanceDef;
+use stable_mir::ty::{ConstId, Span};
+use stable_mir::{CtorKind, ItemKind};
+use std::ops::RangeInclusive;
 use tracing::debug;
 
-/// Get information about the local crate.
-pub fn local_crate() -> stable_mir::Crate {
-    with(|tcx| smir_crate(tcx, LOCAL_CRATE))
+use crate::rustc_internal::IndexMap;
+
+mod alloc;
+mod builder;
+pub(crate) mod context;
+mod convert;
+
+pub struct Tables<'tcx> {
+    pub(crate) tcx: TyCtxt<'tcx>,
+    pub(crate) def_ids: IndexMap<DefId, stable_mir::DefId>,
+    pub(crate) alloc_ids: IndexMap<AllocId, stable_mir::mir::alloc::AllocId>,
+    pub(crate) spans: IndexMap<rustc_span::Span, Span>,
+    pub(crate) types: IndexMap<Ty<'tcx>, stable_mir::ty::Ty>,
+    pub(crate) instances: IndexMap<ty::Instance<'tcx>, InstanceDef>,
+    pub(crate) constants: IndexMap<mir::Const<'tcx>, ConstId>,
+    pub(crate) layouts: IndexMap<rustc_target::abi::Layout<'tcx>, Layout>,
 }
 
-/// Retrieve a list of all external crates.
-pub fn external_crates() -> Vec<stable_mir::Crate> {
-    with(|tcx| tcx.crates(()).iter().map(|crate_num| smir_crate(tcx, *crate_num)).collect())
-}
+impl<'tcx> Tables<'tcx> {
+    pub(crate) fn intern_ty(&mut self, ty: Ty<'tcx>) -> stable_mir::ty::Ty {
+        self.types.create_or_fetch(ty)
+    }
 
-/// Find a crate with the given name.
-pub fn find_crate(name: &str) -> Option<stable_mir::Crate> {
-    with(|tcx| {
-        [LOCAL_CRATE].iter().chain(tcx.crates(()).iter()).find_map(|crate_num| {
-            let crate_name = tcx.crate_name(*crate_num).to_string();
-            (name == crate_name).then(|| smir_crate(tcx, *crate_num))
-        })
-    })
-}
+    pub(crate) fn intern_const(&mut self, constant: mir::Const<'tcx>) -> ConstId {
+        self.constants.create_or_fetch(constant)
+    }
 
-/// Retrieve all items of the local crate that have a MIR associated with them.
-pub fn all_local_items() -> stable_mir::CrateItems {
-    with(|tcx| tcx.mir_keys(()).iter().map(|item| crate_item(item.to_def_id())).collect())
+    pub(crate) fn has_body(&self, instance: Instance<'tcx>) -> bool {
+        let def_id = instance.def_id();
+        self.tcx.is_mir_available(def_id)
+            || !matches!(
+                instance.def,
+                ty::InstanceDef::Virtual(..)
+                    | ty::InstanceDef::Intrinsic(..)
+                    | ty::InstanceDef::Item(..)
+            )
+    }
 }
 
 /// Build a stable mir crate from a given crate number.
-fn smir_crate(tcx: TyCtxt<'_>, crate_num: CrateNum) -> stable_mir::Crate {
+pub(crate) fn smir_crate(tcx: TyCtxt<'_>, crate_num: CrateNum) -> stable_mir::Crate {
     let crate_name = tcx.crate_name(crate_num).to_string();
     let is_local = crate_num == LOCAL_CRATE;
     debug!(?crate_name, ?crate_num, "smir_crate");
     stable_mir::Crate { id: crate_num.into(), name: crate_name, is_local }
 }
 
-pub fn mir_body(item: &stable_mir::CrateItem) -> stable_mir::mir::Body {
-    with(|tcx| {
-        let def_id = item_def_id(item);
-        let mir = tcx.optimized_mir(def_id);
-        stable_mir::mir::Body {
-            blocks: mir
-                .basic_blocks
-                .iter()
-                .map(|block| stable_mir::mir::BasicBlock {
-                    terminator: rustc_terminator_to_terminator(block.terminator()),
-                    statements: block.statements.iter().map(rustc_statement_to_statement).collect(),
-                })
-                .collect(),
+pub(crate) fn new_item_kind(kind: DefKind) -> ItemKind {
+    match kind {
+        DefKind::Mod
+        | DefKind::Struct
+        | DefKind::Union
+        | DefKind::Enum
+        | DefKind::Variant
+        | DefKind::Trait
+        | DefKind::TyAlias
+        | DefKind::ForeignTy
+        | DefKind::TraitAlias
+        | DefKind::AssocTy
+        | DefKind::TyParam
+        | DefKind::ConstParam
+        | DefKind::Macro(_)
+        | DefKind::ExternCrate
+        | DefKind::Use
+        | DefKind::ForeignMod
+        | DefKind::OpaqueTy
+        | DefKind::Field
+        | DefKind::LifetimeParam
+        | DefKind::Impl { .. }
+        | DefKind::GlobalAsm => {
+            unreachable!("Not a valid item kind: {kind:?}");
         }
-    })
-}
-
-fn rustc_statement_to_statement(
-    s: &rustc_middle::mir::Statement<'_>,
-) -> stable_mir::mir::Statement {
-    use rustc_middle::mir::StatementKind::*;
-    match &s.kind {
-        Assign(assign) => stable_mir::mir::Statement::Assign(
-            rustc_place_to_place(&assign.0),
-            rustc_rvalue_to_rvalue(&assign.1),
-        ),
-        FakeRead(_) => todo!(),
-        SetDiscriminant { .. } => todo!(),
-        Deinit(_) => todo!(),
-        StorageLive(_) => todo!(),
-        StorageDead(_) => todo!(),
-        Retag(_, _) => todo!(),
-        PlaceMention(_) => todo!(),
-        AscribeUserType(_, _) => todo!(),
-        Coverage(_) => todo!(),
-        Intrinsic(_) => todo!(),
-        ConstEvalCounter => todo!(),
-        Nop => stable_mir::mir::Statement::Nop,
+        DefKind::Closure | DefKind::AssocFn | DefKind::Fn => ItemKind::Fn,
+        DefKind::Const | DefKind::InlineConst | DefKind::AssocConst | DefKind::AnonConst => {
+            ItemKind::Const
+        }
+        DefKind::Static { .. } => ItemKind::Static,
+        DefKind::Ctor(_, rustc_hir::def::CtorKind::Const) => ItemKind::Ctor(CtorKind::Const),
+        DefKind::Ctor(_, rustc_hir::def::CtorKind::Fn) => ItemKind::Ctor(CtorKind::Fn),
     }
 }
 
-fn rustc_rvalue_to_rvalue(rvalue: &rustc_middle::mir::Rvalue<'_>) -> stable_mir::mir::Operand {
-    use rustc_middle::mir::Rvalue::*;
-    match rvalue {
-        Use(op) => rustc_op_to_op(op),
-        Repeat(_, _) => todo!(),
-        Ref(_, _, _) => todo!(),
-        ThreadLocalRef(_) => todo!(),
-        AddressOf(_, _) => todo!(),
-        Len(_) => todo!(),
-        Cast(_, _, _) => todo!(),
-        BinaryOp(_, _) => todo!(),
-        CheckedBinaryOp(_, _) => todo!(),
-        NullaryOp(_, _) => todo!(),
-        UnaryOp(_, _) => todo!(),
-        Discriminant(_) => todo!(),
-        Aggregate(_, _) => todo!(),
-        ShallowInitBox(_, _) => todo!(),
-        CopyForDeref(_) => todo!(),
+/// Trait used to convert between an internal MIR type to a Stable MIR type.
+pub trait Stable<'cx> {
+    /// The stable representation of the type implementing Stable.
+    type T;
+    /// Converts an object to the equivalent Stable MIR representation.
+    fn stable(&self, tables: &mut Tables<'_>) -> Self::T;
+}
+
+impl<'tcx, T> Stable<'tcx> for &T
+where
+    T: Stable<'tcx>,
+{
+    type T = T::T;
+
+    fn stable(&self, tables: &mut Tables<'_>) -> Self::T {
+        (*self).stable(tables)
     }
 }
 
-fn rustc_op_to_op(op: &rustc_middle::mir::Operand<'_>) -> stable_mir::mir::Operand {
-    use rustc_middle::mir::Operand::*;
-    match op {
-        Copy(place) => stable_mir::mir::Operand::Copy(rustc_place_to_place(place)),
-        Move(place) => stable_mir::mir::Operand::Move(rustc_place_to_place(place)),
-        Constant(c) => stable_mir::mir::Operand::Constant(c.to_string()),
+impl<'tcx, T> Stable<'tcx> for Option<T>
+where
+    T: Stable<'tcx>,
+{
+    type T = Option<T::T>;
+
+    fn stable(&self, tables: &mut Tables<'_>) -> Self::T {
+        self.as_ref().map(|value| value.stable(tables))
     }
 }
 
-fn rustc_place_to_place(place: &rustc_middle::mir::Place<'_>) -> stable_mir::mir::Place {
-    assert_eq!(&place.projection[..], &[]);
-    stable_mir::mir::Place { local: place.local.as_usize() }
+impl<'tcx, T, E> Stable<'tcx> for Result<T, E>
+where
+    T: Stable<'tcx>,
+    E: Stable<'tcx>,
+{
+    type T = Result<T::T, E::T>;
+
+    fn stable(&self, tables: &mut Tables<'_>) -> Self::T {
+        match self {
+            Ok(val) => Ok(val.stable(tables)),
+            Err(error) => Err(error.stable(tables)),
+        }
+    }
 }
 
-fn rustc_terminator_to_terminator(
-    terminator: &rustc_middle::mir::Terminator<'_>,
-) -> stable_mir::mir::Terminator {
-    use rustc_middle::mir::TerminatorKind::*;
-    use stable_mir::mir::Terminator;
-    match &terminator.kind {
-        Goto { target } => Terminator::Goto { target: target.as_usize() },
-        SwitchInt { discr, targets } => Terminator::SwitchInt {
-            discr: rustc_op_to_op(discr),
-            targets: targets
-                .iter()
-                .map(|(value, target)| stable_mir::mir::SwitchTarget {
-                    value,
-                    target: target.as_usize(),
-                })
-                .collect(),
-            otherwise: targets.otherwise().as_usize(),
-        },
-        Resume => Terminator::Resume,
-        Abort => Terminator::Abort,
-        Return => Terminator::Return,
-        Unreachable => Terminator::Unreachable,
-        Drop { .. } => todo!(),
-        Call { .. } => todo!(),
-        Assert { .. } => todo!(),
-        Yield { .. } => todo!(),
-        GeneratorDrop => todo!(),
-        FalseEdge { .. } => todo!(),
-        FalseUnwind { .. } => todo!(),
-        InlineAsm { .. } => todo!(),
+impl<'tcx, T> Stable<'tcx> for &[T]
+where
+    T: Stable<'tcx>,
+{
+    type T = Vec<T::T>;
+    fn stable(&self, tables: &mut Tables<'_>) -> Self::T {
+        self.iter().map(|e| e.stable(tables)).collect()
+    }
+}
+
+impl<'tcx, T, U> Stable<'tcx> for (T, U)
+where
+    T: Stable<'tcx>,
+    U: Stable<'tcx>,
+{
+    type T = (T::T, U::T);
+    fn stable(&self, tables: &mut Tables<'_>) -> Self::T {
+        (self.0.stable(tables), self.1.stable(tables))
+    }
+}
+
+impl<'tcx, T> Stable<'tcx> for RangeInclusive<T>
+where
+    T: Stable<'tcx>,
+{
+    type T = RangeInclusive<T::T>;
+    fn stable(&self, tables: &mut Tables<'_>) -> Self::T {
+        RangeInclusive::new(self.start().stable(tables), self.end().stable(tables))
     }
 }

@@ -1,4 +1,5 @@
-// unit-test: SimplifyLocals-before-const-prop
+// skip-filecheck
+//@ unit-test: SimplifyLocals-before-const-prop
 
 
 #![feature(thread_local)]

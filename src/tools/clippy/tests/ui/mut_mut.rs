@@ -1,7 +1,14 @@
-// aux-build:proc_macros.rs
+//@aux-build:proc_macros.rs
+//@compile-flags: -Zdeduplicate-diagnostics=yes
+
 #![warn(clippy::mut_mut)]
 #![allow(unused)]
-#![allow(clippy::no_effect, clippy::uninlined_format_args, clippy::unnecessary_operation)]
+#![allow(
+    clippy::no_effect,
+    clippy::uninlined_format_args,
+    clippy::unnecessary_operation,
+    clippy::needless_pass_by_ref_mut
+)]
 
 extern crate proc_macros;
 use proc_macros::{external, inline_macros};

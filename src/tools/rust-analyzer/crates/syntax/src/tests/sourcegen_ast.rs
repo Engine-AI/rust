@@ -3,14 +3,12 @@
 //! Specifically, it generates the `SyntaxKind` enum and a number of newtype
 //! wrappers around `SyntaxNode` which implement `syntax::AstNode`.
 
-use std::{
-    collections::{BTreeSet, HashSet},
-    fmt::Write,
-};
+use std::{collections::BTreeSet, fmt::Write};
 
 use itertools::Itertools;
 use proc_macro2::{Punct, Spacing};
 use quote::{format_ident, quote};
+use rustc_hash::FxHashSet;
 use ungrammar::{Grammar, Rule};
 
 use crate::tests::ast_src::{
@@ -278,7 +276,7 @@ fn generate_nodes(kinds: KindsSrc<'_>, grammar: &AstSrc) -> String {
             }
         });
 
-    let defined_nodes: HashSet<_> = node_names.collect();
+    let defined_nodes: FxHashSet<_> = node_names.collect();
 
     for node in kinds
         .nodes
@@ -450,7 +448,6 @@ fn generate_syntax_kinds(grammar: KindsSrc<'_>) -> String {
             [ident] => { $crate::SyntaxKind::IDENT };
             [shebang] => { $crate::SyntaxKind::SHEBANG };
         }
-        pub use T;
     };
 
     sourcegen::add_preamble("sourcegen_ast", sourcegen::reformat(ast.to_string()))
@@ -535,6 +532,7 @@ impl Field {
                     "!" => "excl",
                     "*" => "star",
                     "&" => "amp",
+                    "-" => "minus",
                     "_" => "underscore",
                     "." => "dot",
                     ".." => "dotdot",
@@ -572,10 +570,11 @@ impl Field {
 
 fn lower(grammar: &Grammar) -> AstSrc {
     let mut res = AstSrc {
-        tokens: "Whitespace Comment String ByteString IntNumber FloatNumber Char Byte Ident"
-            .split_ascii_whitespace()
-            .map(|it| it.to_string())
-            .collect::<Vec<_>>(),
+        tokens:
+            "Whitespace Comment String ByteString CString IntNumber FloatNumber Char Byte Ident"
+                .split_ascii_whitespace()
+                .map(|it| it.to_owned())
+                .collect::<Vec<_>>(),
         ..Default::default()
     };
 
@@ -621,7 +620,7 @@ fn lower_enum(grammar: &Grammar, rule: &Rule) -> Option<Vec<String>> {
 }
 
 fn lower_rule(acc: &mut Vec<Field>, grammar: &Grammar, label: Option<&String>, rule: &Rule) {
-    if lower_comma_list(acc, grammar, label, rule) {
+    if lower_separated_list(acc, grammar, label, rule) {
         return;
     }
 
@@ -687,7 +686,7 @@ fn lower_rule(acc: &mut Vec<Field>, grammar: &Grammar, label: Option<&String>, r
 }
 
 // (T (',' T)* ','?)
-fn lower_comma_list(
+fn lower_separated_list(
     acc: &mut Vec<Field>,
     grammar: &Grammar,
     label: Option<&String>,
@@ -697,19 +696,23 @@ fn lower_comma_list(
         Rule::Seq(it) => it,
         _ => return false,
     };
-    let (node, repeat, trailing_comma) = match rule.as_slice() {
-        [Rule::Node(node), Rule::Rep(repeat), Rule::Opt(trailing_comma)] => {
-            (node, repeat, trailing_comma)
+    let (node, repeat, trailing_sep) = match rule.as_slice() {
+        [Rule::Node(node), Rule::Rep(repeat), Rule::Opt(trailing_sep)] => {
+            (node, repeat, Some(trailing_sep))
         }
+        [Rule::Node(node), Rule::Rep(repeat)] => (node, repeat, None),
         _ => return false,
     };
     let repeat = match &**repeat {
         Rule::Seq(it) => it,
         _ => return false,
     };
-    match repeat.as_slice() {
-        [comma, Rule::Node(n)] if comma == &**trailing_comma && n == node => (),
-        _ => return false,
+    if !matches!(
+        repeat.as_slice(),
+        [comma, Rule::Node(n)]
+            if trailing_sep.map_or(true, |it| comma == &**it) && n == node
+    ) {
+        return false;
     }
     let ty = grammar[*node].name.clone();
     let name = label.cloned().unwrap_or_else(|| pluralize(&to_lower_snake_case(&ty)));
@@ -813,7 +816,7 @@ fn extract_struct_trait(node: &mut AstNodeSrc, trait_name: &str, methods: &[&str
         }
     }
     if to_remove.len() == methods.len() {
-        node.traits.push(trait_name.to_string());
+        node.traits.push(trait_name.to_owned());
         node.remove_field(to_remove);
     }
 }

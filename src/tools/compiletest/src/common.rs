@@ -8,6 +8,7 @@ use std::process::Command;
 use std::str::FromStr;
 
 use crate::util::{add_dylib_path, PathBufExt};
+use build_helper::git::GitConfig;
 use lazycell::AtomicLazyCell;
 use serde::de::{Deserialize, Deserializer, Error as _};
 use std::collections::{HashMap, HashSet};
@@ -66,15 +67,32 @@ string_enum! {
         JsDocTest => "js-doc-test",
         MirOpt => "mir-opt",
         Assembly => "assembly",
+        CoverageMap => "coverage-map",
+        CoverageRun => "coverage-run",
+    }
+}
+
+impl Default for Mode {
+    fn default() -> Self {
+        Mode::Ui
     }
 }
 
 impl Mode {
-    pub fn disambiguator(self) -> &'static str {
+    pub fn aux_dir_disambiguator(self) -> &'static str {
         // Pretty-printing tests could run concurrently, and if they do,
         // they need to keep their output segregated.
         match self {
             Pretty => ".pretty",
+            _ => "",
+        }
+    }
+
+    pub fn output_dir_disambiguator(self) -> &'static str {
+        // Coverage tests use the same test files for multiple test modes,
+        // so each mode should have a separate output directory.
+        match self {
+            CoverageMap | CoverageRun => self.to_str(),
             _ => "",
         }
     }
@@ -100,8 +118,8 @@ string_enum! {
     #[derive(Clone, Debug, PartialEq)]
     pub enum CompareMode {
         Polonius => "polonius",
-        Chalk => "chalk",
         NextSolver => "next-solver",
+        NextSolverCoherence => "next-solver-coherence",
         SplitDwarf => "split-dwarf",
         SplitDwarfSingle => "split-dwarf-single",
     }
@@ -124,8 +142,34 @@ pub enum PanicStrategy {
     Abort,
 }
 
+impl PanicStrategy {
+    pub(crate) fn for_miropt_test_tools(&self) -> miropt_test_tools::PanicStrategy {
+        match self {
+            PanicStrategy::Unwind => miropt_test_tools::PanicStrategy::Unwind,
+            PanicStrategy::Abort => miropt_test_tools::PanicStrategy::Abort,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Sanitizer {
+    Address,
+    Cfi,
+    Dataflow,
+    Kcfi,
+    KernelAddress,
+    Leak,
+    Memory,
+    Memtag,
+    Safestack,
+    ShadowCallStack,
+    Thread,
+    Hwaddress,
+}
+
 /// Configuration for compiletest
-#[derive(Debug, Clone)]
+#[derive(Debug, Default, Clone)]
 pub struct Config {
     /// `true` to overwrite stderr/stdout files instead of complaining about changes in output.
     pub bless: bool,
@@ -144,6 +188,9 @@ pub struct Config {
 
     /// The rust-demangler executable.
     pub rust_demangler_path: Option<PathBuf>,
+
+    /// The coverage-dump executable.
+    pub coverage_dump_path: Option<PathBuf>,
 
     /// The Python executable to use for LLDB and htmldocck.
     pub python: String,
@@ -196,6 +243,9 @@ pub struct Config {
     /// Run ignored tests
     pub run_ignored: bool,
 
+    /// Whether to run tests with `ignore-debug` header
+    pub with_debug_assertions: bool,
+
     /// Only run tests that match these filters
     pub filters: Vec<String>,
 
@@ -216,8 +266,10 @@ pub struct Config {
     pub logfile: Option<PathBuf>,
 
     /// A command line to prefix program execution with,
-    /// for running under valgrind
-    pub runtool: Option<String>,
+    /// for running under valgrind for example.
+    ///
+    /// Similar to `CARGO_*_RUNNER` configuration.
+    pub runner: Option<String>,
 
     /// Flags to pass to the compiler when building for the host
     pub host_rustcflags: Vec<String>,
@@ -303,6 +355,9 @@ pub struct Config {
     /// The current Rust channel
     pub channel: String,
 
+    /// Whether adding git commit information such as the commit hash has been enabled for building
+    pub git_hash: bool,
+
     /// The default Rust edition
     pub edition: Option<String>,
 
@@ -313,7 +368,8 @@ pub struct Config {
     pub cflags: String,
     pub cxxflags: String,
     pub ar: String,
-    pub linker: Option<String>,
+    pub target_linker: Option<String>,
+    pub host_linker: Option<String>,
     pub llvm_components: String,
 
     /// Path to a NodeJS executable. Used for JS doctests, emscripten and WASM tests
@@ -330,6 +386,14 @@ pub struct Config {
     pub target_cfgs: AtomicLazyCell<TargetCfgs>,
 
     pub nocapture: bool,
+
+    // Needed both to construct build_helper::git::GitConfig
+    pub git_repository: String,
+    pub nightly_branch: String,
+
+    /// True if the profiler runtime is enabled for this target.
+    /// Used by the "needs-profiler-support" header in test files.
+    pub profiler_support: bool,
 }
 
 impl Config {
@@ -356,9 +420,6 @@ impl Config {
 
     pub fn matches_arch(&self, arch: &str) -> bool {
         self.target_cfg().arch == arch ||
-        // Shorthand for convenience. The arch for
-        // asmjs-unknown-emscripten is actually wasm32.
-        (arch == "asmjs" && self.target.starts_with("asmjs")) ||
         // Matching all the thumb variants as one can be convenient.
         // (thumbv6m, thumbv7em, thumbv7m, etc.)
         (arch == "thumb" && self.target.starts_with("thumb"))
@@ -392,6 +453,15 @@ impl Config {
         self.target_cfg().panic == PanicStrategy::Unwind
     }
 
+    pub fn has_threads(&self) -> bool {
+        // Wasm targets don't have threads unless `-threads` is in the target
+        // name, such as `wasm32-wasip1-threads`.
+        if self.target.starts_with("wasm") {
+            return self.target.contains("threads");
+        }
+        true
+    }
+
     pub fn has_asm_support(&self) -> bool {
         static ASM_SUPPORTED_ARCHS: &[&str] = &[
             "x86", "x86_64", "arm", "aarch64", "riscv32",
@@ -400,6 +470,10 @@ impl Config {
             // "nvptx64", "hexagon", "mips", "mips64", "spirv", "wasm32",
         ];
         ASM_SUPPORTED_ARCHS.contains(&self.target_cfg().arch.as_str())
+    }
+
+    pub fn git_config(&self) -> GitConfig<'_> {
+        GitConfig { git_repository: &self.git_repository, nightly_branch: &self.nightly_branch }
     }
 }
 
@@ -418,19 +492,13 @@ pub struct TargetCfgs {
 
 impl TargetCfgs {
     fn new(config: &Config) -> TargetCfgs {
-        let targets: HashMap<String, TargetCfg> = if config.stage_id.starts_with("stage0-") {
-            // #[cfg(bootstrap)]
-            // Needed only for one cycle, remove during the bootstrap bump.
-            Self::collect_all_slow(config)
-        } else {
-            serde_json::from_str(&rustc_output(
-                config,
-                &["--print=all-target-specs-json", "-Zunstable-options"],
-            ))
-            .unwrap()
-        };
+        let mut targets: HashMap<String, TargetCfg> = serde_json::from_str(&rustc_output(
+            config,
+            &["--print=all-target-specs-json", "-Zunstable-options"],
+            Default::default(),
+        ))
+        .unwrap();
 
-        let mut current = None;
         let mut all_targets = HashSet::new();
         let mut all_archs = HashSet::new();
         let mut all_oses = HashSet::new();
@@ -440,7 +508,36 @@ impl TargetCfgs {
         let mut all_families = HashSet::new();
         let mut all_pointer_widths = HashSet::new();
 
-        for (target, cfg) in targets.into_iter() {
+        // If current target is not included in the `--print=all-target-specs-json` output,
+        // we check whether it is a custom target from the user or a synthetic target from bootstrap.
+        if !targets.contains_key(&config.target) {
+            let mut envs: HashMap<String, String> = HashMap::new();
+
+            if let Ok(t) = std::env::var("RUST_TARGET_PATH") {
+                envs.insert("RUST_TARGET_PATH".into(), t);
+            }
+
+            // This returns false only when the target is neither a synthetic target
+            // nor a custom target from the user, indicating it is most likely invalid.
+            if config.target.ends_with(".json") || !envs.is_empty() {
+                targets.insert(
+                    config.target.clone(),
+                    serde_json::from_str(&rustc_output(
+                        config,
+                        &[
+                            "--print=target-spec-json",
+                            "-Zunstable-options",
+                            "--target",
+                            &config.target,
+                        ],
+                        envs,
+                    ))
+                    .unwrap(),
+                );
+            }
+        }
+
+        for (target, cfg) in targets.iter() {
             all_archs.insert(cfg.arch.clone());
             all_oses.insert(cfg.os.clone());
             all_oses_and_envs.insert(cfg.os_and_env());
@@ -451,14 +548,11 @@ impl TargetCfgs {
             }
             all_pointer_widths.insert(format!("{}bit", cfg.pointer_width));
 
-            if target == config.target {
-                current = Some(cfg);
-            }
-            all_targets.insert(target.into());
+            all_targets.insert(target.clone());
         }
 
         Self {
-            current: current.expect("current target not found"),
+            current: Self::get_current_target_config(config, &targets),
             all_targets,
             all_archs,
             all_oses,
@@ -470,23 +564,49 @@ impl TargetCfgs {
         }
     }
 
-    // #[cfg(bootstrap)]
-    // Needed only for one cycle, remove during the bootstrap bump.
-    fn collect_all_slow(config: &Config) -> HashMap<String, TargetCfg> {
-        let mut result = HashMap::new();
-        for target in rustc_output(config, &["--print=target-list"]).trim().lines() {
-            let json = rustc_output(
-                config,
-                &["--print=target-spec-json", "-Zunstable-options", "--target", target],
-            );
-            match serde_json::from_str(&json) {
-                Ok(res) => {
-                    result.insert(target.into(), res);
-                }
-                Err(err) => panic!("failed to parse target spec for {target}: {err}"),
+    fn get_current_target_config(
+        config: &Config,
+        targets: &HashMap<String, TargetCfg>,
+    ) -> TargetCfg {
+        let mut cfg = targets[&config.target].clone();
+
+        // To get the target information for the current target, we take the target spec obtained
+        // from `--print=all-target-specs-json`, and then we enrich it with the information
+        // gathered from `--print=cfg --target=$target`.
+        //
+        // This is done because some parts of the target spec can be overridden with `-C` flags,
+        // which are respected for `--print=cfg` but not for `--print=all-target-specs-json`. The
+        // code below extracts them from `--print=cfg`: make sure to only override fields that can
+        // actually be changed with `-C` flags.
+        for config in
+            rustc_output(config, &["--print=cfg", "--target", &config.target], Default::default())
+                .trim()
+                .lines()
+        {
+            let (name, value) = config
+                .split_once("=\"")
+                .map(|(name, value)| {
+                    (
+                        name,
+                        Some(
+                            value
+                                .strip_suffix("\"")
+                                .expect("key-value pair should be properly quoted"),
+                        ),
+                    )
+                })
+                .unwrap_or_else(|| (config, None));
+
+            match (name, value) {
+                // Can be overridden with `-C panic=$strategy`.
+                ("panic", Some("abort")) => cfg.panic = PanicStrategy::Abort,
+                ("panic", Some("unwind")) => cfg.panic = PanicStrategy::Unwind,
+                ("panic", other) => panic!("unexpected value for panic cfg: {other:?}"),
+                _ => {}
             }
         }
-        result
+
+        cfg
     }
 }
 
@@ -507,7 +627,15 @@ pub struct TargetCfg {
     #[serde(rename = "target-endian", default)]
     endian: Endian,
     #[serde(rename = "panic-strategy", default)]
-    panic: PanicStrategy,
+    pub(crate) panic: PanicStrategy,
+    #[serde(default)]
+    pub(crate) dynamic_linking: bool,
+    #[serde(rename = "supported-sanitizers", default)]
+    pub(crate) sanitizers: Vec<Sanitizer>,
+    #[serde(rename = "supports-xray", default)]
+    pub(crate) xray: bool,
+    #[serde(default = "default_reloc_model")]
+    pub(crate) relocation_model: String,
 }
 
 impl TargetCfg {
@@ -520,6 +648,10 @@ fn default_os() -> String {
     "none".into()
 }
 
+fn default_reloc_model() -> String {
+    "pic".into()
+}
+
 #[derive(Eq, PartialEq, Clone, Debug, Default, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Endian {
@@ -528,11 +660,12 @@ pub enum Endian {
     Big,
 }
 
-fn rustc_output(config: &Config, args: &[&str]) -> String {
+fn rustc_output(config: &Config, args: &[&str], envs: HashMap<String, String>) -> String {
     let mut command = Command::new(&config.rustc_path);
     add_dylib_path(&mut command, iter::once(&config.compile_lib_path));
     command.args(&config.target_rustcflags).args(args);
     command.env("RUSTC_BOOTSTRAP", "1");
+    command.envs(envs);
 
     let output = match command.output() {
         Ok(output) => output,
@@ -583,6 +716,8 @@ pub fn expected_output_path(
 
 pub const UI_EXTENSIONS: &[&str] = &[
     UI_STDERR,
+    UI_SVG,
+    UI_WINDOWS_SVG,
     UI_STDOUT,
     UI_FIXED,
     UI_RUN_STDERR,
@@ -590,8 +725,12 @@ pub const UI_EXTENSIONS: &[&str] = &[
     UI_STDERR_64,
     UI_STDERR_32,
     UI_STDERR_16,
+    UI_COVERAGE,
+    UI_COVERAGE_MAP,
 ];
 pub const UI_STDERR: &str = "stderr";
+pub const UI_SVG: &str = "svg";
+pub const UI_WINDOWS_SVG: &str = "windows.svg";
 pub const UI_STDOUT: &str = "stdout";
 pub const UI_FIXED: &str = "fixed";
 pub const UI_RUN_STDERR: &str = "run.stderr";
@@ -599,6 +738,8 @@ pub const UI_RUN_STDOUT: &str = "run.stdout";
 pub const UI_STDERR_64: &str = "64bit.stderr";
 pub const UI_STDERR_32: &str = "32bit.stderr";
 pub const UI_STDERR_16: &str = "16bit.stderr";
+pub const UI_COVERAGE: &str = "coverage";
+pub const UI_COVERAGE_MAP: &str = "cov-map";
 
 /// Absolute path to the directory where all output for all tests in the given
 /// `relative_dir` group should reside. Example:
@@ -617,6 +758,7 @@ pub fn output_testname_unique(
     let mode = config.compare_mode.as_ref().map_or("", |m| m.to_str());
     let debugger = config.debugger.as_ref().map_or("", |m| m.to_str());
     PathBuf::from(&testpaths.file.file_stem().unwrap())
+        .with_extra_extension(config.mode.output_dir_disambiguator())
         .with_extra_extension(revision.unwrap_or(""))
         .with_extra_extension(mode)
         .with_extra_extension(debugger)

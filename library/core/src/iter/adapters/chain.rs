@@ -1,5 +1,5 @@
-use crate::iter::{DoubleEndedIterator, FusedIterator, Iterator, TrustedLen};
-use crate::num::NonZeroUsize;
+use crate::iter::{FusedIterator, TrustedLen};
+use crate::num::NonZero;
 use crate::ops::Try;
 
 /// An iterator that links two iterators together, in a chain.
@@ -15,7 +15,7 @@ use crate::ops::Try;
 ///
 /// let a1 = [1, 2, 3];
 /// let a2 = [4, 5, 6];
-/// let iter: Chain<Iter<_>, Iter<_>> = a1.iter().chain(a2.iter());
+/// let iter: Chain<Iter<'_, _>, Iter<'_, _>> = a1.iter().chain(a2.iter());
 /// ```
 #[derive(Clone, Debug)]
 #[must_use = "iterators are lazy and do nothing unless consumed"]
@@ -96,7 +96,7 @@ where
     }
 
     #[inline]
-    fn advance_by(&mut self, mut n: usize) -> Result<(), NonZeroUsize> {
+    fn advance_by(&mut self, mut n: usize) -> Result<(), NonZero<usize>> {
         if let Some(ref mut a) = self.a {
             n = match a.advance_by(n) {
                 Ok(()) => return Ok(()),
@@ -110,7 +110,7 @@ where
             // we don't fuse the second iterator
         }
 
-        NonZeroUsize::new(n).map_or(Ok(()), Err)
+        NonZero::new(n).map_or(Ok(()), Err)
     }
 
     #[inline]
@@ -182,7 +182,7 @@ where
     }
 
     #[inline]
-    fn advance_back_by(&mut self, mut n: usize) -> Result<(), NonZeroUsize> {
+    fn advance_back_by(&mut self, mut n: usize) -> Result<(), NonZero<usize>> {
         if let Some(ref mut b) = self.b {
             n = match b.advance_back_by(n) {
                 Ok(()) => return Ok(()),
@@ -196,7 +196,7 @@ where
             // we don't fuse the second iterator
         }
 
-        NonZeroUsize::new(n).map_or(Ok(()), Err)
+        NonZero::new(n).map_or(Ok(()), Err)
     }
 
     #[inline]
@@ -273,7 +273,7 @@ where
 {
 }
 
-#[stable(feature = "default_iters", since = "CURRENT_RUSTC_VERSION")]
+#[stable(feature = "default_iters", since = "1.70.0")]
 impl<A: Default, B: Default> Default for Chain<A, B> {
     /// Creates a `Chain` from the default values for `A` and `B`.
     ///

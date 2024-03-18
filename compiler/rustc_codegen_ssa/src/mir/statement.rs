@@ -1,9 +1,9 @@
 use rustc_middle::mir;
 use rustc_middle::mir::NonDivergingIntrinsic;
+use rustc_session::config::OptLevel;
 
 use super::FunctionCx;
 use super::LocalRef;
-use crate::traits::BuilderMethods;
 use crate::traits::*;
 
 impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
@@ -20,7 +20,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                         }
                         LocalRef::PendingOperand => {
                             let operand = self.codegen_rvalue_operand(bx, rvalue);
-                            self.locals[index] = LocalRef::Operand(operand);
+                            self.overwrite_local(index, LocalRef::Operand(operand));
                             self.debug_introduce_local(bx, index);
                         }
                         LocalRef::Operand(op) => {
@@ -65,11 +65,13 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                 }
             }
             mir::StatementKind::Coverage(box ref coverage) => {
-                self.codegen_coverage(bx, coverage.clone(), statement.source_info.scope);
+                self.codegen_coverage(bx, coverage, statement.source_info.scope);
             }
             mir::StatementKind::Intrinsic(box NonDivergingIntrinsic::Assume(ref op)) => {
-                let op_val = self.codegen_operand(bx, op);
-                bx.assume(op_val.immediate());
+                if !matches!(bx.tcx().sess.opts.optimize, OptLevel::No | OptLevel::Less) {
+                    let op_val = self.codegen_operand(bx, op);
+                    bx.assume(op_val.immediate());
+                }
             }
             mir::StatementKind::Intrinsic(box NonDivergingIntrinsic::CopyNonOverlapping(
                 mir::CopyNonOverlapping { ref count, ref src, ref dst },

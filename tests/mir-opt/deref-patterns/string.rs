@@ -1,4 +1,5 @@
-// compile-flags: -Z mir-opt-level=0 -C panic=abort
+// skip-filecheck
+//@ compile-flags: -Z mir-opt-level=0 -C panic=abort
 
 #![feature(string_deref_patterns)]
 #![crate_type = "lib"]

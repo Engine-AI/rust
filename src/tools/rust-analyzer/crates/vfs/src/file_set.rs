@@ -5,8 +5,8 @@
 use std::fmt;
 
 use fst::{IntoStreamer, Streamer};
+use nohash_hasher::IntMap;
 use rustc_hash::FxHashMap;
-use stdx::hash::NoHashHashMap;
 
 use crate::{AnchoredPath, FileId, Vfs, VfsPath};
 
@@ -14,7 +14,7 @@ use crate::{AnchoredPath, FileId, Vfs, VfsPath};
 #[derive(Default, Clone, Eq, PartialEq)]
 pub struct FileSet {
     files: FxHashMap<VfsPath, FileId>,
-    paths: NoHashHashMap<FileId, VfsPath>,
+    paths: IntMap<FileId, VfsPath>,
 }
 
 impl FileSet {
@@ -121,6 +121,11 @@ impl FileSetConfig {
     /// Number of sets that `self` can partition a [`Vfs`] into.
     fn len(&self) -> usize {
         self.n_file_sets
+    }
+
+    /// Get the lexicographically ordered vector of the underlying map.
+    pub fn roots(&self) -> Vec<(Vec<u8>, u64)> {
+        self.map.stream().into_byte_vec()
     }
 
     /// Returns the set index for the given `path`.

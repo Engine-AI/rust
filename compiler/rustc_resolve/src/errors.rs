@@ -1,3 +1,4 @@
+use rustc_errors::{codes::*, Applicability};
 use rustc_macros::{Diagnostic, Subdiagnostic};
 use rustc_span::{
     symbol::{Ident, Symbol},
@@ -7,33 +8,52 @@ use rustc_span::{
 use crate::{late::PatternSource, Res};
 
 #[derive(Diagnostic)]
-#[diag(resolve_parent_module_reset_for_binding, code = "E0637")]
-pub(crate) struct ParentModuleResetForBinding;
+#[diag(resolve_generic_params_from_outer_item, code = E0401)]
+pub(crate) struct GenericParamsFromOuterItem {
+    #[primary_span]
+    #[label]
+    pub(crate) span: Span,
+    #[subdiagnostic]
+    pub(crate) label: Option<GenericParamsFromOuterItemLabel>,
+    #[label(resolve_refer_to_type_directly)]
+    pub(crate) refer_to_type_directly: Option<Span>,
+    #[subdiagnostic]
+    pub(crate) sugg: Option<GenericParamsFromOuterItemSugg>,
+    #[subdiagnostic]
+    pub(crate) static_or_const: Option<GenericParamsFromOuterItemStaticOrConst>,
+    pub(crate) is_self: bool,
+}
+
+#[derive(Subdiagnostic)]
+pub(crate) enum GenericParamsFromOuterItemStaticOrConst {
+    #[note(resolve_generic_params_from_outer_item_static)]
+    Static,
+    #[note(resolve_generic_params_from_outer_item_const)]
+    Const,
+}
+
+#[derive(Subdiagnostic)]
+pub(crate) enum GenericParamsFromOuterItemLabel {
+    #[label(resolve_generic_params_from_outer_item_self_ty_param)]
+    SelfTyParam(#[primary_span] Span),
+    #[label(resolve_generic_params_from_outer_item_self_ty_alias)]
+    SelfTyAlias(#[primary_span] Span),
+    #[label(resolve_generic_params_from_outer_item_ty_param)]
+    TyParam(#[primary_span] Span),
+    #[label(resolve_generic_params_from_outer_item_const_param)]
+    ConstParam(#[primary_span] Span),
+}
+
+#[derive(Subdiagnostic)]
+#[suggestion(resolve_suggestion, code = "{snippet}", applicability = "maybe-incorrect")]
+pub(crate) struct GenericParamsFromOuterItemSugg {
+    #[primary_span]
+    pub(crate) span: Span,
+    pub(crate) snippet: String,
+}
 
 #[derive(Diagnostic)]
-#[diag(resolve_ampersand_used_without_explicit_lifetime_name, code = "E0637")]
-#[note]
-pub(crate) struct AmpersandUsedWithoutExplicitLifetimeName(#[primary_span] pub(crate) Span);
-
-#[derive(Diagnostic)]
-#[diag(resolve_underscore_lifetime_name_cannot_be_used_here, code = "E0637")]
-#[note]
-pub(crate) struct UnderscoreLifetimeNameCannotBeUsedHere(#[primary_span] pub(crate) Span);
-
-#[derive(Diagnostic)]
-#[diag(resolve_crate_may_not_be_imported)]
-pub(crate) struct CrateMayNotBeImprted(#[primary_span] pub(crate) Span);
-
-#[derive(Diagnostic)]
-#[diag(resolve_crate_root_imports_must_be_named_explicitly)]
-pub(crate) struct CrateRootNamesMustBeNamedExplicitly(#[primary_span] pub(crate) Span);
-
-#[derive(Diagnostic)]
-#[diag(resolve_crate_root_imports_must_be_named_explicitly)]
-pub(crate) struct ResolutionError(#[primary_span] pub(crate) Span);
-
-#[derive(Diagnostic)]
-#[diag(resolve_name_is_already_used_as_generic_parameter, code = "E0403")]
+#[diag(resolve_name_is_already_used_as_generic_parameter, code = E0403)]
 pub(crate) struct NameAlreadyUsedInParameterList {
     #[primary_span]
     #[label]
@@ -44,7 +64,7 @@ pub(crate) struct NameAlreadyUsedInParameterList {
 }
 
 #[derive(Diagnostic)]
-#[diag(resolve_method_not_member_of_trait, code = "E0407")]
+#[diag(resolve_method_not_member_of_trait, code = E0407)]
 pub(crate) struct MethodNotMemberOfTrait {
     #[primary_span]
     #[label]
@@ -68,7 +88,7 @@ pub(crate) struct AssociatedFnWithSimilarNameExists {
 }
 
 #[derive(Diagnostic)]
-#[diag(resolve_type_not_member_of_trait, code = "E0437")]
+#[diag(resolve_type_not_member_of_trait, code = E0437)]
 pub(crate) struct TypeNotMemberOfTrait {
     #[primary_span]
     #[label]
@@ -92,7 +112,7 @@ pub(crate) struct AssociatedTypeWithSimilarNameExists {
 }
 
 #[derive(Diagnostic)]
-#[diag(resolve_const_not_member_of_trait, code = "E0438")]
+#[diag(resolve_const_not_member_of_trait, code = E0438)]
 pub(crate) struct ConstNotMemberOfTrait {
     #[primary_span]
     #[label]
@@ -116,7 +136,7 @@ pub(crate) struct AssociatedConstWithSimilarNameExists {
 }
 
 #[derive(Diagnostic)]
-#[diag(resolve_variable_bound_with_different_mode, code = "E0409")]
+#[diag(resolve_variable_bound_with_different_mode, code = E0409)]
 pub(crate) struct VariableBoundWithDifferentMode {
     #[primary_span]
     #[label]
@@ -127,7 +147,7 @@ pub(crate) struct VariableBoundWithDifferentMode {
 }
 
 #[derive(Diagnostic)]
-#[diag(resolve_ident_bound_more_than_once_in_parameter_list, code = "E0415")]
+#[diag(resolve_ident_bound_more_than_once_in_parameter_list, code = E0415)]
 pub(crate) struct IdentifierBoundMoreThanOnceInParameterList {
     #[primary_span]
     #[label]
@@ -136,7 +156,7 @@ pub(crate) struct IdentifierBoundMoreThanOnceInParameterList {
 }
 
 #[derive(Diagnostic)]
-#[diag(resolve_ident_bound_more_than_once_in_same_pattern, code = "E0416")]
+#[diag(resolve_ident_bound_more_than_once_in_same_pattern, code = E0416)]
 pub(crate) struct IdentifierBoundMoreThanOnceInSamePattern {
     #[primary_span]
     #[label]
@@ -145,7 +165,7 @@ pub(crate) struct IdentifierBoundMoreThanOnceInSamePattern {
 }
 
 #[derive(Diagnostic)]
-#[diag(resolve_undeclared_label, code = "E0426")]
+#[diag(resolve_undeclared_label, code = E0426)]
 pub(crate) struct UndeclaredLabel {
     #[primary_span]
     #[label]
@@ -183,7 +203,7 @@ pub(crate) struct UnreachableLabelWithSimilarNameExists {
 }
 
 #[derive(Diagnostic)]
-#[diag(resolve_self_import_can_only_appear_once_in_the_list, code = "E0430")]
+#[diag(resolve_self_import_can_only_appear_once_in_the_list, code = E0430)]
 pub(crate) struct SelfImportCanOnlyAppearOnceInTheList {
     #[primary_span]
     #[label]
@@ -191,7 +211,7 @@ pub(crate) struct SelfImportCanOnlyAppearOnceInTheList {
 }
 
 #[derive(Diagnostic)]
-#[diag(resolve_self_import_only_in_import_list_with_non_empty_prefix, code = "E0431")]
+#[diag(resolve_self_import_only_in_import_list_with_non_empty_prefix, code = E0431)]
 pub(crate) struct SelfImportOnlyInImportListWithNonEmptyPrefix {
     #[primary_span]
     #[label]
@@ -199,7 +219,7 @@ pub(crate) struct SelfImportOnlyInImportListWithNonEmptyPrefix {
 }
 
 #[derive(Diagnostic)]
-#[diag(resolve_cannot_capture_dynamic_environment_in_fn_item, code = "E0434")]
+#[diag(resolve_cannot_capture_dynamic_environment_in_fn_item, code = E0434)]
 #[help]
 pub(crate) struct CannotCaptureDynamicEnvironmentInFnItem {
     #[primary_span]
@@ -207,7 +227,7 @@ pub(crate) struct CannotCaptureDynamicEnvironmentInFnItem {
 }
 
 #[derive(Diagnostic)]
-#[diag(resolve_attempt_to_use_non_constant_value_in_constant, code = "E0435")]
+#[diag(resolve_attempt_to_use_non_constant_value_in_constant, code = E0435)]
 pub(crate) struct AttemptToUseNonConstantValueInConstant<'a> {
     #[primary_span]
     pub(crate) span: Span,
@@ -249,7 +269,7 @@ pub(crate) struct AttemptToUseNonConstantValueInConstantWithoutSuggestion<'a> {
 }
 
 #[derive(Diagnostic)]
-#[diag(resolve_self_imports_only_allowed_within, code = "E0429")]
+#[diag(resolve_self_imports_only_allowed_within, code = E0429)]
 pub(crate) struct SelfImportsOnlyAllowedWithin {
     #[primary_span]
     pub(crate) span: Span,
@@ -283,7 +303,7 @@ pub(crate) struct SelfImportsOnlyAllowedWithinMultipartSuggestion {
 }
 
 #[derive(Diagnostic)]
-#[diag(resolve_binding_shadows_something_unacceptable, code = "E0530")]
+#[diag(resolve_binding_shadows_something_unacceptable, code = E0530)]
 pub(crate) struct BindingShadowsSomethingUnacceptable<'a> {
     #[primary_span]
     #[label]
@@ -312,7 +332,7 @@ pub(crate) struct BindingShadowsSomethingUnacceptableSuggestion {
 }
 
 #[derive(Diagnostic)]
-#[diag(resolve_forward_declared_generic_param, code = "E0128")]
+#[diag(resolve_forward_declared_generic_param, code = E0128)]
 pub(crate) struct ForwardDeclaredGenericParam {
     #[primary_span]
     #[label]
@@ -320,16 +340,29 @@ pub(crate) struct ForwardDeclaredGenericParam {
 }
 
 #[derive(Diagnostic)]
-#[diag(resolve_param_in_ty_of_const_param, code = "E0770")]
+#[diag(resolve_param_in_ty_of_const_param, code = E0770)]
 pub(crate) struct ParamInTyOfConstParam {
     #[primary_span]
     #[label]
     pub(crate) span: Span,
     pub(crate) name: Symbol,
+    #[subdiagnostic]
+    pub(crate) param_kind: Option<ParamKindInTyOfConstParam>,
+}
+
+#[derive(Debug)]
+#[derive(Subdiagnostic)]
+pub(crate) enum ParamKindInTyOfConstParam {
+    #[note(resolve_type_param_in_ty_of_const_param)]
+    Type,
+    #[note(resolve_const_param_in_ty_of_const_param)]
+    Const,
+    #[note(resolve_lifetime_param_in_ty_of_const_param)]
+    Lifetime,
 }
 
 #[derive(Diagnostic)]
-#[diag(resolve_self_in_generic_param_default, code = "E0735")]
+#[diag(resolve_self_in_generic_param_default, code = E0735)]
 pub(crate) struct SelfInGenericParamDefault {
     #[primary_span]
     #[label]
@@ -344,7 +377,7 @@ pub(crate) struct ParamInNonTrivialAnonConst {
     pub(crate) span: Span,
     pub(crate) name: Symbol,
     #[subdiagnostic]
-    pub(crate) sub_is_type: ParamInNonTrivialAnonConstIsType,
+    pub(crate) param_kind: ParamKindInNonTrivialAnonConst,
     #[subdiagnostic]
     pub(crate) help: Option<ParamInNonTrivialAnonConstHelp>,
 }
@@ -353,16 +386,19 @@ pub(crate) struct ParamInNonTrivialAnonConst {
 #[help(resolve_param_in_non_trivial_anon_const_help)]
 pub(crate) struct ParamInNonTrivialAnonConstHelp;
 
+#[derive(Debug)]
 #[derive(Subdiagnostic)]
-pub(crate) enum ParamInNonTrivialAnonConstIsType {
-    #[note(resolve_param_in_non_trivial_anon_const_sub_type)]
-    AType,
-    #[help(resolve_param_in_non_trivial_anon_const_sub_non_type)]
-    NotAType { name: Symbol },
+pub(crate) enum ParamKindInNonTrivialAnonConst {
+    #[note(resolve_type_param_in_non_trivial_anon_const)]
+    Type,
+    #[help(resolve_const_param_in_non_trivial_anon_const)]
+    Const { name: Symbol },
+    #[note(resolve_lifetime_param_in_non_trivial_anon_const)]
+    Lifetime,
 }
 
 #[derive(Diagnostic)]
-#[diag(resolve_unreachable_label, code = "E0767")]
+#[diag(resolve_unreachable_label, code = E0767)]
 #[note]
 pub(crate) struct UnreachableLabel {
     #[primary_span]
@@ -406,20 +442,6 @@ pub(crate) struct UnreachableLabelSubLabelUnreachable {
 }
 
 #[derive(Diagnostic)]
-#[diag(resolve_trait_impl_mismatch, code = "{code}")]
-pub(crate) struct TraitImplMismatch {
-    #[primary_span]
-    #[label]
-    pub(crate) span: Span,
-    pub(crate) name: Symbol,
-    pub(crate) kind: String,
-    #[label(resolve_label_trait_item)]
-    pub(crate) trait_item_span: Span,
-    pub(crate) trait_path: String,
-    pub(crate) code: String,
-}
-
-#[derive(Diagnostic)]
 #[diag(resolve_invalid_asm_sym)]
 #[help]
 pub(crate) struct InvalidAsmSym {
@@ -429,7 +451,24 @@ pub(crate) struct InvalidAsmSym {
 }
 
 #[derive(Diagnostic)]
-#[diag(resolve_trait_impl_duplicate, code = "E0201")]
+#[diag(resolve_lowercase_self)]
+pub(crate) struct LowercaseSelf {
+    #[primary_span]
+    #[suggestion(code = "Self", applicability = "maybe-incorrect", style = "short")]
+    pub(crate) span: Span,
+}
+
+#[derive(Debug)]
+#[derive(Diagnostic)]
+#[diag(resolve_binding_in_never_pattern)]
+pub(crate) struct BindingInNeverPattern {
+    #[primary_span]
+    #[suggestion(code = "_", applicability = "machine-applicable", style = "short")]
+    pub(crate) span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(resolve_trait_impl_duplicate, code = E0201)]
 pub(crate) struct TraitImplDuplicate {
     #[primary_span]
     #[label]
@@ -452,11 +491,11 @@ pub(crate) struct Relative2018 {
 }
 
 #[derive(Diagnostic)]
-#[diag(resolve_ancestor_only, code = "E0742")]
+#[diag(resolve_ancestor_only, code = E0742)]
 pub(crate) struct AncestorOnly(#[primary_span] pub(crate) Span);
 
 #[derive(Diagnostic)]
-#[diag(resolve_expected_found, code = "E0577")]
+#[diag(resolve_expected_found, code = E0577)]
 pub(crate) struct ExpectedFound {
     #[primary_span]
     #[label]
@@ -466,7 +505,7 @@ pub(crate) struct ExpectedFound {
 }
 
 #[derive(Diagnostic)]
-#[diag(resolve_indeterminate, code = "E0578")]
+#[diag(resolve_indeterminate, code = E0578)]
 pub(crate) struct Indeterminate(#[primary_span] pub(crate) Span);
 
 #[derive(Diagnostic)]
@@ -481,3 +520,284 @@ pub(crate) struct ToolModuleImported {
 #[derive(Diagnostic)]
 #[diag(resolve_module_only)]
 pub(crate) struct ModuleOnly(#[primary_span] pub(crate) Span);
+
+#[derive(Diagnostic)]
+#[diag(resolve_macro_expected_found)]
+pub(crate) struct MacroExpectedFound<'a> {
+    #[primary_span]
+    pub(crate) span: Span,
+    pub(crate) found: &'a str,
+    pub(crate) expected: &'a str,
+    pub(crate) macro_path: &'a str,
+    #[subdiagnostic]
+    pub(crate) remove_surrounding_derive: Option<RemoveSurroundingDerive>,
+    #[subdiagnostic]
+    pub(crate) add_as_non_derive: Option<AddAsNonDerive<'a>>,
+}
+
+#[derive(Subdiagnostic)]
+#[help(resolve_remove_surrounding_derive)]
+pub(crate) struct RemoveSurroundingDerive {
+    #[primary_span]
+    pub(crate) span: Span,
+}
+
+#[derive(Subdiagnostic)]
+#[help(resolve_add_as_non_derive)]
+pub(crate) struct AddAsNonDerive<'a> {
+    pub(crate) macro_path: &'a str,
+}
+
+#[derive(Diagnostic)]
+#[diag(resolve_proc_macro_same_crate)]
+pub(crate) struct ProcMacroSameCrate {
+    #[primary_span]
+    pub(crate) span: Span,
+    #[help]
+    pub(crate) is_test: bool,
+}
+
+#[derive(Diagnostic)]
+#[diag(resolve_imported_crate)]
+pub(crate) struct CrateImported {
+    #[primary_span]
+    pub(crate) span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(resolve_macro_use_extern_crate_self)]
+pub(crate) struct MacroUseExternCrateSelf {
+    #[primary_span]
+    pub(crate) span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(resolve_accessible_unsure)]
+#[note]
+pub(crate) struct CfgAccessibleUnsure {
+    #[primary_span]
+    pub(crate) span: Span,
+}
+
+#[derive(Debug)]
+#[derive(Diagnostic)]
+#[diag(resolve_param_in_enum_discriminant)]
+pub(crate) struct ParamInEnumDiscriminant {
+    #[primary_span]
+    #[label]
+    pub(crate) span: Span,
+    pub(crate) name: Symbol,
+    #[subdiagnostic]
+    pub(crate) param_kind: ParamKindInEnumDiscriminant,
+}
+
+#[derive(Debug)]
+#[derive(Subdiagnostic)]
+pub(crate) enum ParamKindInEnumDiscriminant {
+    #[note(resolve_type_param_in_enum_discriminant)]
+    Type,
+    #[note(resolve_const_param_in_enum_discriminant)]
+    Const,
+    #[note(resolve_lifetime_param_in_enum_discriminant)]
+    Lifetime,
+}
+
+#[derive(Subdiagnostic)]
+#[label(resolve_change_import_binding)]
+pub(crate) struct ChangeImportBinding {
+    #[primary_span]
+    pub(crate) span: Span,
+}
+
+#[derive(Subdiagnostic)]
+#[suggestion(
+    resolve_change_import_binding,
+    code = "{suggestion}",
+    applicability = "maybe-incorrect"
+)]
+pub(crate) struct ChangeImportBindingSuggestion {
+    #[primary_span]
+    pub(crate) span: Span,
+    pub(crate) suggestion: String,
+}
+
+#[derive(Diagnostic)]
+#[diag(resolve_imports_cannot_refer_to)]
+pub(crate) struct ImportsCannotReferTo<'a> {
+    #[primary_span]
+    pub(crate) span: Span,
+    pub(crate) what: &'a str,
+}
+
+#[derive(Diagnostic)]
+#[diag(resolve_cannot_find_ident_in_this_scope)]
+pub(crate) struct CannotFindIdentInThisScope<'a> {
+    #[primary_span]
+    pub(crate) span: Span,
+    pub(crate) expected: &'a str,
+    pub(crate) ident: Ident,
+}
+
+#[derive(Subdiagnostic)]
+#[note(resolve_explicit_unsafe_traits)]
+pub(crate) struct ExplicitUnsafeTraits {
+    #[primary_span]
+    pub(crate) span: Span,
+    pub(crate) ident: Ident,
+}
+
+#[derive(Subdiagnostic)]
+#[note(resolve_macro_defined_later)]
+pub(crate) struct MacroDefinedLater {
+    #[primary_span]
+    pub(crate) span: Span,
+}
+
+#[derive(Subdiagnostic)]
+#[label(resolve_consider_move_macro_position)]
+pub(crate) struct MacroSuggMovePosition {
+    #[primary_span]
+    pub(crate) span: Span,
+    pub(crate) ident: Ident,
+}
+
+#[derive(Subdiagnostic)]
+#[note(resolve_missing_macro_rules_name)]
+pub(crate) struct MaybeMissingMacroRulesName {
+    #[primary_span]
+    pub(crate) span: Span,
+}
+
+#[derive(Subdiagnostic)]
+#[help(resolve_added_macro_use)]
+pub(crate) struct AddedMacroUse;
+
+#[derive(Subdiagnostic)]
+#[suggestion(
+    resolve_consider_adding_a_derive,
+    code = "{suggestion}",
+    applicability = "maybe-incorrect"
+)]
+pub(crate) struct ConsiderAddingADerive {
+    #[primary_span]
+    pub(crate) span: Span,
+    pub(crate) suggestion: String,
+}
+
+#[derive(Diagnostic)]
+#[diag(resolve_cannot_determine_import_resolution)]
+pub(crate) struct CannotDetermineImportResolution {
+    #[primary_span]
+    pub(crate) span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(resolve_cannot_determine_macro_resolution)]
+#[note]
+pub(crate) struct CannotDetermineMacroResolution {
+    #[primary_span]
+    pub(crate) span: Span,
+    pub(crate) kind: &'static str,
+    pub(crate) path: String,
+}
+
+#[derive(Diagnostic)]
+#[diag(resolve_cannot_be_reexported_private, code = E0364)]
+pub(crate) struct CannotBeReexportedPrivate {
+    #[primary_span]
+    pub(crate) span: Span,
+    pub(crate) ident: Ident,
+}
+
+#[derive(Diagnostic)]
+#[diag(resolve_cannot_be_reexported_crate_public, code = E0364)]
+pub(crate) struct CannotBeReexportedCratePublic {
+    #[primary_span]
+    pub(crate) span: Span,
+    pub(crate) ident: Ident,
+}
+
+#[derive(Diagnostic)]
+#[diag(resolve_cannot_be_reexported_private, code = E0365)]
+#[note(resolve_consider_declaring_with_pub)]
+pub(crate) struct CannotBeReexportedPrivateNS {
+    #[primary_span]
+    #[label(resolve_reexport_of_private)]
+    pub(crate) span: Span,
+    pub(crate) ident: Ident,
+}
+
+#[derive(Diagnostic)]
+#[diag(resolve_cannot_be_reexported_crate_public, code = E0365)]
+#[note(resolve_consider_declaring_with_pub)]
+pub(crate) struct CannotBeReexportedCratePublicNS {
+    #[primary_span]
+    #[label(resolve_reexport_of_crate_public)]
+    pub(crate) span: Span,
+    pub(crate) ident: Ident,
+}
+
+#[derive(Subdiagnostic)]
+#[help(resolve_consider_adding_macro_export)]
+pub(crate) struct ConsiderAddingMacroExport {
+    #[primary_span]
+    pub(crate) span: Span,
+}
+
+#[derive(Subdiagnostic)]
+#[note(resolve_consider_marking_as_pub)]
+pub(crate) struct ConsiderMarkingAsPub {
+    #[primary_span]
+    pub(crate) span: Span,
+    pub(crate) ident: Ident,
+}
+
+#[derive(Diagnostic)]
+#[diag(resolve_cannot_glob_import_possible_crates)]
+pub(crate) struct CannotGlobImportAllCrates {
+    #[primary_span]
+    pub(crate) span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(resolve_items_in_traits_are_not_importable)]
+pub(crate) struct ItemsInTraitsAreNotImportable {
+    #[primary_span]
+    pub(crate) span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(resolve_is_not_directly_importable, code = E0253)]
+pub(crate) struct IsNotDirectlyImportable {
+    #[primary_span]
+    #[label]
+    pub(crate) span: Span,
+    pub(crate) target: Ident,
+}
+
+#[derive(Subdiagnostic)]
+#[suggestion(
+    resolve_unexpected_res_change_ty_to_const_param_sugg,
+    code = "const ",
+    style = "verbose"
+)]
+pub(crate) struct UnexpectedResChangeTyToConstParamSugg {
+    #[primary_span]
+    pub span: Span,
+    #[applicability]
+    pub applicability: Applicability,
+}
+
+#[derive(Subdiagnostic)]
+#[suggestion(
+    resolve_unexpected_res_use_at_op_in_slice_pat_with_range_sugg,
+    code = "{snippet}",
+    applicability = "maybe-incorrect",
+    style = "verbose"
+)]
+pub(crate) struct UnexpectedResUseAtOpInSlicePatWithRangeSugg {
+    #[primary_span]
+    pub span: Span,
+    pub ident: Ident,
+    pub snippet: String,
+}

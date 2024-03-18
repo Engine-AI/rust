@@ -1,21 +1,60 @@
-// check-pass
-// aux-build: rpitit.rs
-// [next] compile-flags: -Zlower-impl-trait-in-trait-to-assoc-ty
-// revisions: current next
+//@ check-pass
+//@ aux-build: rpitit.rs
+
+#![feature(lint_reasons)]
 
 extern crate rpitit;
 
+use rpitit::{Foo, Foreign};
 use std::sync::Arc;
 
 // Implement an RPITIT from another crate.
-struct Local;
-impl rpitit::Foo for Local {
-    fn bar() -> Arc<String> { Arc::new(String::new()) }
+pub struct Local;
+impl Foo for Local {
+    #[expect(refining_impl_trait)]
+    fn bar(self) -> Arc<String> {
+        Arc::new(String::new())
+    }
+}
+
+struct LocalOnlyRefiningA;
+impl Foo for LocalOnlyRefiningA {
+    #[warn(refining_impl_trait)]
+    fn bar(self) -> Arc<String> {
+        //~^ WARN impl method signature does not match trait method signature
+        Arc::new(String::new())
+    }
+}
+
+struct LocalOnlyRefiningB;
+impl Foo for LocalOnlyRefiningB {
+    #[warn(refining_impl_trait)]
+    #[allow(refining_impl_trait_reachable)]
+    fn bar(self) -> Arc<String> {
+        //~^ WARN impl method signature does not match trait method signature
+        Arc::new(String::new())
+    }
+}
+
+struct LocalOnlyRefiningC;
+impl Foo for LocalOnlyRefiningC {
+    #[warn(refining_impl_trait)]
+    #[allow(refining_impl_trait_internal)]
+    fn bar(self) -> Arc<String> {
+        Arc::new(String::new())
+    }
+}
+
+fn generic(f: impl Foo) {
+    let x = &*f.bar();
 }
 
 fn main() {
     // Witness an RPITIT from another crate.
-    let &() = <rpitit::Foreign as rpitit::Foo>::bar();
+    let &() = Foreign.bar();
 
-    let x: Arc<String> = <Local as rpitit::Foo>::bar();
+    let x: Arc<String> = Local.bar();
+    let x: Arc<String> = LocalOnlyRefiningA.bar();
+    let x: Arc<String> = LocalOnlyRefiningB.bar();
+    let x: Arc<String> = LocalOnlyRefiningC.bar();
 }

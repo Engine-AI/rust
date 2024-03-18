@@ -5,14 +5,14 @@ use crate::mir;
 use crate::traits;
 use crate::ty::fast_reject::SimplifiedType;
 use crate::ty::layout::{TyAndLayout, ValidityRequirement};
-use crate::ty::subst::{GenericArg, SubstsRef};
 use crate::ty::{self, Ty, TyCtxt};
-use rustc_hir::def_id::{CrateNum, DefId, LocalDefId, LOCAL_CRATE};
+use crate::ty::{GenericArg, GenericArgsRef};
+use rustc_hir::def_id::{CrateNum, DefId, LocalDefId, LocalModDefId, ModDefId, LOCAL_CRATE};
 use rustc_hir::hir_id::{HirId, OwnerId};
+use rustc_query_system::query::DefIdCacheSelector;
 use rustc_query_system::query::{DefaultCacheSelector, SingleCacheSelector, VecCacheSelector};
 use rustc_span::symbol::{Ident, Symbol};
 use rustc_span::{Span, DUMMY_SP};
-use rustc_target::abi::FieldIdx;
 
 /// Placeholder for `CrateNum`'s "local" counterpart
 #[derive(Copy, Clone, Debug)]
@@ -26,7 +26,7 @@ pub trait Key: Sized {
     //
     //      ...But r-a doesn't support them yet and using a default here causes r-a to not infer
     //      return types of queries which is very annoying. Thus, until r-a support associated
-    //      type defaults, plese restrain from using them here <3
+    //      type defaults, please restrain from using them here <3
     //
     //      r-a issue: <https://github.com/rust-lang/rust-analyzer/issues/13693>
     type CacheSelector;
@@ -41,7 +41,7 @@ pub trait Key: Sized {
         None
     }
 
-    fn ty_adt_id(&self) -> Option<DefId> {
+    fn ty_def_id(&self) -> Option<DefId> {
         None
     }
 }
@@ -153,7 +153,7 @@ impl Key for LocalDefId {
 }
 
 impl Key for DefId {
-    type CacheSelector = DefaultCacheSelector<Self>;
+    type CacheSelector = DefIdCacheSelector;
 
     fn default_span(&self, tcx: TyCtxt<'_>) -> Span {
         tcx.def_span(*self)
@@ -174,11 +174,38 @@ impl AsLocalKey for DefId {
     }
 }
 
-impl Key for ty::WithOptConstParam<LocalDefId> {
+impl Key for LocalModDefId {
     type CacheSelector = DefaultCacheSelector<Self>;
 
     fn default_span(&self, tcx: TyCtxt<'_>) -> Span {
-        self.did.default_span(tcx)
+        tcx.def_span(*self)
+    }
+
+    #[inline(always)]
+    fn key_as_def_id(&self) -> Option<DefId> {
+        Some(self.to_def_id())
+    }
+}
+
+impl Key for ModDefId {
+    type CacheSelector = DefaultCacheSelector<Self>;
+
+    fn default_span(&self, tcx: TyCtxt<'_>) -> Span {
+        tcx.def_span(*self)
+    }
+
+    #[inline(always)]
+    fn key_as_def_id(&self) -> Option<DefId> {
+        Some(self.to_def_id())
+    }
+}
+
+impl AsLocalKey for ModDefId {
+    type LocalKey = LocalModDefId;
+
+    #[inline(always)]
+    fn as_local_key(&self) -> Option<Self::LocalKey> {
+        self.as_local()
     }
 }
 
@@ -230,7 +257,7 @@ impl Key for (LocalDefId, LocalDefId) {
     }
 }
 
-impl Key for (DefId, Option<Ident>) {
+impl Key for (DefId, Ident) {
     type CacheSelector = DefaultCacheSelector<Self>;
 
     fn default_span(&self, tcx: TyCtxt<'_>) -> Span {
@@ -293,7 +320,7 @@ impl Key for (DefId, SimplifiedType) {
     }
 }
 
-impl<'tcx> Key for SubstsRef<'tcx> {
+impl<'tcx> Key for GenericArgsRef<'tcx> {
     type CacheSelector = DefaultCacheSelector<Self>;
 
     fn default_span(&self, _: TyCtxt<'_>) -> Span {
@@ -301,7 +328,7 @@ impl<'tcx> Key for SubstsRef<'tcx> {
     }
 }
 
-impl<'tcx> Key for (DefId, SubstsRef<'tcx>) {
+impl<'tcx> Key for (DefId, GenericArgsRef<'tcx>) {
     type CacheSelector = DefaultCacheSelector<Self>;
 
     fn default_span(&self, tcx: TyCtxt<'_>) -> Span {
@@ -313,11 +340,11 @@ impl<'tcx> Key for (ty::UnevaluatedConst<'tcx>, ty::UnevaluatedConst<'tcx>) {
     type CacheSelector = DefaultCacheSelector<Self>;
 
     fn default_span(&self, tcx: TyCtxt<'_>) -> Span {
-        (self.0).def.did.default_span(tcx)
+        (self.0).def.default_span(tcx)
     }
 }
 
-impl<'tcx> Key for (LocalDefId, DefId, SubstsRef<'tcx>) {
+impl<'tcx> Key for (LocalDefId, DefId, GenericArgsRef<'tcx>) {
     type CacheSelector = DefaultCacheSelector<Self>;
 
     fn default_span(&self, tcx: TyCtxt<'_>) -> Span {
@@ -325,27 +352,11 @@ impl<'tcx> Key for (LocalDefId, DefId, SubstsRef<'tcx>) {
     }
 }
 
-impl<'tcx> Key for (ty::ParamEnv<'tcx>, ty::PolyTraitRef<'tcx>) {
+impl<'tcx> Key for (ty::ParamEnv<'tcx>, ty::TraitRef<'tcx>) {
     type CacheSelector = DefaultCacheSelector<Self>;
 
     fn default_span(&self, tcx: TyCtxt<'_>) -> Span {
-        tcx.def_span(self.1.def_id())
-    }
-}
-
-impl<'tcx> Key for (ty::Const<'tcx>, FieldIdx) {
-    type CacheSelector = DefaultCacheSelector<Self>;
-
-    fn default_span(&self, _: TyCtxt<'_>) -> Span {
-        DUMMY_SP
-    }
-}
-
-impl<'tcx> Key for mir::interpret::ConstAlloc<'tcx> {
-    type CacheSelector = DefaultCacheSelector<Self>;
-
-    fn default_span(&self, _: TyCtxt<'_>) -> Span {
-        DUMMY_SP
+        tcx.def_span(self.1.def_id)
     }
 }
 
@@ -381,14 +392,6 @@ impl<'tcx> Key for GenericArg<'tcx> {
     }
 }
 
-impl<'tcx> Key for mir::ConstantKind<'tcx> {
-    type CacheSelector = DefaultCacheSelector<Self>;
-
-    fn default_span(&self, _: TyCtxt<'_>) -> Span {
-        DUMMY_SP
-    }
-}
-
 impl<'tcx> Key for ty::Const<'tcx> {
     type CacheSelector = DefaultCacheSelector<Self>;
 
@@ -404,9 +407,10 @@ impl<'tcx> Key for Ty<'tcx> {
         DUMMY_SP
     }
 
-    fn ty_adt_id(&self) -> Option<DefId> {
-        match self.kind() {
+    fn ty_def_id(&self) -> Option<DefId> {
+        match *self.kind() {
             ty::Adt(adt, _) => Some(adt.did()),
+            ty::Coroutine(def_id, ..) => Some(def_id),
             _ => None,
         }
     }
@@ -428,7 +432,7 @@ impl<'tcx> Key for (Ty<'tcx>, Ty<'tcx>) {
     }
 }
 
-impl<'tcx> Key for &'tcx ty::List<ty::Predicate<'tcx>> {
+impl<'tcx> Key for &'tcx ty::List<ty::Clause<'tcx>> {
     type CacheSelector = DefaultCacheSelector<Self>;
 
     fn default_span(&self, _: TyCtxt<'_>) -> Span {
@@ -449,6 +453,10 @@ impl<'tcx, T: Key> Key for ty::ParamEnvAnd<'tcx, T> {
 
     fn default_span(&self, tcx: TyCtxt<'_>) -> Span {
         self.value.default_span(tcx)
+    }
+
+    fn ty_def_id(&self) -> Option<DefId> {
+        self.value.ty_def_id()
     }
 }
 
@@ -486,7 +494,7 @@ impl Key for (Symbol, u32, u32) {
     }
 }
 
-impl<'tcx> Key for (DefId, Ty<'tcx>, SubstsRef<'tcx>, ty::ParamEnv<'tcx>) {
+impl<'tcx> Key for (DefId, Ty<'tcx>, GenericArgsRef<'tcx>, ty::ParamEnv<'tcx>) {
     type CacheSelector = DefaultCacheSelector<Self>;
 
     fn default_span(&self, _tcx: TyCtxt<'_>) -> Span {
@@ -548,7 +556,7 @@ impl<'tcx> Key for (ValidityRequirement, ty::ParamEnvAnd<'tcx, Ty<'tcx>>) {
         DUMMY_SP
     }
 
-    fn ty_adt_id(&self) -> Option<DefId> {
+    fn ty_def_id(&self) -> Option<DefId> {
         match self.1.value.kind() {
             ty::Adt(adt, _) => Some(adt.did()),
             _ => None,

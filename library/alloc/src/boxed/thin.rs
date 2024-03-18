@@ -7,7 +7,7 @@ use core::fmt::{self, Debug, Display, Formatter};
 use core::marker::PhantomData;
 #[cfg(not(no_global_oom_handling))]
 use core::marker::Unsize;
-use core::mem;
+use core::mem::{self, SizedTypeProperties};
 use core::ops::{Deref, DerefMut};
 use core::ptr::Pointee;
 use core::ptr::{self, NonNull};
@@ -66,6 +66,26 @@ impl<T> ThinBox<T> {
         let meta = ptr::metadata(&value);
         let ptr = WithOpaqueHeader::new(meta, value);
         ThinBox { ptr, _marker: PhantomData }
+    }
+
+    /// Moves a type to the heap with its [`Metadata`] stored in the heap allocation instead of on
+    /// the stack. Returns an error if allocation fails, instead of aborting.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(allocator_api)]
+    /// #![feature(thin_box)]
+    /// use std::boxed::ThinBox;
+    ///
+    /// let five = ThinBox::try_new(5)?;
+    /// # Ok::<(), std::alloc::AllocError>(())
+    /// ```
+    ///
+    /// [`Metadata`]: core::ptr::Pointee::Metadata
+    pub fn try_new(value: T) -> Result<Self, core::alloc::AllocError> {
+        let meta = ptr::metadata(&value);
+        WithOpaqueHeader::try_new(meta, value).map(|ptr| ThinBox { ptr, _marker: PhantomData })
     }
 }
 
@@ -156,7 +176,7 @@ impl<T: ?Sized> ThinBox<T> {
 
     fn with_header(&self) -> &WithHeader<<T as Pointee>::Metadata> {
         // SAFETY: both types are transparent to `NonNull<u8>`
-        unsafe { &*((&self.ptr) as *const WithOpaqueHeader as *const WithHeader<_>) }
+        unsafe { &*(core::ptr::addr_of!(self.ptr) as *const WithHeader<_>) }
     }
 }
 
@@ -178,6 +198,10 @@ impl WithOpaqueHeader {
     fn new<H, T>(header: H, value: T) -> Self {
         let ptr = WithHeader::new(header, value);
         Self(ptr.0)
+    }
+
+    fn try_new<H, T>(header: H, value: T) -> Result<Self, core::alloc::AllocError> {
+        WithHeader::try_new(header, value).map(|ptr| Self(ptr.0))
     }
 }
 
@@ -202,9 +226,7 @@ impl<H> WithHeader<H> {
             let ptr = if layout.size() == 0 {
                 // Some paranoia checking, mostly so that the ThinBox tests are
                 // more able to catch issues.
-                debug_assert!(
-                    value_offset == 0 && mem::size_of::<T>() == 0 && mem::size_of::<H>() == 0
-                );
+                debug_assert!(value_offset == 0 && T::IS_ZST && H::IS_ZST);
                 layout.dangling()
             } else {
                 let ptr = alloc::alloc(layout);
@@ -223,6 +245,46 @@ impl<H> WithHeader<H> {
             ptr::write(result.value().cast(), value);
 
             result
+        }
+    }
+
+    /// Non-panicking version of `new`.
+    /// Any error is returned as `Err(core::alloc::AllocError)`.
+    fn try_new<T>(header: H, value: T) -> Result<WithHeader<H>, core::alloc::AllocError> {
+        let value_layout = Layout::new::<T>();
+        let Ok((layout, value_offset)) = Self::alloc_layout(value_layout) else {
+            return Err(core::alloc::AllocError);
+        };
+
+        unsafe {
+            // Note: It's UB to pass a layout with a zero size to `alloc::alloc`, so
+            // we use `layout.dangling()` for this case, which should have a valid
+            // alignment for both `T` and `H`.
+            let ptr = if layout.size() == 0 {
+                // Some paranoia checking, mostly so that the ThinBox tests are
+                // more able to catch issues.
+                debug_assert!(
+                    value_offset == 0 && mem::size_of::<T>() == 0 && mem::size_of::<H>() == 0
+                );
+                layout.dangling()
+            } else {
+                let ptr = alloc::alloc(layout);
+                if ptr.is_null() {
+                    return Err(core::alloc::AllocError);
+                }
+
+                // Safety:
+                // - The size is at least `aligned_header_size`.
+                let ptr = ptr.add(value_offset) as *mut _;
+
+                NonNull::new_unchecked(ptr)
+            };
+
+            let result = WithHeader(ptr, PhantomData);
+            ptr::write(result.header(), header);
+            ptr::write(result.value().cast(), value);
+
+            Ok(result)
         }
     }
 
@@ -249,9 +311,7 @@ impl<H> WithHeader<H> {
                         alloc::dealloc(self.ptr.as_ptr().sub(value_offset), layout);
                     } else {
                         debug_assert!(
-                            value_offset == 0
-                                && mem::size_of::<H>() == 0
-                                && self.value_layout.size() == 0
+                            value_offset == 0 && H::IS_ZST && self.value_layout.size() == 0
                         );
                     }
                 }

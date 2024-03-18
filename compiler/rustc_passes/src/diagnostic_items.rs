@@ -13,7 +13,7 @@ use rustc_ast as ast;
 use rustc_hir::diagnostic_items::DiagnosticItems;
 use rustc_hir::OwnerId;
 use rustc_middle::query::LocalCrate;
-use rustc_middle::ty::query::Providers;
+use rustc_middle::query::Providers;
 use rustc_middle::ty::TyCtxt;
 use rustc_span::def_id::{DefId, LOCAL_CRATE};
 use rustc_span::symbol::{sym, Symbol};
@@ -45,7 +45,7 @@ fn report_duplicate_item(
 ) {
     let orig_span = tcx.hir().span_if_local(original_def_id);
     let duplicate_span = tcx.hir().span_if_local(item_def_id);
-    tcx.sess.emit_err(DuplicateDiagnosticItemInCrate {
+    tcx.dcx().emit_err(DuplicateDiagnosticItemInCrate {
         duplicate_span,
         orig_span,
         crate_name: tcx.crate_name(item_def_id.krate),

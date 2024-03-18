@@ -1,7 +1,42 @@
-use crate::common::{CompareMode, Config, Debugger};
+use crate::common::{CompareMode, Config, Debugger, Mode};
+use crate::header::IgnoreDecision;
 use std::collections::HashSet;
 
 const EXTRA_ARCHS: &[&str] = &["spirv"];
+
+pub(super) fn handle_ignore(config: &Config, line: &str) -> IgnoreDecision {
+    let parsed = parse_cfg_name_directive(config, line, "ignore");
+    match parsed.outcome {
+        MatchOutcome::NoMatch => IgnoreDecision::Continue,
+        MatchOutcome::Match => IgnoreDecision::Ignore {
+            reason: match parsed.comment {
+                Some(comment) => format!("ignored {} ({comment})", parsed.pretty_reason.unwrap()),
+                None => format!("ignored {}", parsed.pretty_reason.unwrap()),
+            },
+        },
+        MatchOutcome::Invalid => IgnoreDecision::Error { message: format!("invalid line: {line}") },
+        MatchOutcome::External => IgnoreDecision::Continue,
+        MatchOutcome::NotADirective => IgnoreDecision::Continue,
+    }
+}
+
+pub(super) fn handle_only(config: &Config, line: &str) -> IgnoreDecision {
+    let parsed = parse_cfg_name_directive(config, line, "only");
+    match parsed.outcome {
+        MatchOutcome::Match => IgnoreDecision::Continue,
+        MatchOutcome::NoMatch => IgnoreDecision::Ignore {
+            reason: match parsed.comment {
+                Some(comment) => {
+                    format!("only executed {} ({comment})", parsed.pretty_reason.unwrap())
+                }
+                None => format!("only executed {}", parsed.pretty_reason.unwrap()),
+            },
+        },
+        MatchOutcome::Invalid => IgnoreDecision::Error { message: format!("invalid line: {line}") },
+        MatchOutcome::External => IgnoreDecision::Continue,
+        MatchOutcome::NotADirective => IgnoreDecision::Continue,
+    }
+}
 
 /// Parses a name-value directive which contains config-specific information, e.g., `ignore-x86`
 /// or `normalize-stderr-32bit`.
@@ -11,10 +46,10 @@ pub(super) fn parse_cfg_name_directive<'a>(
     prefix: &str,
 ) -> ParsedNameDirective<'a> {
     if !line.as_bytes().starts_with(prefix.as_bytes()) {
-        return ParsedNameDirective::invalid();
+        return ParsedNameDirective::not_a_directive();
     }
     if line.as_bytes().get(prefix.len()) != Some(&b'-') {
-        return ParsedNameDirective::invalid();
+        return ParsedNameDirective::not_a_directive();
     }
     let line = &line[prefix.len() + 1..];
 
@@ -24,7 +59,7 @@ pub(super) fn parse_cfg_name_directive<'a>(
     // Some of the matchers might be "" depending on what the target information is. To avoid
     // problems we outright reject empty directives.
     if name == "" {
-        return ParsedNameDirective::invalid();
+        return ParsedNameDirective::not_a_directive();
     }
 
     let mut outcome = MatchOutcome::Invalid;
@@ -77,7 +112,7 @@ pub(super) fn parse_cfg_name_directive<'a>(
             (config.target == "wasm32-unknown-unknown").then_some("emscripten"),
         ],
         allowed_names: &target_cfgs.all_oses,
-        message: "when the operative system is {name}"
+        message: "when the operating system is {name}"
     }
     condition! {
         name: &target_cfg.env,
@@ -87,7 +122,7 @@ pub(super) fn parse_cfg_name_directive<'a>(
     condition! {
         name: &target_cfg.os_and_env(),
         allowed_names: &target_cfgs.all_oses_and_envs,
-        message: "when the operative system and target environment are {name}"
+        message: "when the operating system and target environment are {name}"
     }
     condition! {
         name: &target_cfg.abi,
@@ -111,8 +146,7 @@ pub(super) fn parse_cfg_name_directive<'a>(
     }
 
     // `wasm32-bare` is an alias to refer to just wasm32-unknown-unknown
-    // (in contrast to `wasm32` which also matches non-bare targets like
-    // asmjs-unknown-emscripten).
+    // (in contrast to `wasm32` which also matches non-bare targets)
     condition! {
         name: "wasm32-bare",
         condition: config.target == "wasm32-unknown-unknown",
@@ -120,21 +154,20 @@ pub(super) fn parse_cfg_name_directive<'a>(
     }
 
     condition! {
-        name: "asmjs",
-        condition: config.target.starts_with("asmjs"),
-        message: "when the architecture is asm.js",
-    }
-    condition! {
         name: "thumb",
         condition: config.target.starts_with("thumb"),
         message: "when the architecture is part of the Thumb family"
     }
 
+    // Technically the locally built compiler uses the "dev" channel rather than the "nightly"
+    // channel, even though most people don't know or won't care about it. To avoid confusion, we
+    // treat the "dev" channel as the "nightly" channel when processing the directive.
     condition! {
-        name: &config.channel,
+        name: if config.channel == "dev" { "nightly" } else { &config.channel },
         allowed_names: &["stable", "beta", "nightly"],
         message: "when the release channel is {name}",
     }
+
     condition! {
         name: "cross-compile",
         condition: config.target != config.host,
@@ -157,8 +190,8 @@ pub(super) fn parse_cfg_name_directive<'a>(
     }
     condition! {
         name: "debug",
-        condition: cfg!(debug_assertions),
-        message: "when building with debug assertions",
+        condition: config.with_debug_assertions,
+        message: "when running tests with `ignore-debug` header",
     }
     condition! {
         name: config.debugger.as_ref().map(|d| d.to_str()),
@@ -174,6 +207,17 @@ pub(super) fn parse_cfg_name_directive<'a>(
             inner: CompareMode::STR_VARIANTS,
         },
         message: "when comparing with {name}",
+    }
+    // Coverage tests run the same test file in multiple modes.
+    // If a particular test should not be run in one of the modes, ignore it
+    // with "ignore-mode-coverage-map" or "ignore-mode-coverage-run".
+    condition! {
+        name: format!("mode-{}", config.mode.to_str()),
+        allowed_names: ContainsPrefixed {
+            prefix: "mode-",
+            inner: Mode::STR_VARIANTS,
+        },
+        message: "when the test mode is {name}",
     }
 
     if prefix == "ignore" && outcome == MatchOutcome::Invalid {
@@ -218,8 +262,13 @@ pub(super) struct ParsedNameDirective<'a> {
 }
 
 impl ParsedNameDirective<'_> {
-    fn invalid() -> Self {
-        Self { name: None, pretty_reason: None, comment: None, outcome: MatchOutcome::NoMatch }
+    fn not_a_directive() -> Self {
+        Self {
+            name: None,
+            pretty_reason: None,
+            comment: None,
+            outcome: MatchOutcome::NotADirective,
+        }
     }
 }
 
@@ -233,6 +282,8 @@ pub(super) enum MatchOutcome {
     Invalid,
     /// The directive is handled by other parts of our tooling.
     External,
+    /// The line is not actually a directive.
+    NotADirective,
 }
 
 trait CustomContains {

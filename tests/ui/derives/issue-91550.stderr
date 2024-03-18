@@ -2,11 +2,7 @@ error[E0599]: the method `insert` exists for struct `HashSet<Value>`, but its tr
   --> $DIR/issue-91550.rs:8:8
    |
 LL | struct Value(u32);
-   | ------------
-   | |
-   | doesn't satisfy `Value: Eq`
-   | doesn't satisfy `Value: Hash`
-   | doesn't satisfy `Value: PartialEq`
+   | ------------ doesn't satisfy `Value: Eq`, `Value: Hash` or `Value: PartialEq`
 ...
 LL |     hs.insert(Value(0));
    |        ^^^^^^
@@ -18,17 +14,15 @@ LL |     hs.insert(Value(0));
            `Value: Hash`
 help: consider annotating `Value` with `#[derive(Eq, Hash, PartialEq)]`
    |
-LL | #[derive(Eq, Hash, PartialEq)]
+LL + #[derive(Eq, Hash, PartialEq)]
+LL | struct Value(u32);
    |
 
 error[E0599]: the method `use_eq` exists for struct `Object<NoDerives>`, but its trait bounds were not satisfied
   --> $DIR/issue-91550.rs:26:9
    |
 LL | pub struct NoDerives;
-   | --------------------
-   | |
-   | doesn't satisfy `NoDerives: Eq`
-   | doesn't satisfy `NoDerives: PartialEq`
+   | -------------------- doesn't satisfy `NoDerives: Eq` or `NoDerives: PartialEq`
 LL |
 LL | struct Object<T>(T);
    | ---------------- method `use_eq` not found for this struct
@@ -48,19 +42,15 @@ LL | impl<T: Eq> Object<T> {
            which is required by `NoDerives: Eq`
 help: consider annotating `NoDerives` with `#[derive(Eq, PartialEq)]`
    |
-LL | #[derive(Eq, PartialEq)]
+LL + #[derive(Eq, PartialEq)]
+LL | pub struct NoDerives;
    |
 
 error[E0599]: the method `use_ord` exists for struct `Object<NoDerives>`, but its trait bounds were not satisfied
   --> $DIR/issue-91550.rs:27:9
    |
 LL | pub struct NoDerives;
-   | --------------------
-   | |
-   | doesn't satisfy `NoDerives: Eq`
-   | doesn't satisfy `NoDerives: Ord`
-   | doesn't satisfy `NoDerives: PartialEq`
-   | doesn't satisfy `NoDerives: PartialOrd`
+   | -------------------- doesn't satisfy `NoDerives: Eq`, `NoDerives: Ord`, `NoDerives: PartialEq` or `NoDerives: PartialOrd`
 LL |
 LL | struct Object<T>(T);
    | ---------------- method `use_ord` not found for this struct
@@ -84,19 +74,15 @@ LL | impl<T: Ord> Object<T> {
            which is required by `NoDerives: Ord`
 help: consider annotating `NoDerives` with `#[derive(Eq, Ord, PartialEq, PartialOrd)]`
    |
-LL | #[derive(Eq, Ord, PartialEq, PartialOrd)]
+LL + #[derive(Eq, Ord, PartialEq, PartialOrd)]
+LL | pub struct NoDerives;
    |
 
 error[E0599]: the method `use_ord_and_partial_ord` exists for struct `Object<NoDerives>`, but its trait bounds were not satisfied
   --> $DIR/issue-91550.rs:28:9
    |
 LL | pub struct NoDerives;
-   | --------------------
-   | |
-   | doesn't satisfy `NoDerives: Eq`
-   | doesn't satisfy `NoDerives: Ord`
-   | doesn't satisfy `NoDerives: PartialEq`
-   | doesn't satisfy `NoDerives: PartialOrd`
+   | -------------------- doesn't satisfy `NoDerives: Eq`, `NoDerives: Ord`, `NoDerives: PartialEq` or `NoDerives: PartialOrd`
 LL |
 LL | struct Object<T>(T);
    | ---------------- method `use_ord_and_partial_ord` not found for this struct
@@ -123,7 +109,8 @@ LL | impl<T: Ord + PartialOrd> Object<T> {
            which is required by `NoDerives: PartialOrd`
 help: consider annotating `NoDerives` with `#[derive(Eq, Ord, PartialEq, PartialOrd)]`
    |
-LL | #[derive(Eq, Ord, PartialEq, PartialOrd)]
+LL + #[derive(Eq, Ord, PartialEq, PartialOrd)]
+LL | pub struct NoDerives;
    |
 
 error: aborting due to 4 previous errors

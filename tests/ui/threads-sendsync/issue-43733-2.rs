@@ -1,5 +1,5 @@
-// ignore-wasm32
-// dont-check-compiler-stderr
+//@ needs-threads
+//@ dont-check-compiler-stderr
 #![feature(cfg_target_thread_local, thread_local_internals)]
 
 // On platforms *without* `#[thread_local]`, use
@@ -21,7 +21,7 @@ impl<T> Key<T> {
 }
 
 #[cfg(target_thread_local)]
-use std::thread::__LocalKeyInner as Key;
+use std::thread::local_impl::Key;
 
 static __KEY: Key<()> = Key::new();
 //~^ ERROR `UnsafeCell<Option<()>>` cannot be shared between threads

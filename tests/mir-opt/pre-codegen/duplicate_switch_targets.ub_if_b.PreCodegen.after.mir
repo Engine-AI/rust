@@ -1,0 +1,34 @@
+// MIR for `ub_if_b` after PreCodegen
+
+fn ub_if_b(_1: Thing) -> Thing {
+    debug t => _1;
+    let mut _0: Thing;
+    let mut _2: isize;
+    scope 1 (inlined unreachable_unchecked) {
+        let mut _3: bool;
+        let _4: ();
+        scope 2 {
+        }
+    }
+
+    bb0: {
+        _2 = discriminant(_1);
+        switchInt(move _2) -> [0: bb1, 1: bb2, otherwise: bb3];
+    }
+
+    bb1: {
+        _0 = move _1;
+        return;
+    }
+
+    bb2: {
+        StorageLive(_3);
+        _3 = UbCheck(LanguageUb);
+        assume(_3);
+        _4 = unreachable_unchecked::precondition_check() -> [return: bb3, unwind unreachable];
+    }
+
+    bb3: {
+        unreachable;
+    }
+}

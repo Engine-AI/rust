@@ -1,6 +1,5 @@
-// compile-flags: -O
-// only-x86_64
-// ignore-debug: the debug assertions get in the way
+//@ compile-flags: -O
+//@ only-x86_64
 
 #![crate_type = "lib"]
 
@@ -83,9 +82,9 @@ pub struct BigButHighlyAligned([u8; 64 * 3]);
 #[no_mangle]
 pub fn swap_big_aligned(x: &mut BigButHighlyAligned, y: &mut BigButHighlyAligned) {
 // CHECK-NOT: call void @llvm.memcpy
-// CHECK: call void @llvm.memcpy.{{.+}}({{i8\*|ptr}} noundef nonnull align 64 dereferenceable(192)
-// CHECK: call void @llvm.memcpy.{{.+}}({{i8\*|ptr}} noundef nonnull align 64 dereferenceable(192)
-// CHECK: call void @llvm.memcpy.{{.+}}({{i8\*|ptr}} noundef nonnull align 64 dereferenceable(192)
+// CHECK: call void @llvm.memcpy.{{.+}}(ptr noundef nonnull align 64 dereferenceable(192)
+// CHECK: call void @llvm.memcpy.{{.+}}(ptr noundef nonnull align 64 dereferenceable(192)
+// CHECK: call void @llvm.memcpy.{{.+}}(ptr noundef nonnull align 64 dereferenceable(192)
 // CHECK-NOT: call void @llvm.memcpy
     swap(x, y)
 }

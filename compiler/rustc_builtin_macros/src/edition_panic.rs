@@ -1,4 +1,5 @@
 use rustc_ast::ptr::P;
+use rustc_ast::token::Delimiter;
 use rustc_ast::tokenstream::{DelimSpan, TokenStream};
 use rustc_ast::*;
 use rustc_expand::base::*;
@@ -19,7 +20,7 @@ pub fn expand_panic<'cx>(
     cx: &'cx mut ExtCtxt<'_>,
     sp: Span,
     tts: TokenStream,
-) -> Box<dyn MacResult + 'cx> {
+) -> MacroExpanderResult<'cx> {
     let mac = if use_panic_2021(sp) { sym::panic_2021 } else { sym::panic_2015 };
     expand(mac, cx, sp, tts)
 }
@@ -32,7 +33,7 @@ pub fn expand_unreachable<'cx>(
     cx: &'cx mut ExtCtxt<'_>,
     sp: Span,
     tts: TokenStream,
-) -> Box<dyn MacResult + 'cx> {
+) -> MacroExpanderResult<'cx> {
     let mac = if use_panic_2021(sp) { sym::unreachable_2021 } else { sym::unreachable_2015 };
     expand(mac, cx, sp, tts)
 }
@@ -42,10 +43,10 @@ fn expand<'cx>(
     cx: &'cx mut ExtCtxt<'_>,
     sp: Span,
     tts: TokenStream,
-) -> Box<dyn MacResult + 'cx> {
+) -> MacroExpanderResult<'cx> {
     let sp = cx.with_call_site_ctxt(sp);
 
-    MacEager::expr(
+    ExpandResult::Ready(MacEager::expr(
         cx.expr(
             sp,
             ExprKind::MacCall(P(MacCall {
@@ -60,13 +61,12 @@ fn expand<'cx>(
                 },
                 args: P(DelimArgs {
                     dspan: DelimSpan::from_single(sp),
-                    delim: MacDelimiter::Parenthesis,
+                    delim: Delimiter::Parenthesis,
                     tokens: tts,
                 }),
-                prior_type_ascription: None,
             })),
         ),
-    )
+    ))
 }
 
 pub fn use_panic_2021(mut span: Span) -> bool {

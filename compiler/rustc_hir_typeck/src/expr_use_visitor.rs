@@ -142,12 +142,12 @@ impl<'a, 'tcx> ExprUseVisitor<'a, 'tcx> {
             let param_ty = return_if_err!(self.mc.pat_ty_adjusted(param.pat));
             debug!("consume_body: param_ty = {:?}", param_ty);
 
-            let param_place = self.mc.cat_rvalue(param.hir_id, param.pat.span, param_ty);
+            let param_place = self.mc.cat_rvalue(param.hir_id, param_ty);
 
             self.walk_irrefutable_pat(&param_place, param.pat);
         }
 
-        self.consume_expr(&body.value);
+        self.consume_expr(body.value);
     }
 
     fn tcx(&self) -> TyCtxt<'tcx> {
@@ -211,7 +211,7 @@ impl<'a, 'tcx> ExprUseVisitor<'a, 'tcx> {
                 self.select_from_expr(base);
             }
 
-            hir::ExprKind::Index(lhs, rhs) => {
+            hir::ExprKind::Index(lhs, rhs, _) => {
                 // lhs[rhs]
                 self.select_from_expr(lhs);
                 self.consume_expr(rhs);
@@ -237,10 +237,10 @@ impl<'a, 'tcx> ExprUseVisitor<'a, 'tcx> {
                 self.consume_exprs(exprs);
             }
 
-            hir::ExprKind::If(ref cond_expr, ref then_expr, ref opt_else_expr) => {
+            hir::ExprKind::If(cond_expr, then_expr, ref opt_else_expr) => {
                 self.consume_expr(cond_expr);
                 self.consume_expr(then_expr);
-                if let Some(ref else_expr) = *opt_else_expr {
+                if let Some(else_expr) = *opt_else_expr {
                     self.consume_expr(else_expr);
                 }
             }
@@ -249,7 +249,7 @@ impl<'a, 'tcx> ExprUseVisitor<'a, 'tcx> {
                 self.walk_local(init, pat, None, |t| t.borrow_expr(init, ty::ImmBorrow))
             }
 
-            hir::ExprKind::Match(ref discr, arms, _) => {
+            hir::ExprKind::Match(discr, arms, _) => {
                 let discr_place = return_if_err!(self.mc.cat_expr(discr));
                 return_if_err!(self.maybe_read_scrutinee(
                     discr,
@@ -267,7 +267,7 @@ impl<'a, 'tcx> ExprUseVisitor<'a, 'tcx> {
                 self.consume_exprs(exprs);
             }
 
-            hir::ExprKind::AddrOf(_, m, ref base) => {
+            hir::ExprKind::AddrOf(_, m, base) => {
                 // &base
                 // make sure that the thing we are pointing out stays valid
                 // for the lifetime `scope_r` of the resulting ptr:
@@ -293,6 +293,9 @@ impl<'a, 'tcx> ExprUseVisitor<'a, 'tcx> {
                         | hir::InlineAsmOperand::Const { .. }
                         | hir::InlineAsmOperand::SymFn { .. }
                         | hir::InlineAsmOperand::SymStatic { .. } => {}
+                        hir::InlineAsmOperand::Label { block } => {
+                            self.walk_block(block);
+                        }
                     }
                 }
             }
@@ -300,6 +303,7 @@ impl<'a, 'tcx> ExprUseVisitor<'a, 'tcx> {
             hir::ExprKind::Continue(..)
             | hir::ExprKind::Lit(..)
             | hir::ExprKind::ConstBlock(..)
+            | hir::ExprKind::OffsetOf(..)
             | hir::ExprKind::Err(_) => {}
 
             hir::ExprKind::Loop(blk, ..) => {
@@ -323,6 +327,10 @@ impl<'a, 'tcx> ExprUseVisitor<'a, 'tcx> {
                 if let Some(expr) = *opt_expr {
                     self.consume_expr(expr);
                 }
+            }
+
+            hir::ExprKind::Become(call) => {
+                self.consume_expr(call);
             }
 
             hir::ExprKind::Assign(lhs, rhs, _) => {
@@ -363,18 +371,18 @@ impl<'a, 'tcx> ExprUseVisitor<'a, 'tcx> {
 
     fn walk_stmt(&mut self, stmt: &hir::Stmt<'_>) {
         match stmt.kind {
-            hir::StmtKind::Local(hir::Local { pat, init: Some(expr), els, .. }) => {
+            hir::StmtKind::Let(hir::Local { pat, init: Some(expr), els, .. }) => {
                 self.walk_local(expr, pat, *els, |_| {})
             }
 
-            hir::StmtKind::Local(_) => {}
+            hir::StmtKind::Let(_) => {}
 
             hir::StmtKind::Item(_) => {
                 // We don't visit nested items in this visitor,
                 // only the fn body we were given.
             }
 
-            hir::StmtKind::Expr(ref expr) | hir::StmtKind::Semi(ref expr) => {
+            hir::StmtKind::Expr(expr) | hir::StmtKind::Semi(expr) => {
                 self.consume_expr(expr);
             }
         }
@@ -396,11 +404,16 @@ impl<'a, 'tcx> ExprUseVisitor<'a, 'tcx> {
             mc.cat_pattern(discr_place.clone(), pat, |place, pat| {
                 match &pat.kind {
                     PatKind::Binding(.., opt_sub_pat) => {
-                        // If the opt_sub_pat is None, than the binding does not count as
+                        // If the opt_sub_pat is None, then the binding does not count as
                         // a wildcard for the purpose of borrowing discr.
                         if opt_sub_pat.is_none() {
                             needs_to_be_read = true;
                         }
+                    }
+                    PatKind::Never => {
+                        // A never pattern reads the value.
+                        // FIXME(never_patterns): does this do what I expect?
+                        needs_to_be_read = true;
                     }
                     PatKind::Path(qpath) => {
                         // A `Path` pattern is just a name like `Foo`. This is either a
@@ -437,15 +450,26 @@ impl<'a, 'tcx> ExprUseVisitor<'a, 'tcx> {
                         // to borrow discr.
                         needs_to_be_read = true;
                     }
+                    PatKind::Slice(lhs, wild, rhs) => {
+                        // We don't need to test the length if the pattern is `[..]`
+                        if matches!((lhs, wild, rhs), (&[], Some(_), &[]))
+                            // Arrays have a statically known size, so
+                            // there is no need to read their length
+                            || place.place.ty().peel_refs().is_array()
+                        {
+                        } else {
+                            needs_to_be_read = true;
+                        }
+                    }
                     PatKind::Or(_)
                     | PatKind::Box(_)
-                    | PatKind::Slice(..)
                     | PatKind::Ref(..)
-                    | PatKind::Wild => {
-                        // If the PatKind is Or, Box, Slice or Ref, the decision is made later
+                    | PatKind::Wild
+                    | PatKind::Err(_) => {
+                        // If the PatKind is Or, Box, or Ref, the decision is made later
                         // as these patterns contains subpatterns
-                        // If the PatKind is Wild, the decision is made based on the other patterns being
-                        // examined
+                        // If the PatKind is Wild or Err, the decision is made based on the other patterns
+                        // being examined
                     }
                 }
             })?
@@ -493,7 +517,7 @@ impl<'a, 'tcx> ExprUseVisitor<'a, 'tcx> {
             ));
             self.walk_block(els)
         }
-        self.walk_irrefutable_pat(&expr_place, &pat);
+        self.walk_irrefutable_pat(&expr_place, pat);
     }
 
     /// Indicates that the value of `blk` will be consumed, meaning either copied or moved
@@ -505,7 +529,7 @@ impl<'a, 'tcx> ExprUseVisitor<'a, 'tcx> {
             self.walk_stmt(stmt);
         }
 
-        if let Some(ref tail_expr) = blk.expr {
+        if let Some(tail_expr) = blk.expr {
             self.consume_expr(tail_expr);
         }
     }
@@ -521,7 +545,7 @@ impl<'a, 'tcx> ExprUseVisitor<'a, 'tcx> {
 
             // The struct path probably didn't resolve
             if self.mc.typeck_results.opt_field_index(field.hir_id).is_none() {
-                self.tcx().sess.delay_span_bug(field.span, "couldn't resolve index for field");
+                self.tcx().dcx().span_delayed_bug(field.span, "couldn't resolve index for field");
             }
         }
 
@@ -537,7 +561,7 @@ impl<'a, 'tcx> ExprUseVisitor<'a, 'tcx> {
         // Select just those fields of the `with`
         // expression that will actually be used
         match with_place.place.ty().kind() {
-            ty::Adt(adt, substs) if adt.is_struct() => {
+            ty::Adt(adt, args) if adt.is_struct() => {
                 // Consume those fields of the with expression that are needed.
                 for (f_index, with_field) in adt.non_enum_variant().fields.iter_enumerated() {
                     let is_mentioned = fields
@@ -547,7 +571,7 @@ impl<'a, 'tcx> ExprUseVisitor<'a, 'tcx> {
                         let field_place = self.mc.cat_projection(
                             &*with_expr,
                             with_place.clone(),
-                            with_field.ty(self.tcx(), substs),
+                            with_field.ty(self.tcx(), args),
                             ProjectionKind::Field(f_index, FIRST_VARIANT),
                         );
                         self.delegate_consume(&field_place, field_place.hir_id);
@@ -559,7 +583,7 @@ impl<'a, 'tcx> ExprUseVisitor<'a, 'tcx> {
                 // struct; however, when EUV is run during typeck, it
                 // may not. This will generate an error earlier in typeck,
                 // so we can just ignore it.
-                if self.tcx().sess.has_errors().is_none() {
+                if self.tcx().dcx().has_errors().is_none() {
                     span_bug!(with_expr.span, "with expression doesn't evaluate to a struct");
                 }
             }
@@ -652,10 +676,8 @@ impl<'a, 'tcx> ExprUseVisitor<'a, 'tcx> {
         );
         self.walk_pat(discr_place, arm.pat, arm.guard.is_some());
 
-        if let Some(hir::Guard::If(e)) = arm.guard {
+        if let Some(ref e) = arm.guard {
             self.consume_expr(e)
-        } else if let Some(hir::Guard::IfLet(ref l)) = arm.guard {
-            self.consume_expr(l.init)
         }
 
         self.consume_expr(arm.body);
@@ -765,7 +787,7 @@ impl<'a, 'tcx> ExprUseVisitor<'a, 'tcx> {
         let closure_def_id = closure_expr.def_id;
         let upvars = tcx.upvars_mentioned(self.body_owner);
 
-        // For purposes of this function, generator and closures are equivalent.
+        // For purposes of this function, coroutine and closures are equivalent.
         let body_owner_is_closure =
             matches!(tcx.hir().body_owner_kind(self.body_owner), hir::BodyOwnerKind::Closure,);
 
@@ -834,7 +856,7 @@ impl<'a, 'tcx> ExprUseVisitor<'a, 'tcx> {
                         // be a local variable
                         PlaceBase::Local(*var_hir_id)
                     };
-                    let closure_hir_id = tcx.hir().local_def_id_to_hir_id(closure_def_id);
+                    let closure_hir_id = tcx.local_def_id_to_hir_id(closure_def_id);
                     let place_with_id = PlaceWithHirId::new(
                         capture_info
                             .path_expr_id

@@ -9,11 +9,11 @@ use std::{
 use crossbeam_channel::{after, select, Receiver};
 use lsp_server::{Connection, Message, Notification, Request};
 use lsp_types::{notification::Exit, request::Shutdown, TextDocumentIdentifier, Url};
-use project_model::ProjectManifest;
-use rust_analyzer::{config::Config, lsp_ext, main_loop};
+use rust_analyzer::{config::Config, lsp, main_loop};
 use serde::Serialize;
 use serde_json::{json, to_string_pretty, Value};
-use test_utils::Fixture;
+use test_utils::FixtureWithProjectMeta;
+use tracing_subscriber::fmt::TestWriter;
 use vfs::AbsPathBuf;
 
 use crate::testdir::TestDir;
@@ -23,9 +23,10 @@ pub(crate) struct Project<'a> {
     tmp_dir: Option<TestDir>,
     roots: Vec<PathBuf>,
     config: serde_json::Value,
+    root_dir_contains_symlink: bool,
 }
 
-impl<'a> Project<'a> {
+impl Project<'_> {
     pub(crate) fn with_fixture(fixture: &str) -> Project<'_> {
         Project {
             fixture,
@@ -37,24 +38,34 @@ impl<'a> Project<'a> {
                     "sysroot": null,
                     // Can't use test binary as rustc wrapper.
                     "buildScripts": {
-                        "useRustcWrapper": false
+                        "useRustcWrapper": false,
+                        "enable": false,
                     },
+                },
+                "procMacro": {
+                    "enable": false,
                 }
             }),
+            root_dir_contains_symlink: false,
         }
     }
 
-    pub(crate) fn tmp_dir(mut self, tmp_dir: TestDir) -> Project<'a> {
+    pub(crate) fn tmp_dir(mut self, tmp_dir: TestDir) -> Self {
         self.tmp_dir = Some(tmp_dir);
         self
     }
 
-    pub(crate) fn root(mut self, path: &str) -> Project<'a> {
+    pub(crate) fn root(mut self, path: &str) -> Self {
         self.roots.push(path.into());
         self
     }
 
-    pub(crate) fn with_config(mut self, config: serde_json::Value) -> Project<'a> {
+    pub(crate) fn with_root_dir_contains_symlink(mut self) -> Self {
+        self.root_dir_contains_symlink = true;
+        self
+    }
+
+    pub(crate) fn with_config(mut self, config: serde_json::Value) -> Self {
         fn merge(dst: &mut serde_json::Value, src: serde_json::Value) {
             match (dst, src) {
                 (Value::Object(dst), Value::Object(src)) => {
@@ -70,20 +81,37 @@ impl<'a> Project<'a> {
     }
 
     pub(crate) fn server(self) -> Server {
-        let tmp_dir = self.tmp_dir.unwrap_or_else(TestDir::new);
-        static INIT: Once = Once::new();
-        INIT.call_once(|| {
-            tracing_subscriber::fmt()
-                .with_test_writer()
-                .with_env_filter(tracing_subscriber::EnvFilter::from_env("RA_LOG"))
-                .init();
-            profile::init_from(crate::PROFILE);
+        let tmp_dir = self.tmp_dir.unwrap_or_else(|| {
+            if self.root_dir_contains_symlink {
+                TestDir::new_symlink()
+            } else {
+                TestDir::new()
+            }
         });
 
-        let (mini_core, proc_macros, fixtures) = Fixture::parse(self.fixture);
-        assert!(proc_macros.is_empty());
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            let _ = rust_analyzer::tracing::Config {
+                writer: TestWriter::default(),
+                // Deliberately enable all `error` logs if the user has not set RA_LOG, as there is usually
+                // useful information in there for debugging.
+                filter: std::env::var("RA_LOG").ok().unwrap_or_else(|| "error".to_owned()),
+                chalk_filter: std::env::var("CHALK_DEBUG").ok(),
+                profile_filter: std::env::var("RA_PROFILE").ok(),
+            };
+        });
+
+        let FixtureWithProjectMeta {
+            fixture,
+            mini_core,
+            proc_macro_names,
+            toolchain,
+            target_data_layout: _,
+        } = FixtureWithProjectMeta::parse(self.fixture);
+        assert!(proc_macro_names.is_empty());
         assert!(mini_core.is_none());
-        for entry in fixtures {
+        assert!(toolchain.is_none());
+        for entry in fixture {
             let path = tmp_dir.path().join(&entry.path['/'.len_utf8()..]);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path.as_path(), entry.text.as_bytes()).unwrap();
@@ -95,10 +123,6 @@ impl<'a> Project<'a> {
         if roots.is_empty() {
             roots.push(tmp_dir_path.clone());
         }
-        let discovered_projects = roots
-            .into_iter()
-            .map(|it| ProjectManifest::discover_single(&it).unwrap())
-            .collect::<Vec<_>>();
 
         let mut config = Config::new(
             tmp_dir_path,
@@ -110,6 +134,14 @@ impl<'a> Project<'a> {
                             relative_pattern_support: None,
                         },
                     ),
+                    workspace_edit: Some(lsp_types::WorkspaceEditClientCapabilities {
+                        resource_operations: Some(vec![
+                            lsp_types::ResourceOperationKind::Create,
+                            lsp_types::ResourceOperationKind::Delete,
+                            lsp_types::ResourceOperationKind::Rename,
+                        ]),
+                        ..Default::default()
+                    }),
                     ..Default::default()
                 }),
                 text_document: Some(lsp_types::TextDocumentClientCapabilities {
@@ -138,10 +170,11 @@ impl<'a> Project<'a> {
                 })),
                 ..Default::default()
             },
-            Vec::new(),
+            roots,
+            None,
         );
-        config.discovered_projects = Some(discovered_projects);
         config.update(self.config).expect("invalid config");
+        config.rediscover_workspaces();
 
         Server::new(tmp_dir, config)
     }
@@ -154,7 +187,7 @@ pub(crate) fn project(fixture: &str) -> Server {
 pub(crate) struct Server {
     req_id: Cell<i32>,
     messages: RefCell<Vec<Message>>,
-    _thread: jod_thread::JoinHandle<()>,
+    _thread: stdx::thread::JoinHandle,
     client: Connection,
     /// XXX: remove the tempdir last
     dir: TestDir,
@@ -164,8 +197,8 @@ impl Server {
     fn new(dir: TestDir, config: Config) -> Server {
         let (connection, client) = Connection::memory();
 
-        let _thread = jod_thread::Builder::new()
-            .name("test server".to_string())
+        let _thread = stdx::thread::Builder::new(stdx::thread::ThreadIntent::Worker)
+            .name("test server".to_owned())
             .spawn(move || main_loop(config, connection).unwrap())
             .expect("failed to spawn a thread");
 
@@ -182,8 +215,42 @@ impl Server {
         N: lsp_types::notification::Notification,
         N::Params: Serialize,
     {
-        let r = Notification::new(N::METHOD.to_string(), params);
+        let r = Notification::new(N::METHOD.to_owned(), params);
         self.send_notification(r)
+    }
+
+    pub(crate) fn expect_notification<N>(&self, expected: Value)
+    where
+        N: lsp_types::notification::Notification,
+        N::Params: Serialize,
+    {
+        while let Some(Message::Notification(actual)) =
+            recv_timeout(&self.client.receiver).unwrap_or_else(|_| panic!("timed out"))
+        {
+            if actual.method == N::METHOD {
+                let actual = actual
+                    .clone()
+                    .extract::<Value>(N::METHOD)
+                    .expect("was not able to extract notification");
+
+                tracing::debug!(?actual, "got notification");
+                if let Some((expected_part, actual_part)) = find_mismatch(&expected, &actual) {
+                    panic!(
+                            "JSON mismatch\nExpected:\n{}\nWas:\n{}\nExpected part:\n{}\nActual part:\n{}\n",
+                            to_string_pretty(&expected).unwrap(),
+                            to_string_pretty(&actual).unwrap(),
+                            to_string_pretty(expected_part).unwrap(),
+                            to_string_pretty(actual_part).unwrap(),
+                        );
+                } else {
+                    tracing::debug!("successfully matched notification");
+                    return;
+                }
+            } else {
+                continue;
+            }
+        }
+        panic!("never got expected notification");
     }
 
     #[track_caller]
@@ -212,7 +279,7 @@ impl Server {
         let id = self.req_id.get();
         self.req_id.set(id.wrapping_add(1));
 
-        let r = Request::new(id.into(), R::METHOD.to_string(), params);
+        let r = Request::new(id.into(), R::METHOD.to_owned(), params);
         self.send_request_(r)
     }
     fn send_request_(&self, r: Request) -> Value {
@@ -249,8 +316,11 @@ impl Server {
             Message::Notification(n) if n.method == "experimental/serverStatus" => {
                 let status = n
                     .clone()
-                    .extract::<lsp_ext::ServerStatusParams>("experimental/serverStatus")
+                    .extract::<lsp::ext::ServerStatusParams>("experimental/serverStatus")
                     .unwrap();
+                if status.health != lsp::ext::Health::Ok {
+                    panic!("server errored/warned while loading workspace: {:?}", status.message);
+                }
                 status.quiescent
             }
             _ => false,

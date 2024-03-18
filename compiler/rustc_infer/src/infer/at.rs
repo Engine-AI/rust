@@ -30,8 +30,6 @@ use super::*;
 use rustc_middle::ty::relate::{Relate, TypeRelation};
 use rustc_middle::ty::{Const, ImplSubject};
 
-use std::cell::Cell;
-
 /// Whether we should define opaque types or just treat them opaquely.
 ///
 /// Currently only used to prevent predicate matching from matching anything
@@ -42,6 +40,7 @@ pub enum DefineOpaqueTypes {
     No,
 }
 
+#[derive(Clone, Copy)]
 pub struct At<'a, 'tcx> {
     pub infcx: &'a InferCtxt<'tcx>,
     pub cause: &'a ObligationCause<'tcx>,
@@ -50,7 +49,6 @@ pub struct At<'a, 'tcx> {
 
 pub struct Trace<'a, 'tcx> {
     at: At<'a, 'tcx>,
-    a_is_expected: bool,
     trace: TypeTrace<'tcx>,
 }
 
@@ -66,25 +64,32 @@ impl<'tcx> InferCtxt<'tcx> {
 
     /// Forks the inference context, creating a new inference context with the same inference
     /// variables in the same state. This can be used to "branch off" many tests from the same
-    /// common state. Used in coherence.
+    /// common state.
     pub fn fork(&self) -> Self {
+        self.fork_with_intercrate(self.intercrate)
+    }
+
+    /// Forks the inference context, creating a new inference context with the same inference
+    /// variables in the same state, except possibly changing the intercrate mode. This can be
+    /// used to "branch off" many tests from the same common state. Used in negative coherence.
+    pub fn fork_with_intercrate(&self, intercrate: bool) -> Self {
         Self {
             tcx: self.tcx,
             defining_use_anchor: self.defining_use_anchor,
             considering_regions: self.considering_regions,
+            skip_leak_check: self.skip_leak_check,
             inner: self.inner.clone(),
-            skip_leak_check: self.skip_leak_check.clone(),
             lexical_region_resolutions: self.lexical_region_resolutions.clone(),
             selection_cache: self.selection_cache.clone(),
             evaluation_cache: self.evaluation_cache.clone(),
             reported_trait_errors: self.reported_trait_errors.clone(),
-            reported_closure_mismatch: self.reported_closure_mismatch.clone(),
+            reported_signature_mismatch: self.reported_signature_mismatch.clone(),
             tainted_by_errors: self.tainted_by_errors.clone(),
             err_count_on_creation: self.err_count_on_creation,
-            in_snapshot: self.in_snapshot.clone(),
             universe: self.universe.clone(),
-            intercrate: self.intercrate,
-            inside_canonicalization_ctxt: Cell::new(self.inside_canonicalization_ctxt()),
+            intercrate,
+            next_trait_solver: self.next_trait_solver,
+            obligation_inspector: self.obligation_inspector.clone(),
         }
     }
 }
@@ -99,23 +104,6 @@ pub trait ToTrace<'tcx>: Relate<'tcx> + Copy {
 }
 
 impl<'a, 'tcx> At<'a, 'tcx> {
-    /// Makes `a <: b`, where `a` may or may not be expected.
-    ///
-    /// See [`At::trace_exp`] and [`Trace::sub`] for a version of
-    /// this method that only requires `T: Relate<'tcx>`
-    pub fn sub_exp<T>(
-        self,
-        define_opaque_types: DefineOpaqueTypes,
-        a_is_expected: bool,
-        a: T,
-        b: T,
-    ) -> InferResult<'tcx, ()>
-    where
-        T: ToTrace<'tcx>,
-    {
-        self.trace_exp(a_is_expected, a, b).sub(define_opaque_types, a, b)
-    }
-
     /// Makes `actual <: expected`. For example, if type-checking a
     /// call like `foo(x)`, where `foo: fn(i32)`, you might have
     /// `sup(i32, x)`, since the "expected" type is the type that
@@ -132,7 +120,7 @@ impl<'a, 'tcx> At<'a, 'tcx> {
     where
         T: ToTrace<'tcx>,
     {
-        self.sub_exp(define_opaque_types, false, actual, expected)
+        self.trace(expected, actual).sup(define_opaque_types, expected, actual)
     }
 
     /// Makes `expected <: actual`.
@@ -148,24 +136,7 @@ impl<'a, 'tcx> At<'a, 'tcx> {
     where
         T: ToTrace<'tcx>,
     {
-        self.sub_exp(define_opaque_types, true, expected, actual)
-    }
-
-    /// Makes `expected <: actual`.
-    ///
-    /// See [`At::trace_exp`] and [`Trace::eq`] for a version of
-    /// this method that only requires `T: Relate<'tcx>`
-    pub fn eq_exp<T>(
-        self,
-        define_opaque_types: DefineOpaqueTypes,
-        a_is_expected: bool,
-        a: T,
-        b: T,
-    ) -> InferResult<'tcx, ()>
-    where
-        T: ToTrace<'tcx>,
-    {
-        self.trace_exp(a_is_expected, a, b).eq(define_opaque_types, a, b)
+        self.trace(expected, actual).sub(define_opaque_types, expected, actual)
     }
 
     /// Makes `expected <: actual`.
@@ -254,54 +225,68 @@ impl<'a, 'tcx> At<'a, 'tcx> {
     where
         T: ToTrace<'tcx>,
     {
-        self.trace_exp(true, expected, actual)
-    }
-
-    /// Like `trace`, but the expected value is determined by the
-    /// boolean argument (if true, then the first argument `a` is the
-    /// "expected" value).
-    pub fn trace_exp<T>(self, a_is_expected: bool, a: T, b: T) -> Trace<'a, 'tcx>
-    where
-        T: ToTrace<'tcx>,
-    {
-        let trace = ToTrace::to_trace(self.cause, a_is_expected, a, b);
-        Trace { at: self, trace, a_is_expected }
+        let trace = ToTrace::to_trace(self.cause, true, expected, actual);
+        Trace { at: self, trace }
     }
 }
 
 impl<'a, 'tcx> Trace<'a, 'tcx> {
-    /// Makes `a <: b` where `a` may or may not be expected (if
-    /// `a_is_expected` is true, then `a` is expected).
+    /// Makes `a <: b`.
     #[instrument(skip(self), level = "debug")]
     pub fn sub<T>(self, define_opaque_types: DefineOpaqueTypes, a: T, b: T) -> InferResult<'tcx, ()>
     where
         T: Relate<'tcx>,
     {
-        let Trace { at, trace, a_is_expected } = self;
-        at.infcx.commit_if_ok(|_| {
-            let mut fields = at.infcx.combine_fields(trace, at.param_env, define_opaque_types);
-            fields
-                .sub(a_is_expected)
-                .relate(a, b)
-                .map(move |_| InferOk { value: (), obligations: fields.obligations })
-        })
+        let Trace { at, trace } = self;
+        let mut fields = at.infcx.combine_fields(trace, at.param_env, define_opaque_types);
+        fields
+            .sub()
+            .relate(a, b)
+            .map(move |_| InferOk { value: (), obligations: fields.obligations })
     }
 
-    /// Makes `a == b`; the expectation is set by the call to
-    /// `trace()`.
+    /// Makes `a :> b`.
+    #[instrument(skip(self), level = "debug")]
+    pub fn sup<T>(self, define_opaque_types: DefineOpaqueTypes, a: T, b: T) -> InferResult<'tcx, ()>
+    where
+        T: Relate<'tcx>,
+    {
+        let Trace { at, trace } = self;
+        let mut fields = at.infcx.combine_fields(trace, at.param_env, define_opaque_types);
+        fields
+            .sup()
+            .relate(a, b)
+            .map(move |_| InferOk { value: (), obligations: fields.obligations })
+    }
+
+    /// Makes `a == b`.
     #[instrument(skip(self), level = "debug")]
     pub fn eq<T>(self, define_opaque_types: DefineOpaqueTypes, a: T, b: T) -> InferResult<'tcx, ()>
     where
         T: Relate<'tcx>,
     {
-        let Trace { at, trace, a_is_expected } = self;
-        at.infcx.commit_if_ok(|_| {
-            let mut fields = at.infcx.combine_fields(trace, at.param_env, define_opaque_types);
-            fields
-                .equate(a_is_expected)
-                .relate(a, b)
-                .map(move |_| InferOk { value: (), obligations: fields.obligations })
-        })
+        let Trace { at, trace } = self;
+        let mut fields = at.infcx.combine_fields(trace, at.param_env, define_opaque_types);
+        fields
+            .equate(StructurallyRelateAliases::No)
+            .relate(a, b)
+            .map(move |_| InferOk { value: (), obligations: fields.obligations })
+    }
+
+    /// Equates `a` and `b` while structurally relating aliases. This should only
+    /// be used inside of the next generation trait solver when relating rigid aliases.
+    #[instrument(skip(self), level = "debug")]
+    pub fn eq_structurally_relating_aliases<T>(self, a: T, b: T) -> InferResult<'tcx, ()>
+    where
+        T: Relate<'tcx>,
+    {
+        let Trace { at, trace } = self;
+        debug_assert!(at.infcx.next_trait_solver());
+        let mut fields = at.infcx.combine_fields(trace, at.param_env, DefineOpaqueTypes::No);
+        fields
+            .equate(StructurallyRelateAliases::Yes)
+            .relate(a, b)
+            .map(move |_| InferOk { value: (), obligations: fields.obligations })
     }
 
     #[instrument(skip(self), level = "debug")]
@@ -309,14 +294,12 @@ impl<'a, 'tcx> Trace<'a, 'tcx> {
     where
         T: Relate<'tcx>,
     {
-        let Trace { at, trace, a_is_expected } = self;
-        at.infcx.commit_if_ok(|_| {
-            let mut fields = at.infcx.combine_fields(trace, at.param_env, define_opaque_types);
-            fields
-                .lub(a_is_expected)
-                .relate(a, b)
-                .map(move |t| InferOk { value: t, obligations: fields.obligations })
-        })
+        let Trace { at, trace } = self;
+        let mut fields = at.infcx.combine_fields(trace, at.param_env, define_opaque_types);
+        fields
+            .lub()
+            .relate(a, b)
+            .map(move |t| InferOk { value: t, obligations: fields.obligations })
     }
 
     #[instrument(skip(self), level = "debug")]
@@ -324,14 +307,12 @@ impl<'a, 'tcx> Trace<'a, 'tcx> {
     where
         T: Relate<'tcx>,
     {
-        let Trace { at, trace, a_is_expected } = self;
-        at.infcx.commit_if_ok(|_| {
-            let mut fields = at.infcx.combine_fields(trace, at.param_env, define_opaque_types);
-            fields
-                .glb(a_is_expected)
-                .relate(a, b)
-                .map(move |t| InferOk { value: t, obligations: fields.obligations })
-        })
+        let Trace { at, trace } = self;
+        let mut fields = at.infcx.combine_fields(trace, at.param_env, define_opaque_types);
+        fields
+            .glb()
+            .relate(a, b)
+            .map(move |t| InferOk { value: t, obligations: fields.obligations })
     }
 }
 
@@ -443,7 +424,11 @@ impl<'tcx> ToTrace<'tcx> for ty::TraitRef<'tcx> {
     ) -> TypeTrace<'tcx> {
         TypeTrace {
             cause: cause.clone(),
-            values: TraitRefs(ExpectedFound::new(a_is_expected, a, b)),
+            values: PolyTraitRefs(ExpectedFound::new(
+                a_is_expected,
+                ty::Binder::dummy(a),
+                ty::Binder::dummy(b),
+            )),
         }
     }
 }
@@ -480,6 +465,55 @@ impl<'tcx> ToTrace<'tcx> for ty::FnSig<'tcx> {
         a: Self,
         b: Self,
     ) -> TypeTrace<'tcx> {
-        TypeTrace { cause: cause.clone(), values: Sigs(ExpectedFound::new(a_is_expected, a, b)) }
+        TypeTrace {
+            cause: cause.clone(),
+            values: PolySigs(ExpectedFound::new(
+                a_is_expected,
+                ty::Binder::dummy(a),
+                ty::Binder::dummy(b),
+            )),
+        }
+    }
+}
+
+impl<'tcx> ToTrace<'tcx> for ty::PolyFnSig<'tcx> {
+    fn to_trace(
+        cause: &ObligationCause<'tcx>,
+        a_is_expected: bool,
+        a: Self,
+        b: Self,
+    ) -> TypeTrace<'tcx> {
+        TypeTrace {
+            cause: cause.clone(),
+            values: PolySigs(ExpectedFound::new(a_is_expected, a, b)),
+        }
+    }
+}
+
+impl<'tcx> ToTrace<'tcx> for ty::PolyExistentialTraitRef<'tcx> {
+    fn to_trace(
+        cause: &ObligationCause<'tcx>,
+        a_is_expected: bool,
+        a: Self,
+        b: Self,
+    ) -> TypeTrace<'tcx> {
+        TypeTrace {
+            cause: cause.clone(),
+            values: ExistentialTraitRef(ExpectedFound::new(a_is_expected, a, b)),
+        }
+    }
+}
+
+impl<'tcx> ToTrace<'tcx> for ty::PolyExistentialProjection<'tcx> {
+    fn to_trace(
+        cause: &ObligationCause<'tcx>,
+        a_is_expected: bool,
+        a: Self,
+        b: Self,
+    ) -> TypeTrace<'tcx> {
+        TypeTrace {
+            cause: cause.clone(),
+            values: ExistentialProjection(ExpectedFound::new(a_is_expected, a, b)),
+        }
     }
 }

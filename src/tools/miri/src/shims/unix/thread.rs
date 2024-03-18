@@ -13,7 +13,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
     ) -> InterpResult<'tcx, i32> {
         let this = self.eval_context_mut();
 
-        let thread_info_place = this.deref_operand(thread)?;
+        let thread_info_place = this.deref_pointer_as(thread, this.libc_ty_layout("pthread_t"))?;
 
         let start_routine = this.read_pointer(start_routine)?;
 
@@ -104,7 +104,8 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
         let name_out = name_out.to_pointer(this)?;
         let len = len.to_target_usize(this)?;
 
-        let name = this.get_thread_name(thread).to_owned();
+        // FIXME: we should use the program name if the thread name is not set
+        let name = this.get_thread_name(thread).unwrap_or(b"<unnamed>").to_owned();
         let (success, _written) = this.write_c_str(&name, name_out, len)?;
 
         Ok(if success { Scalar::from_u32(0) } else { this.eval_libc("ERANGE") })

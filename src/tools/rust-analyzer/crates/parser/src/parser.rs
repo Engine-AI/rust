@@ -205,7 +205,7 @@ impl<'t> Parser<'t> {
             marker.bomb.defuse();
             marker = new_marker;
         };
-        self.pos += 1 as usize;
+        self.pos += 1;
         self.push_event(Event::FloatSplitHack { ends_in_dot });
         (ends_in_dot, marker)
     }
@@ -250,12 +250,9 @@ impl<'t> Parser<'t> {
 
     /// Create an error node and consume the next token.
     pub(crate) fn err_recover(&mut self, message: &str, recovery: TokenSet) {
-        match self.current() {
-            T!['{'] | T!['}'] => {
-                self.error(message);
-                return;
-            }
-            _ => (),
+        if matches!(self.current(), T!['{'] | T!['}']) {
+            self.error(message);
+            return;
         }
 
         if self.at_ts(recovery) {

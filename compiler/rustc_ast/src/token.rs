@@ -11,8 +11,9 @@ use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
 use rustc_data_structures::sync::Lrc;
 use rustc_macros::HashStable_Generic;
 use rustc_span::symbol::{kw, sym};
+#[allow(hidden_glob_reexports)]
 use rustc_span::symbol::{Ident, Symbol};
-use rustc_span::{self, edition::Edition, Span, DUMMY_SP};
+use rustc_span::{edition::Edition, ErrorGuaranteed, Span, DUMMY_SP};
 use std::borrow::Cow;
 use std::fmt;
 
@@ -40,8 +41,6 @@ pub enum BinOpToken {
 /// Describes how a sequence of token trees is delimited.
 /// Cannot use `proc_macro::Delimiter` directly because this
 /// structure should implement some additional traits.
-/// The `None` variant is also renamed to `Invisible` to be
-/// less confusing and better convey the semantics.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[derive(Encodable, Decodable, Hash, HashStable_Generic)]
 pub enum Delimiter {
@@ -74,7 +73,9 @@ pub enum LitKind {
     StrRaw(u8), // raw string delimited by `n` hash symbols
     ByteStr,
     ByteStrRaw(u8), // raw byte string delimited by `n` hash symbols
-    Err,
+    CStr,
+    CStrRaw(u8),
+    Err(ErrorGuaranteed),
 }
 
 /// A literal token.
@@ -106,13 +107,11 @@ impl Lit {
     /// Keep this in sync with `Token::can_begin_literal_or_bool` excluding unary negation.
     pub fn from_token(token: &Token) -> Option<Lit> {
         match token.uninterpolate().kind {
-            Ident(name, false) if name.is_bool_lit() => {
-                Some(Lit::new(Bool, name, None))
-            }
+            Ident(name, IdentIsRaw::No) if name.is_bool_lit() => Some(Lit::new(Bool, name, None)),
             Literal(token_lit) => Some(token_lit),
             Interpolated(ref nt)
-                if let NtExpr(expr) | NtLiteral(expr) = &**nt
-                && let ast::ExprKind::Lit(token_lit) = expr.kind =>
+                if let NtExpr(expr) | NtLiteral(expr) = &nt.0
+                    && let ast::ExprKind::Lit(token_lit) = expr.kind =>
             {
                 Some(token_lit)
             }
@@ -141,7 +140,11 @@ impl fmt::Display for Lit {
                 delim = "#".repeat(n as usize),
                 string = symbol
             )?,
-            Integer | Float | Bool | Err => write!(f, "{symbol}")?,
+            CStr => write!(f, "c\"{symbol}\"")?,
+            CStrRaw(n) => {
+                write!(f, "cr{delim}\"{symbol}\"{delim}", delim = "#".repeat(n as usize))?
+            }
+            Integer | Float | Bool | Err(_) => write!(f, "{symbol}")?,
         }
 
         if let Some(suffix) = suffix {
@@ -156,7 +159,7 @@ impl LitKind {
     /// An English article for the literal token kind.
     pub fn article(self) -> &'static str {
         match self {
-            Integer | Err => "an",
+            Integer | Err(_) => "an",
             _ => "a",
         }
     }
@@ -170,16 +173,17 @@ impl LitKind {
             Float => "float",
             Str | StrRaw(..) => "string",
             ByteStr | ByteStrRaw(..) => "byte string",
-            Err => "error",
+            CStr | CStrRaw(..) => "C string",
+            Err(_) => "error",
         }
     }
 
     pub(crate) fn may_have_suffix(self) -> bool {
-        matches!(self, Integer | Float | Err)
+        matches!(self, Integer | Float | Err(_))
     }
 }
 
-pub fn ident_can_begin_expr(name: Symbol, span: Span, is_raw: bool) -> bool {
+pub fn ident_can_begin_expr(name: Symbol, span: Span, is_raw: IdentIsRaw) -> bool {
     let ident_token = Token::new(Ident(name, is_raw), span);
 
     !ident_token.is_reserved_ident()
@@ -193,6 +197,7 @@ pub fn ident_can_begin_expr(name: Symbol, span: Span, is_raw: bool) -> bool {
             kw::Continue,
             kw::False,
             kw::For,
+            kw::Gen,
             kw::If,
             kw::Let,
             kw::Loop,
@@ -209,7 +214,7 @@ pub fn ident_can_begin_expr(name: Symbol, span: Span, is_raw: bool) -> bool {
         .contains(&name)
 }
 
-fn ident_can_begin_type(name: Symbol, span: Span, is_raw: bool) -> bool {
+fn ident_can_begin_type(name: Symbol, span: Span, is_raw: IdentIsRaw) -> bool {
     let ident_token = Token::new(Ident(name, is_raw), span);
 
     !ident_token.is_reserved_ident()
@@ -218,38 +223,84 @@ fn ident_can_begin_type(name: Symbol, span: Span, is_raw: bool) -> bool {
             .contains(&name)
 }
 
-#[derive(Clone, PartialEq, Encodable, Decodable, Debug, HashStable_Generic)]
+#[derive(PartialEq, Encodable, Decodable, Debug, Copy, Clone, HashStable_Generic)]
+pub enum IdentIsRaw {
+    No,
+    Yes,
+}
+
+impl From<bool> for IdentIsRaw {
+    fn from(b: bool) -> Self {
+        if b { Self::Yes } else { Self::No }
+    }
+}
+
+impl From<IdentIsRaw> for bool {
+    fn from(is_raw: IdentIsRaw) -> bool {
+        matches!(is_raw, IdentIsRaw::Yes)
+    }
+}
+
+// SAFETY: due to the `Clone` impl below, all fields of all variants other than
+// `Interpolated` must impl `Copy`.
+#[derive(PartialEq, Encodable, Decodable, Debug, HashStable_Generic)]
 pub enum TokenKind {
     /* Expression-operator symbols. */
+    /// `=`
     Eq,
+    /// `<`
     Lt,
+    /// `<=`
     Le,
+    /// `==`
     EqEq,
+    /// `!=`
     Ne,
+    /// `>=`
     Ge,
+    /// `>`
     Gt,
+    /// `&&`
     AndAnd,
+    /// `||`
     OrOr,
+    /// `!`
     Not,
+    /// `~`
     Tilde,
     BinOp(BinOpToken),
     BinOpEq(BinOpToken),
 
     /* Structural symbols */
+    /// `@`
     At,
+    /// `.`
     Dot,
+    /// `..`
     DotDot,
+    /// `...`
     DotDotDot,
+    /// `..=`
     DotDotEq,
+    /// `,`
     Comma,
+    /// `;`
     Semi,
+    /// `:`
     Colon,
+    /// `::`
     ModSep,
+    /// `->`
     RArrow,
+    /// `<-`
     LArrow,
+    /// `=>`
     FatArrow,
+    /// `#`
     Pound,
+    /// `$`
     Dollar,
+    /// `?`
     Question,
     /// Used by proc macros for representing lifetimes, not generated by lexer right now.
     SingleQuote,
@@ -265,7 +316,7 @@ pub enum TokenKind {
     /// Do not forget about `NtIdent` when you want to match on identifiers.
     /// It's recommended to use `Token::(ident,uninterpolate,uninterpolated_span)` to
     /// treat regular and interpolated identifiers in the same way.
-    Ident(Symbol, /* is_raw */ bool),
+    Ident(Symbol, IdentIsRaw),
     /// Lifetime identifier token.
     /// Do not forget about `NtLifetime` when you want to match on lifetime identifiers.
     /// It's recommended to use `Token::(lifetime,uninterpolate,uninterpolated_span)` to
@@ -281,14 +332,28 @@ pub enum TokenKind {
     /// - It prevents `Token` from implementing `Copy`.
     /// It adds complexity and likely slows things down. Please don't add new
     /// occurrences of this token kind!
-    Interpolated(Lrc<Nonterminal>),
+    Interpolated(Lrc<(Nonterminal, Span)>),
 
     /// A doc comment token.
     /// `Symbol` is the doc comment's data excluding its "quotes" (`///`, `/**`, etc)
     /// similarly to symbols in string literal tokens.
     DocComment(CommentKind, ast::AttrStyle, Symbol),
 
+    /// End Of File
     Eof,
+}
+
+impl Clone for TokenKind {
+    fn clone(&self) -> Self {
+        // `TokenKind` would impl `Copy` if it weren't for `Interpolated`. So
+        // for all other variants, this implementation of `clone` is just like
+        // a copy. This is faster than the `derive(Clone)` version which has a
+        // separate path for every variant.
+        match self {
+            Interpolated(nt) => Interpolated(nt.clone()),
+            _ => unsafe { std::ptr::read(self) },
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Encodable, Decodable, Debug, HashStable_Generic)]
@@ -341,7 +406,8 @@ impl TokenKind {
         match *self {
             Comma => Some(vec![Dot, Lt, Semi]),
             Semi => Some(vec![Colon, Comma]),
-            FatArrow => Some(vec![Eq, RArrow]),
+            Colon => Some(vec![Semi]),
+            FatArrow => Some(vec![Eq, RArrow, Ge, Gt]),
             _ => None,
         }
     }
@@ -363,7 +429,7 @@ impl Token {
 
     /// Recovers a `Token` from an `Ident`. This creates a raw identifier if necessary.
     pub fn from_ast_ident(ident: Ident) -> Self {
-        Token::new(Ident(ident.name, ident.is_raw_guess()), ident.span)
+        Token::new(Ident(ident.name, ident.is_raw_guess().into()), ident.span)
     }
 
     /// For interpolated tokens, returns a span of the fragment to which the interpolated
@@ -374,7 +440,7 @@ impl Token {
     /// if they keep spans or perform edition checks.
     pub fn uninterpolated_span(&self) -> Span {
         match &self.kind {
-            Interpolated(nt) => nt.span(),
+            Interpolated(nt) => nt.0.use_span(),
             _ => self.span,
         }
     }
@@ -383,7 +449,7 @@ impl Token {
         [DotDot, DotDotDot, DotDotEq].contains(&self.kind)
     }
 
-    pub fn is_op(&self) -> bool {
+    pub fn is_punct(&self) -> bool {
         match self.kind {
             Eq | Lt | Le | EqEq | Ne | Ge | Gt | AndAnd | OrOr | Not | Tilde | BinOp(_)
             | BinOpEq(_) | At | Dot | DotDot | DotDotDot | DotDotEq | Comma | Semi | Colon
@@ -417,7 +483,7 @@ impl Token {
             ModSep                            | // global path
             Lifetime(..)                      | // labeled loop
             Pound                             => true, // expression attributes
-            Interpolated(ref nt) => matches!(**nt, NtLiteral(..) |
+            Interpolated(ref nt) => matches!(&nt.0, NtLiteral(..) |
                 NtExpr(..)    |
                 NtBlock(..)   |
                 NtPath(..)),
@@ -425,7 +491,7 @@ impl Token {
         }
     }
 
-    /// Returns `true` if the token can appear at the start of an pattern.
+    /// Returns `true` if the token can appear at the start of a pattern.
     ///
     /// Shamelessly borrowed from `can_begin_expr`, only used for diagnostics right now.
     pub fn can_begin_pattern(&self) -> bool {
@@ -441,7 +507,7 @@ impl Token {
             | DotDot | DotDotDot | DotDotEq      // ranges
             | Lt | BinOp(Shl)                    // associated path
             | ModSep                    => true, // global path
-            Interpolated(ref nt) => matches!(**nt, NtLiteral(..) |
+            Interpolated(ref nt) => matches!(&nt.0, NtLiteral(..) |
                 NtPat(..)     |
                 NtBlock(..)   |
                 NtPath(..)),
@@ -464,7 +530,9 @@ impl Token {
             Lifetime(..)                | // lifetime bound in trait object
             Lt | BinOp(Shl)             | // associated path
             ModSep                      => true, // global path
-            Interpolated(ref nt) => matches!(**nt, NtTy(..) | NtPath(..)),
+            Interpolated(ref nt) => matches!(&nt.0, NtTy(..) | NtPath(..)),
+            // For anonymous structs or unions, which only appear in specific positions
+            // (type of struct fields or union fields), we don't consider them as regular types
             _ => false,
         }
     }
@@ -473,18 +541,9 @@ impl Token {
     pub fn can_begin_const_arg(&self) -> bool {
         match self.kind {
             OpenDelim(Delimiter::Brace) => true,
-            Interpolated(ref nt) => matches!(**nt, NtExpr(..) | NtBlock(..) | NtLiteral(..)),
+            Interpolated(ref nt) => matches!(&nt.0, NtExpr(..) | NtBlock(..) | NtLiteral(..)),
             _ => self.can_begin_literal_maybe_minus(),
         }
-    }
-
-    /// Returns `true` if the token can appear at the start of a generic bound.
-    pub fn can_begin_bound(&self) -> bool {
-        self.is_path_start()
-            || self.is_lifetime()
-            || self.is_keyword(kw::For)
-            || self == &Question
-            || self == &OpenDelim(Delimiter::Parenthesis)
     }
 
     /// Returns `true` if the token can appear at the start of an item.
@@ -526,8 +585,8 @@ impl Token {
     pub fn can_begin_literal_maybe_minus(&self) -> bool {
         match self.uninterpolate().kind {
             Literal(..) | BinOp(Minus) => true,
-            Ident(name, false) if name.is_bool_lit() => true,
-            Interpolated(ref nt) => match &**nt {
+            Ident(name, IdentIsRaw::No) if name.is_bool_lit() => true,
+            Interpolated(ref nt) => match &nt.0 {
                 NtLiteral(_) => true,
                 NtExpr(e) => match &e.kind {
                     ast::ExprKind::Lit(_) => true,
@@ -548,9 +607,9 @@ impl Token {
     /// otherwise returns the original token.
     pub fn uninterpolate(&self) -> Cow<'_, Token> {
         match &self.kind {
-            Interpolated(nt) => match **nt {
+            Interpolated(nt) => match &nt.0 {
                 NtIdent(ident, is_raw) => {
-                    Cow::Owned(Token::new(Ident(ident.name, is_raw), ident.span))
+                    Cow::Owned(Token::new(Ident(ident.name, *is_raw), ident.span))
                 }
                 NtLifetime(ident) => Cow::Owned(Token::new(Lifetime(ident.name), ident.span)),
                 _ => Cow::Borrowed(self),
@@ -561,12 +620,12 @@ impl Token {
 
     /// Returns an identifier if this token is an identifier.
     #[inline]
-    pub fn ident(&self) -> Option<(Ident, /* is_raw */ bool)> {
+    pub fn ident(&self) -> Option<(Ident, IdentIsRaw)> {
         // We avoid using `Token::uninterpolate` here because it's slow.
         match &self.kind {
             &Ident(name, is_raw) => Some((Ident::new(name, self.span), is_raw)),
-            Interpolated(nt) => match **nt {
-                NtIdent(ident, is_raw) => Some((ident, is_raw)),
+            Interpolated(nt) => match &nt.0 {
+                NtIdent(ident, is_raw) => Some((*ident, *is_raw)),
                 _ => None,
             },
             _ => None,
@@ -579,8 +638,8 @@ impl Token {
         // We avoid using `Token::uninterpolate` here because it's slow.
         match &self.kind {
             &Lifetime(name) => Some(Ident::new(name, self.span)),
-            Interpolated(nt) => match **nt {
-                NtLifetime(ident) => Some(ident),
+            Interpolated(nt) => match &nt.0 {
+                NtLifetime(ident) => Some(*ident),
                 _ => None,
             },
             _ => None,
@@ -600,12 +659,14 @@ impl Token {
     /// Returns `true` if the token is an identifier whose name is the given
     /// string slice.
     pub fn is_ident_named(&self, name: Symbol) -> bool {
-        self.ident().map_or(false, |(ident, _)| ident.name == name)
+        self.ident().is_some_and(|(ident, _)| ident.name == name)
     }
 
     /// Returns `true` if the token is an interpolated path.
     fn is_path(&self) -> bool {
-        if let Interpolated(nt) = &self.kind && let NtPath(..) = **nt {
+        if let Interpolated(nt) = &self.kind
+            && let NtPath(..) = &nt.0
+        {
             return true;
         }
 
@@ -617,7 +678,7 @@ impl Token {
     /// (which happens while parsing the result of macro expansion)?
     pub fn is_whole_expr(&self) -> bool {
         if let Interpolated(nt) = &self.kind
-            && let NtExpr(_) | NtLiteral(_) | NtPath(_) | NtBlock(_) = **nt
+            && let NtExpr(_) | NtLiteral(_) | NtPath(_) | NtBlock(_) = &nt.0
         {
             return true;
         }
@@ -627,7 +688,9 @@ impl Token {
 
     /// Is the token an interpolated block (`$b:block`)?
     pub fn is_whole_block(&self) -> bool {
-        if let Interpolated(nt) = &self.kind && let NtBlock(..) = **nt {
+        if let Interpolated(nt) = &self.kind
+            && let NtBlock(..) = &nt.0
+        {
             return true;
         }
 
@@ -702,10 +765,15 @@ impl Token {
         )
     }
 
+    /// Returns `true` if the token is the integer literal.
+    pub fn is_integer_lit(&self) -> bool {
+        matches!(self.kind, Literal(Lit { kind: LitKind::Integer, .. }))
+    }
+
     /// Returns `true` if the token is a non-raw identifier for which `pred` holds.
     pub fn is_non_raw_ident_where(&self, pred: impl FnOnce(Ident) -> bool) -> bool {
         match self.ident() {
-            Some((id, false)) => pred(id),
+            Some((id, IdentIsRaw::No)) => pred(id),
             _ => false,
         }
     }
@@ -756,7 +824,7 @@ impl Token {
                 _ => return None,
             },
             SingleQuote => match joint.kind {
-                Ident(name, false) => Lifetime(Symbol::intern(&format!("'{name}"))),
+                Ident(name, IdentIsRaw::No) => Lifetime(Symbol::intern(&format!("'{name}"))),
                 _ => return None,
             },
 
@@ -786,7 +854,7 @@ pub enum Nonterminal {
     NtPat(P<ast::Pat>),
     NtExpr(P<ast::Expr>),
     NtTy(P<ast::Ty>),
-    NtIdent(Ident, /* is_raw */ bool),
+    NtIdent(Ident, IdentIsRaw),
     NtLifetime(Ident),
     NtLiteral(P<ast::Expr>),
     /// Stuff inside brackets for attributes
@@ -874,7 +942,7 @@ impl fmt::Display for NonterminalKind {
 }
 
 impl Nonterminal {
-    pub fn span(&self) -> Span {
+    pub fn use_span(&self) -> Span {
         match self {
             NtItem(item) => item.span,
             NtBlock(block) => block.span,
@@ -886,6 +954,23 @@ impl Nonterminal {
             NtMeta(attr_item) => attr_item.span(),
             NtPath(path) => path.span,
             NtVis(vis) => vis.span,
+        }
+    }
+
+    pub fn descr(&self) -> &'static str {
+        match self {
+            NtItem(..) => "item",
+            NtBlock(..) => "block",
+            NtStmt(..) => "statement",
+            NtPat(..) => "pattern",
+            NtExpr(..) => "expression",
+            NtLiteral(..) => "literal",
+            NtTy(..) => "type",
+            NtIdent(..) => "identifier",
+            NtLifetime(..) => "lifetime",
+            NtMeta(..) => "attribute",
+            NtPath(..) => "path",
+            NtVis(..) => "visibility",
         }
     }
 }

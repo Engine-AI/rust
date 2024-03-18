@@ -1,5 +1,4 @@
-//run-rustfix
-// aux-build:proc_macros.rs
+//@aux-build:proc_macros.rs
 
 #![warn(clippy::must_use_unit)]
 #![allow(clippy::unused_unit)]

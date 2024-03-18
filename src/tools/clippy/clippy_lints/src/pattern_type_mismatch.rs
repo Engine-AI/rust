@@ -3,9 +3,9 @@ use rustc_hir::{intravisit, Body, Expr, ExprKind, FnDecl, Let, LocalSource, Muta
 use rustc_lint::{LateContext, LateLintPass, LintContext};
 use rustc_middle::lint::in_external_macro;
 use rustc_middle::ty;
-use rustc_session::{declare_lint_pass, declare_tool_lint};
+use rustc_session::declare_lint_pass;
 use rustc_span::def_id::LocalDefId;
-use rustc_span::source_map::Span;
+use rustc_span::Span;
 
 declare_clippy_lint! {
     /// ### What it does
@@ -82,7 +82,7 @@ declare_lint_pass!(PatternTypeMismatch => [PATTERN_TYPE_MISMATCH]);
 
 impl<'tcx> LateLintPass<'tcx> for PatternTypeMismatch {
     fn check_stmt(&mut self, cx: &LateContext<'tcx>, stmt: &'tcx Stmt<'_>) {
-        if let StmtKind::Local(local) = stmt.kind {
+        if let StmtKind::Let(local) = stmt.kind {
             if in_external_macro(cx.sess(), local.pat.span) {
                 return;
             }

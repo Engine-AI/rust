@@ -14,6 +14,7 @@ use crate::mir::operand::OperandRef;
 use crate::mir::place::PlaceRef;
 use crate::MemFlags;
 
+use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrs;
 use rustc_middle::ty::layout::{HasParamEnv, TyAndLayout};
 use rustc_middle::ty::Ty;
 use rustc_span::Span;
@@ -72,6 +73,7 @@ pub trait BuilderMethods<'a, 'tcx>:
     fn invoke(
         &mut self,
         llty: Self::Type,
+        fn_attrs: Option<&CodegenFnAttrs>,
         fn_abi: Option<&FnAbi<'tcx, Ty<'tcx>>>,
         llfn: Self::Value,
         args: &[Self::Value],
@@ -84,22 +86,27 @@ pub trait BuilderMethods<'a, 'tcx>:
     fn add(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn fadd(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn fadd_fast(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
+    fn fadd_algebraic(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn sub(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn fsub(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn fsub_fast(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
+    fn fsub_algebraic(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn mul(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn fmul(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn fmul_fast(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
+    fn fmul_algebraic(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn udiv(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn exactudiv(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn sdiv(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn exactsdiv(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn fdiv(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn fdiv_fast(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
+    fn fdiv_algebraic(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn urem(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn srem(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn frem(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn frem_fast(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
+    fn frem_algebraic(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn shl(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn lshr(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
     fn ashr(&mut self, lhs: Self::Value, rhs: Self::Value) -> Self::Value;
@@ -183,7 +190,12 @@ pub trait BuilderMethods<'a, 'tcx>:
         ptr: Self::Value,
         indices: &[Self::Value],
     ) -> Self::Value;
-    fn struct_gep(&mut self, ty: Self::Type, ptr: Self::Value, idx: u64) -> Self::Value;
+    fn ptradd(&mut self, ptr: Self::Value, offset: Self::Value) -> Self::Value {
+        self.gep(self.cx().type_i8(), ptr, &[offset])
+    }
+    fn inbounds_ptradd(&mut self, ptr: Self::Value, offset: Self::Value) -> Self::Value {
+        self.inbounds_gep(self.cx().type_i8(), ptr, &[offset])
+    }
 
     fn trunc(&mut self, val: Self::Value, dest_ty: Self::Type) -> Self::Value;
     fn sext(&mut self, val: Self::Value, dest_ty: Self::Type) -> Self::Value;
@@ -272,6 +284,7 @@ pub trait BuilderMethods<'a, 'tcx>:
 
     // These are used by everyone except msvc
     fn cleanup_landing_pad(&mut self, pers_fn: Self::Value) -> (Self::Value, Self::Value);
+    fn filter_landing_pad(&mut self, pers_fn: Self::Value) -> (Self::Value, Self::Value);
     fn resume(&mut self, exn0: Self::Value, exn1: Self::Value);
 
     // These are used only by msvc
@@ -293,7 +306,7 @@ pub trait BuilderMethods<'a, 'tcx>:
         order: AtomicOrdering,
         failure_order: AtomicOrdering,
         weak: bool,
-    ) -> Self::Value;
+    ) -> (Self::Value, Self::Value);
     fn atomic_rmw(
         &mut self,
         op: AtomicRmwBinOp,
@@ -321,6 +334,7 @@ pub trait BuilderMethods<'a, 'tcx>:
     fn call(
         &mut self,
         llty: Self::Type,
+        fn_attrs: Option<&CodegenFnAttrs>,
         fn_abi: Option<&FnAbi<'tcx, Ty<'tcx>>>,
         llfn: Self::Value,
         args: &[Self::Value],
@@ -328,5 +342,5 @@ pub trait BuilderMethods<'a, 'tcx>:
     ) -> Self::Value;
     fn zext(&mut self, val: Self::Value, dest_ty: Self::Type) -> Self::Value;
 
-    fn do_not_inline(&mut self, llret: Self::Value);
+    fn apply_attrs_to_cleanup_callsite(&mut self, llret: Self::Value);
 }

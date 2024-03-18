@@ -31,8 +31,8 @@ Supported values can also be discovered by running `rustc --print code-models`.
 
 ## codegen-units
 
-This flag controls how many code generation units the crate is split into. It
-takes an integer greater than 0.
+This flag controls the maximum number of code generation units the crate is
+split into. It takes an integer greater than 0.
 
 When a crate is split into multiple codegen units, LLVM is able to process
 them in parallel. Increasing parallelism may speed up compile times, but may
@@ -84,11 +84,19 @@ Note: The [`-g` flag][option-g-debug] is an alias for `-C debuginfo=2`.
 This flag controls whether or not the linker includes its default libraries.
 It takes one of the following values:
 
-* `y`, `yes`, `on`, `true` or no value: include default libraries (the default).
-* `n`, `no`, `off` or `false`: exclude default libraries.
+* `y`, `yes`, `on`, `true`: include default libraries.
+* `n`, `no`, `off` or `false` or no value: exclude default libraries (the default).
 
 For example, for gcc flavor linkers, this issues the `-nodefaultlibs` flag to
 the linker.
+
+## dlltool
+
+On `windows-gnu` targets, this flag controls which dlltool `rustc` invokes to
+generate import libraries when using the [`raw-dylib` link kind](../../reference/items/external-blocks.md#the-link-attribute).
+It takes a path to [the dlltool executable](https://sourceware.org/binutils/docs/binutils/dlltool.html).
+If this flag is not specified, a dlltool executable will be inferred based on
+the host environment and target.
 
 ## embed-bitcode
 
@@ -213,7 +221,7 @@ metrics.
 ## link-self-contained
 
 On `windows-gnu`, `linux-musl`, and `wasi` targets, this flag controls whether the
-linker will use libraries and objects shipped with Rust instead or those in the system.
+linker will use libraries and objects shipped with Rust instead of those in the system.
 It takes one of the following values:
 
 * no value: rustc will use heuristic to disable self-contained mode if system has necessary tools.
@@ -241,11 +249,6 @@ flavor. Valid options are:
 * `gcc`: use the `cc` executable, which is typically gcc or clang on many systems.
 * `ld`: use the `ld` executable.
 * `msvc`: use the `link.exe` executable from Microsoft Visual Studio MSVC.
-* `ptx-linker`: use
-  [`rust-ptx-linker`](https://github.com/denzp/rust-ptx-linker) for Nvidia
-  NVPTX GPGPU support.
-* `bpf-linker`: use
-  [`bpf-linker`](https://github.com/alessandrod/bpf-linker) for eBPF support.
 * `wasm-ld`: use the [`wasm-ld`](https://lld.llvm.org/WebAssembly.html)
   executable, a port of LLVM `lld` for WebAssembly.
 * `ld64.lld`: use the LLVM `lld` executable with the [`-flavor darwin`
@@ -255,7 +258,7 @@ flavor. Valid options are:
 * `lld-link`: use the LLVM `lld` executable with the [`-flavor link`
   flag][lld-flavor] for Microsoft's `link.exe`.
 
-[lld-flavor]: https://lld.llvm.org/Driver.html
+[lld-flavor]: https://releases.llvm.org/12.0.0/tools/lld/docs/Driver.html
 
 ## linker-plugin-lto
 
@@ -561,20 +564,23 @@ for the purpose of generating object code and linking.
 
 Supported values for this option are:
 
-* `v0` — The "v0" mangling scheme. The specific format is not specified at
-  this time.
+* `v0` — The "v0" mangling scheme.
 
 The default, if not specified, will use a compiler-chosen default which may
 change in the future.
 
+See the [Symbol Mangling] chapter for details on symbol mangling and the mangling format.
+
 [name mangling]: https://en.wikipedia.org/wiki/Name_mangling
+[Symbol Mangling]: ../symbol-mangling/index.md
 
 ## target-cpu
 
 This instructs `rustc` to generate code specifically for a particular processor.
 
 You can run `rustc --print target-cpus` to see the valid options to pass
-here. Each target has a default base CPU. Special values include:
+and the default target CPU for the current build target.
+Each target has a default base CPU. Special values include:
 
 * `native` can be passed to use the processor of the host machine.
 * `generic` refers to an LLVM target with minimal features but modern tuning.

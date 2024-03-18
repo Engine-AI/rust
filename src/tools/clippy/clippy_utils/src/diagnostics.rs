@@ -8,13 +8,13 @@
 //! Thank you!
 //! ~The `INTERNAL_METADATA_COLLECTOR` lint
 
-use rustc_errors::{Applicability, Diagnostic, MultiSpan};
+use rustc_errors::{Applicability, Diag, MultiSpan};
 use rustc_hir::HirId;
 use rustc_lint::{LateContext, Lint, LintContext};
-use rustc_span::source_map::Span;
+use rustc_span::Span;
 use std::env;
 
-fn docs_link(diag: &mut Diagnostic, lint: &'static Lint) {
+fn docs_link(diag: &mut Diag<'_, ()>, lint: &'static Lint) {
     if env::var("CLIPPY_DISABLE_DOCS_LINKS").is_err() {
         if let Some(lint) = lint.name_lower().strip_prefix("clippy::") {
             diag.help(format!(
@@ -40,15 +40,15 @@ fn docs_link(diag: &mut Diagnostic, lint: &'static Lint) {
 ///
 /// ```ignore
 /// error: usage of mem::forget on Drop type
-///   --> $DIR/mem_forget.rs:17:5
+///   --> tests/ui/mem_forget.rs:17:5
 ///    |
 /// 17 |     std::mem::forget(seven);
 ///    |     ^^^^^^^^^^^^^^^^^^^^^^^
 /// ```
 pub fn span_lint<T: LintContext>(cx: &T, lint: &'static Lint, sp: impl Into<MultiSpan>, msg: &str) {
-    cx.struct_span_lint(lint, sp, msg, |diag| {
+    #[expect(clippy::disallowed_methods)]
+    cx.span_lint(lint, sp, msg.to_string(), |diag| {
         docs_link(diag, lint);
-        diag
     });
 }
 
@@ -65,7 +65,7 @@ pub fn span_lint<T: LintContext>(cx: &T, lint: &'static Lint, sp: impl Into<Mult
 ///
 /// ```text
 /// error: constant division of 0.0 with 0.0 will always result in NaN
-///   --> $DIR/zero_div_zero.rs:6:25
+///   --> tests/ui/zero_div_zero.rs:6:25
 ///    |
 /// 6  |     let other_f64_nan = 0.0f64 / 0.0;
 ///    |                         ^^^^^^^^^^^^
@@ -80,14 +80,15 @@ pub fn span_lint_and_help<T: LintContext>(
     help_span: Option<Span>,
     help: &str,
 ) {
-    cx.struct_span_lint(lint, span, msg, |diag| {
+    #[expect(clippy::disallowed_methods)]
+    cx.span_lint(lint, span, msg.to_string(), |diag| {
+        let help = help.to_string();
         if let Some(help_span) = help_span {
             diag.span_help(help_span, help);
         } else {
             diag.help(help);
         }
         docs_link(diag, lint);
-        diag
     });
 }
 
@@ -102,14 +103,14 @@ pub fn span_lint_and_help<T: LintContext>(
 ///
 /// ```text
 /// error: calls to `std::mem::forget` with a reference instead of an owned value. Forgetting a reference does nothing.
-///   --> $DIR/drop_forget_ref.rs:10:5
+///   --> tests/ui/drop_forget_ref.rs:10:5
 ///    |
 /// 10 |     forget(&SomeStruct);
 ///    |     ^^^^^^^^^^^^^^^^^^^
 ///    |
 ///    = note: `-D clippy::forget-ref` implied by `-D warnings`
 /// note: argument has type &SomeStruct
-///   --> $DIR/drop_forget_ref.rs:10:12
+///   --> tests/ui/drop_forget_ref.rs:10:12
 ///    |
 /// 10 |     forget(&SomeStruct);
 ///    |            ^^^^^^^^^^^
@@ -122,14 +123,15 @@ pub fn span_lint_and_note<T: LintContext>(
     note_span: Option<Span>,
     note: &str,
 ) {
-    cx.struct_span_lint(lint, span, msg, |diag| {
+    #[expect(clippy::disallowed_methods)]
+    cx.span_lint(lint, span, msg.to_string(), |diag| {
+        let note = note.to_string();
         if let Some(note_span) = note_span {
             diag.span_note(note_span, note);
         } else {
             diag.note(note);
         }
         docs_link(diag, lint);
-        diag
     });
 }
 
@@ -141,19 +143,19 @@ pub fn span_lint_and_then<C, S, F>(cx: &C, lint: &'static Lint, sp: S, msg: &str
 where
     C: LintContext,
     S: Into<MultiSpan>,
-    F: FnOnce(&mut Diagnostic),
+    F: FnOnce(&mut Diag<'_, ()>),
 {
-    cx.struct_span_lint(lint, sp, msg, |diag| {
+    #[expect(clippy::disallowed_methods)]
+    cx.span_lint(lint, sp, msg.to_string(), |diag| {
         f(diag);
         docs_link(diag, lint);
-        diag
     });
 }
 
 pub fn span_lint_hir(cx: &LateContext<'_>, lint: &'static Lint, hir_id: HirId, sp: Span, msg: &str) {
-    cx.tcx.struct_span_lint_hir(lint, hir_id, sp, msg, |diag| {
+    #[expect(clippy::disallowed_methods)]
+    cx.tcx.node_span_lint(lint, hir_id, sp, msg.to_string(), |diag| {
         docs_link(diag, lint);
-        diag
     });
 }
 
@@ -163,12 +165,12 @@ pub fn span_lint_hir_and_then(
     hir_id: HirId,
     sp: impl Into<MultiSpan>,
     msg: &str,
-    f: impl FnOnce(&mut Diagnostic),
+    f: impl FnOnce(&mut Diag<'_, ()>),
 ) {
-    cx.tcx.struct_span_lint_hir(lint, hir_id, sp, msg, |diag| {
+    #[expect(clippy::disallowed_methods)]
+    cx.tcx.node_span_lint(lint, hir_id, sp, msg.to_string(), |diag| {
         f(diag);
         docs_link(diag, lint);
-        diag
     });
 }
 
@@ -184,14 +186,14 @@ pub fn span_lint_hir_and_then(
 ///
 /// ```text
 /// error: This `.fold` can be more succinctly expressed as `.any`
-/// --> $DIR/methods.rs:390:13
+/// --> tests/ui/methods.rs:390:13
 ///     |
 /// 390 |     let _ = (0..3).fold(false, |acc, x| acc || x > 2);
 ///     |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: try: `.any(|x| x > 2)`
 ///     |
 ///     = note: `-D fold-any` implied by `-D warnings`
 /// ```
-#[cfg_attr(feature = "internal", allow(clippy::collapsible_span_lint_calls))]
+#[expect(clippy::collapsible_span_lint_calls)]
 pub fn span_lint_and_sugg<T: LintContext>(
     cx: &T,
     lint: &'static Lint,
@@ -202,7 +204,7 @@ pub fn span_lint_and_sugg<T: LintContext>(
     applicability: Applicability,
 ) {
     span_lint_and_then(cx, lint, sp, msg, |diag| {
-        diag.span_suggestion(sp, help, sugg, applicability);
+        diag.span_suggestion(sp, help.to_string(), sugg, applicability);
     });
 }
 
@@ -212,7 +214,7 @@ pub fn span_lint_and_sugg<T: LintContext>(
 /// appear once per
 /// replacement. In human-readable format though, it only appears once before
 /// the whole suggestion.
-pub fn multispan_sugg<I>(diag: &mut Diagnostic, help_msg: &str, sugg: I)
+pub fn multispan_sugg<I>(diag: &mut Diag<'_, ()>, help_msg: &str, sugg: I)
 where
     I: IntoIterator<Item = (Span, String)>,
 {
@@ -225,12 +227,12 @@ where
 /// multiple spans. This is tracked in issue [rustfix#141](https://github.com/rust-lang/rustfix/issues/141).
 /// Suggestions with multiple spans will be silently ignored.
 pub fn multispan_sugg_with_applicability<I>(
-    diag: &mut Diagnostic,
+    diag: &mut Diag<'_, ()>,
     help_msg: &str,
     applicability: Applicability,
     sugg: I,
 ) where
     I: IntoIterator<Item = (Span, String)>,
 {
-    diag.multipart_suggestion(help_msg, sugg.into_iter().collect(), applicability);
+    diag.multipart_suggestion(help_msg.to_string(), sugg.into_iter().collect(), applicability);
 }

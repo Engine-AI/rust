@@ -19,17 +19,17 @@
 #![feature(panic_unwind)]
 #![feature(staged_api)]
 #![feature(std_internals)]
-#![feature(abi_thiscall)]
 #![feature(rustc_attrs)]
 #![panic_runtime]
 #![feature(panic_runtime)]
 #![feature(c_unwind)]
 // `real_imp` is unused with Miri, so silence warnings.
 #![cfg_attr(miri, allow(dead_code))]
+#![allow(internal_features)]
 
 use alloc::boxed::Box;
 use core::any::Any;
-use core::panic::BoxMeUp;
+use core::panic::PanicPayload;
 
 cfg_if::cfg_if! {
     if #[cfg(target_os = "emscripten")] {
@@ -49,15 +49,16 @@ cfg_if::cfg_if! {
     } else if #[cfg(any(
         all(target_family = "windows", target_env = "gnu"),
         target_os = "psp",
+        target_os = "xous",
         target_os = "solid_asp3",
         all(target_family = "unix", not(target_os = "espidf")),
         all(target_vendor = "fortanix", target_env = "sgx"),
+        target_family = "wasm",
     ))] {
         #[path = "gcc.rs"]
         mod real_imp;
     } else {
         // Targets that don't support unwinding.
-        // - family=wasm
         // - os=none ("bare metal" targets)
         // - os=uefi
         // - os=espidf
@@ -99,7 +100,7 @@ pub unsafe extern "C" fn __rust_panic_cleanup(payload: *mut u8) -> *mut (dyn Any
 // Entry point for raising an exception, just delegates to the platform-specific
 // implementation.
 #[rustc_std_internal_symbol]
-pub unsafe fn __rust_start_panic(payload: &mut dyn BoxMeUp) -> u32 {
+pub unsafe fn __rust_start_panic(payload: &mut dyn PanicPayload) -> u32 {
     let payload = Box::from_raw(payload.take_box());
 
     imp::panic(payload)

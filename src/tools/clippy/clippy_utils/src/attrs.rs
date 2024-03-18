@@ -1,6 +1,6 @@
-use rustc_ast::ast;
-use rustc_ast::attr;
+use rustc_ast::{ast, attr};
 use rustc_errors::Applicability;
+use rustc_middle::ty::{AdtDef, TyCtxt};
 use rustc_session::Session;
 use rustc_span::sym;
 use std::str::FromStr;
@@ -77,12 +77,14 @@ pub fn get_attr<'a>(
                 })
                 .map_or_else(
                     || {
-                        sess.span_err(attr_segments[1].ident.span, "usage of unknown attribute");
+                        sess.dcx()
+                            .span_err(attr_segments[1].ident.span, "usage of unknown attribute");
                         false
                     },
                     |deprecation_status| {
-                        let mut diag =
-                            sess.struct_span_err(attr_segments[1].ident.span, "usage of deprecated attribute");
+                        let mut diag = sess
+                            .dcx()
+                            .struct_span_err(attr_segments[1].ident.span, "usage of deprecated attribute");
                         match *deprecation_status {
                             DeprecationStatus::Deprecated => {
                                 diag.emit();
@@ -117,10 +119,10 @@ fn parse_attrs<F: FnMut(u64)>(sess: &Session, attrs: &[ast::Attribute], name: &'
             if let Ok(value) = FromStr::from_str(value.as_str()) {
                 f(value);
             } else {
-                sess.span_err(attr.span, "not a number");
+                sess.dcx().span_err(attr.span, "not a number");
             }
         } else {
-            sess.span_err(attr.span, "bad clippy attribute");
+            sess.dcx().span_err(attr.span, "bad clippy attribute");
         }
     }
 }
@@ -133,8 +135,9 @@ pub fn get_unique_attr<'a>(
     let mut unique_attr: Option<&ast::Attribute> = None;
     for attr in get_attr(sess, attrs, name) {
         if let Some(duplicate) = unique_attr {
-            sess.struct_span_err(attr.span, &format!("`{name}` is defined multiple times"))
-                .span_note(duplicate.span, "first definition found here")
+            sess.dcx()
+                .struct_span_err(attr.span, format!("`{name}` is defined multiple times"))
+                .with_span_note(duplicate.span, "first definition found here")
                 .emit();
         } else {
             unique_attr = Some(attr);
@@ -143,17 +146,28 @@ pub fn get_unique_attr<'a>(
     unique_attr
 }
 
-/// Return true if the attributes contain any of `proc_macro`,
+/// Returns true if the attributes contain any of `proc_macro`,
 /// `proc_macro_derive` or `proc_macro_attribute`, false otherwise
 pub fn is_proc_macro(attrs: &[ast::Attribute]) -> bool {
     attrs.iter().any(rustc_ast::Attribute::is_proc_macro_attr)
 }
 
-/// Return true if the attributes contain `#[doc(hidden)]`
+/// Returns true if the attributes contain `#[doc(hidden)]`
 pub fn is_doc_hidden(attrs: &[ast::Attribute]) -> bool {
     attrs
         .iter()
         .filter(|attr| attr.has_name(sym::doc))
         .filter_map(ast::Attribute::meta_item_list)
         .any(|l| attr::list_contains_name(&l, sym::hidden))
+}
+
+pub fn has_non_exhaustive_attr(tcx: TyCtxt<'_>, adt: AdtDef<'_>) -> bool {
+    adt.is_variant_list_non_exhaustive()
+        || tcx.has_attr(adt.did(), sym::non_exhaustive)
+        || adt.variants().iter().any(|variant_def| {
+            variant_def.is_field_list_non_exhaustive() || tcx.has_attr(variant_def.def_id, sym::non_exhaustive)
+        })
+        || adt
+            .all_fields()
+            .any(|field_def| tcx.has_attr(field_def.did, sym::non_exhaustive))
 }

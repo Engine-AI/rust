@@ -19,7 +19,7 @@ impl FromStr for CfgFlag {
                 if !(value.starts_with('"') && value.ends_with('"')) {
                     return Err(format!("Invalid cfg ({s:?}), value should be in quotes"));
                 }
-                let key = key.to_string();
+                let key = key.to_owned();
                 let value = value[1..value.len() - 1].to_string();
                 CfgFlag::KeyValue { key, value }
             }
@@ -46,6 +46,14 @@ impl Extend<CfgFlag> for CfgOptions {
                 CfgFlag::KeyValue { key, value } => self.insert_key_value(key.into(), value.into()),
             }
         }
+    }
+}
+
+impl FromIterator<CfgFlag> for CfgOptions {
+    fn from_iter<T: IntoIterator<Item = CfgFlag>>(iter: T) -> Self {
+        let mut this = CfgOptions::default();
+        this.extend(iter);
+        this
     }
 }
 

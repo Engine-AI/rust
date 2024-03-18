@@ -5,6 +5,7 @@
 // the page, so we don't see major layout changes during the load of the page.
 "use strict";
 
+const builtinThemes = ["light", "dark", "ayu"];
 const darkThemes = ["dark", "ayu"];
 window.currentTheme = document.getElementById("themeStyle");
 
@@ -50,23 +51,11 @@ function removeClass(elem, className) {
  * Run a callback for every element of an Array.
  * @param {Array<?>}    arr        - The array to iterate over
  * @param {function(?)} func       - The callback
- * @param {boolean}     [reversed] - Whether to iterate in reverse
  */
-function onEach(arr, func, reversed) {
-    if (arr && arr.length > 0 && func) {
-        if (reversed) {
-            const length = arr.length;
-            for (let i = length - 1; i >= 0; --i) {
-                if (func(arr[i])) {
-                    return true;
-                }
-            }
-        } else {
-            for (const elem of arr) {
-                if (func(elem)) {
-                    return true;
-                }
-            }
+function onEach(arr, func) {
+    for (const elem of arr) {
+        if (func(elem)) {
+            return true;
         }
     }
     return false;
@@ -80,14 +69,12 @@ function onEach(arr, func, reversed) {
  * https://developer.mozilla.org/en-US/docs/Web/API/NodeList
  * @param {NodeList<?>|HTMLCollection<?>} lazyArray  - An array to iterate over
  * @param {function(?)}                   func       - The callback
- * @param {boolean}                       [reversed] - Whether to iterate in reverse
  */
 // eslint-disable-next-line no-unused-vars
-function onEachLazy(lazyArray, func, reversed) {
+function onEachLazy(lazyArray, func) {
     return onEach(
         Array.prototype.slice.call(lazyArray),
-        func,
-        reversed);
+        func);
 }
 
 function updateLocalStorage(name, value) {
@@ -109,30 +96,51 @@ function getCurrentValue(name) {
 // Get a value from the rustdoc-vars div, which is used to convey data from
 // Rust to the JS. If there is no such element, return null.
 const getVar = (function getVar(name) {
-    const el = document.getElementById("rustdoc-vars");
+    const el = document.querySelector("head > meta[name='rustdoc-vars']");
     return el ? el.attributes["data-" + name].value : null;
 });
 
 function switchTheme(newThemeName, saveTheme) {
+    const themeNames = getVar("themes").split(",").filter(t => t);
+    themeNames.push(...builtinThemes);
+
+    // Ensure that the new theme name is among the defined themes
+    if (themeNames.indexOf(newThemeName) === -1) {
+        return;
+    }
+
     // If this new value comes from a system setting or from the previously
     // saved theme, no need to save it.
     if (saveTheme) {
         updateLocalStorage("theme", newThemeName);
     }
 
-    let newHref;
+    document.documentElement.setAttribute("data-theme", newThemeName);
 
-    if (newThemeName === "light" || newThemeName === "dark" || newThemeName === "ayu") {
-        newHref = getVar("static-root-path") + getVar("theme-" + newThemeName + "-css");
+    if (builtinThemes.indexOf(newThemeName) !== -1) {
+        if (window.currentTheme) {
+            window.currentTheme.parentNode.removeChild(window.currentTheme);
+            window.currentTheme = null;
+        }
     } else {
-        newHref = getVar("root-path") + newThemeName + getVar("resource-suffix") + ".css";
-    }
-
-    if (!window.currentTheme) {
-        document.write(`<link rel="stylesheet" id="themeStyle" href="${newHref}">`);
-        window.currentTheme = document.getElementById("themeStyle");
-    } else if (newHref !== window.currentTheme.href) {
-        window.currentTheme.href = newHref;
+        const newHref = getVar("root-path") + encodeURIComponent(newThemeName) +
+            getVar("resource-suffix") + ".css";
+        if (!window.currentTheme) {
+            // If we're in the middle of loading, document.write blocks
+            // rendering, but if we are done, it would blank the page.
+            if (document.readyState === "loading") {
+                document.write(`<link rel="stylesheet" id="themeStyle" href="${newHref}">`);
+                window.currentTheme = document.getElementById("themeStyle");
+            } else {
+                window.currentTheme = document.createElement("link");
+                window.currentTheme.rel = "stylesheet";
+                window.currentTheme.id = "themeStyle";
+                window.currentTheme.href = newHref;
+                document.documentElement.appendChild(window.currentTheme);
+            }
+        } else if (newHref !== window.currentTheme.href) {
+            window.currentTheme.href = newHref;
+        }
     }
 }
 
@@ -150,26 +158,19 @@ const updateTheme = (function() {
      * … dictates that it should be.
      */
     function updateTheme() {
-        const use = (theme, saveTheme) => {
-            switchTheme(theme, saveTheme);
-        };
-
         // maybe the user has disabled the setting in the meantime!
         if (getSettingValue("use-system-theme") !== "false") {
             const lightTheme = getSettingValue("preferred-light-theme") || "light";
             const darkTheme = getSettingValue("preferred-dark-theme") || "dark";
+            updateLocalStorage("use-system-theme", "true");
 
-            if (mql.matches) {
-                use(darkTheme, true);
-            } else {
-                // prefers a light theme, or has no preference
-                use(lightTheme, true);
-            }
+            // use light theme if user prefers it, or has no preference
+            switchTheme(mql.matches ? darkTheme : lightTheme, true);
             // note: we save the theme so that it doesn't suddenly change when
             // the user disables "use-system-theme" and reloads the page or
             // navigates to another page
         } else {
-            use(getSettingValue("theme"), false);
+            switchTheme(getSettingValue("theme"), false);
         }
     }
 
@@ -190,11 +191,38 @@ if (getSettingValue("use-system-theme") !== "false" && window.matchMedia) {
 
 updateTheme();
 
+// Hide, show, and resize the sidebar at page load time
+//
+// This needs to be done here because this JS is render-blocking,
+// so that the sidebar doesn't "jump" after appearing on screen.
+// The user interaction to change this is set up in main.js.
 if (getSettingValue("source-sidebar-show") === "true") {
     // At this point in page load, `document.body` is not available yet.
     // Set a class on the `<html>` element instead.
-    addClass(document.documentElement, "source-sidebar-expanded");
+    addClass(document.documentElement, "src-sidebar-expanded");
 }
+if (getSettingValue("hide-sidebar") === "true") {
+    // At this point in page load, `document.body` is not available yet.
+    // Set a class on the `<html>` element instead.
+    addClass(document.documentElement, "hide-sidebar");
+}
+function updateSidebarWidth() {
+    const desktopSidebarWidth = getSettingValue("desktop-sidebar-width");
+    if (desktopSidebarWidth && desktopSidebarWidth !== "null") {
+        document.documentElement.style.setProperty(
+            "--desktop-sidebar-width",
+            desktopSidebarWidth + "px"
+        );
+    }
+    const srcSidebarWidth = getSettingValue("src-sidebar-width");
+    if (srcSidebarWidth && srcSidebarWidth !== "null") {
+        document.documentElement.style.setProperty(
+            "--src-sidebar-width",
+            srcSidebarWidth + "px"
+        );
+    }
+}
+updateSidebarWidth();
 
 // If we navigate away (for example to a settings page), and then use the back or
 // forward button to get back to a page, the theme may have changed in the meantime.
@@ -208,5 +236,6 @@ if (getSettingValue("source-sidebar-show") === "true") {
 window.addEventListener("pageshow", ev => {
     if (ev.persisted) {
         setTimeout(updateTheme, 0);
+        setTimeout(updateSidebarWidth, 0);
     }
 });

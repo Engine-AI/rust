@@ -3,7 +3,7 @@
 #![stable(feature = "rust1", since = "1.0.0")]
 
 use crate::ascii;
-use crate::convert::TryInto;
+use crate::hint;
 use crate::intrinsics;
 use crate::mem;
 use crate::ops::{Add, Mul, Sub};
@@ -45,11 +45,11 @@ mod uint_macros; // import uint_impl!
 mod error;
 mod int_log10;
 mod nonzero;
-#[unstable(feature = "saturating_int_impl", issue = "87920")]
+mod overflow_panic;
 mod saturating;
 mod wrapping;
 
-#[unstable(feature = "saturating_int_impl", issue = "87920")]
+#[stable(feature = "saturating_int_impl", since = "1.74.0")]
 pub use saturating::Saturating;
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use wrapping::Wrapping;
@@ -60,6 +60,16 @@ pub use dec2flt::ParseFloatError;
 
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use error::ParseIntError;
+
+#[unstable(
+    feature = "nonzero_internals",
+    reason = "implementation detail which may disappear or be replaced at any time",
+    issue = "none"
+)]
+pub use nonzero::ZeroablePrimitive;
+
+#[unstable(feature = "generic_nonzero", issue = "120257")]
+pub use nonzero::NonZero;
 
 #[stable(feature = "nonzero", since = "1.28.0")]
 pub use nonzero::{NonZeroU128, NonZeroU16, NonZeroU32, NonZeroU64, NonZeroU8, NonZeroUsize};
@@ -92,6 +102,57 @@ macro_rules! usize_isize_from_xe_bytes_doc {
 depending on the target pointer size.
 
 "
+    };
+}
+
+macro_rules! midpoint_impl {
+    ($SelfT:ty, unsigned) => {
+        /// Calculates the middle point of `self` and `rhs`.
+        ///
+        /// `midpoint(a, b)` is `(a + b) >> 1` as if it were performed in a
+        /// sufficiently-large signed integral type. This implies that the result is
+        /// always rounded towards negative infinity and that no overflow will ever occur.
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// #![feature(num_midpoint)]
+        #[doc = concat!("assert_eq!(0", stringify!($SelfT), ".midpoint(4), 2);")]
+        #[doc = concat!("assert_eq!(1", stringify!($SelfT), ".midpoint(4), 2);")]
+        /// ```
+        #[unstable(feature = "num_midpoint", issue = "110840")]
+        #[rustc_const_unstable(feature = "const_num_midpoint", issue = "110840")]
+        #[must_use = "this returns the result of the operation, \
+                      without modifying the original"]
+        #[inline]
+        pub const fn midpoint(self, rhs: $SelfT) -> $SelfT {
+            // Use the well known branchless algorithm from Hacker's Delight to compute
+            // `(a + b) / 2` without overflowing: `((a ^ b) >> 1) + (a & b)`.
+            ((self ^ rhs) >> 1) + (self & rhs)
+        }
+    };
+    ($SelfT:ty, $WideT:ty, unsigned) => {
+        /// Calculates the middle point of `self` and `rhs`.
+        ///
+        /// `midpoint(a, b)` is `(a + b) >> 1` as if it were performed in a
+        /// sufficiently-large signed integral type. This implies that the result is
+        /// always rounded towards negative infinity and that no overflow will ever occur.
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// #![feature(num_midpoint)]
+        #[doc = concat!("assert_eq!(0", stringify!($SelfT), ".midpoint(4), 2);")]
+        #[doc = concat!("assert_eq!(1", stringify!($SelfT), ".midpoint(4), 2);")]
+        /// ```
+        #[unstable(feature = "num_midpoint", issue = "110840")]
+        #[rustc_const_unstable(feature = "const_num_midpoint", issue = "110840")]
+        #[must_use = "this returns the result of the operation, \
+                      without modifying the original"]
+        #[inline]
+        pub const fn midpoint(self, rhs: $SelfT) -> $SelfT {
+            ((self as $WideT + rhs as $WideT) / 2) as $SelfT
+        }
     };
 }
 
@@ -223,6 +284,17 @@ macro_rules! widening_impl {
             (wide as $SelfT, (wide >> $BITS) as $SelfT)
         }
     };
+}
+
+macro_rules! conv_rhs_for_unchecked_shift {
+    ($SelfT:ty, $x:expr) => {{
+        // If the `as` cast will truncate, ensure we still tell the backend
+        // that the pre-truncation value was also small.
+        if <$SelfT>::BITS < 32 {
+            intrinsics::assume($x <= (<$SelfT>::MAX as u32));
+        }
+        $x as $SelfT
+    }};
 }
 
 impl i8 {
@@ -414,7 +486,7 @@ impl isize {
     }
 }
 
-/// If 6th bit is set ascii is lower case.
+/// If the 6th bit is set ascii is lower case.
 const ASCII_CASE_MASK: u8 = 0b0010_0000;
 
 impl u8 {
@@ -422,7 +494,7 @@ impl u8 {
         Self = u8,
         ActualT = u8,
         SignedT = i8,
-        NonZeroT = NonZeroU8,
+        NonZeroT = NonZero<u8>,
         BITS = 8,
         MAX = 255,
         rot = 2,
@@ -438,6 +510,7 @@ impl u8 {
         bound_condition = "",
     }
     widening_impl! { u8, u16, 8, unsigned }
+    midpoint_impl! { u8, u16, unsigned }
 
     /// Checks if the value is within the ASCII range.
     ///
@@ -455,7 +528,16 @@ impl u8 {
     #[rustc_const_stable(feature = "const_u8_is_ascii", since = "1.43.0")]
     #[inline]
     pub const fn is_ascii(&self) -> bool {
-        *self & 128 == 0
+        *self <= 127
+    }
+
+    /// If the value of this byte is within the ASCII range, returns it as an
+    /// [ASCII character](ascii::Char).  Otherwise, returns `None`.
+    #[must_use]
+    #[unstable(feature = "ascii_char", issue = "110998")]
+    #[inline]
+    pub const fn as_ascii(&self) -> Option<ascii::Char> {
+        ascii::Char::from_u8(*self)
     }
 
     /// Makes a copy of the value in its ASCII upper case equivalent.
@@ -479,7 +561,7 @@ impl u8 {
     #[rustc_const_stable(feature = "const_ascii_methods_on_intrinsics", since = "1.52.0")]
     #[inline]
     pub const fn to_ascii_uppercase(&self) -> u8 {
-        // Toggle the fifth bit if this is a lowercase letter
+        // Toggle the 6th bit if this is a lowercase letter
         *self ^ ((self.is_ascii_lowercase() as u8) * ASCII_CASE_MASK)
     }
 
@@ -504,7 +586,7 @@ impl u8 {
     #[rustc_const_stable(feature = "const_ascii_methods_on_intrinsics", since = "1.52.0")]
     #[inline]
     pub const fn to_ascii_lowercase(&self) -> u8 {
-        // Set the fifth bit if this is an uppercase letter
+        // Set the 6th bit if this is an uppercase letter
         *self | (self.is_ascii_uppercase() as u8 * ASCII_CASE_MASK)
     }
 
@@ -721,7 +803,7 @@ impl u8 {
     #[rustc_const_stable(feature = "const_ascii_ctype_on_intrinsics", since = "1.47.0")]
     #[inline]
     pub const fn is_ascii_alphanumeric(&self) -> bool {
-        matches!(*self, b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z')
+        matches!(*self, b'0'..=b'9') | matches!(*self, b'A'..=b'Z') | matches!(*self, b'a'..=b'z')
     }
 
     /// Checks if the value is an ASCII decimal digit:
@@ -824,7 +906,7 @@ impl u8 {
     #[rustc_const_stable(feature = "const_ascii_ctype_on_intrinsics", since = "1.47.0")]
     #[inline]
     pub const fn is_ascii_hexdigit(&self) -> bool {
-        matches!(*self, b'0'..=b'9' | b'A'..=b'F' | b'a'..=b'f')
+        matches!(*self, b'0'..=b'9') | matches!(*self, b'A'..=b'F') | matches!(*self, b'a'..=b'f')
     }
 
     /// Checks if the value is an ASCII punctuation character:
@@ -862,7 +944,10 @@ impl u8 {
     #[rustc_const_stable(feature = "const_ascii_ctype_on_intrinsics", since = "1.47.0")]
     #[inline]
     pub const fn is_ascii_punctuation(&self) -> bool {
-        matches!(*self, b'!'..=b'/' | b':'..=b'@' | b'['..=b'`' | b'{'..=b'~')
+        matches!(*self, b'!'..=b'/')
+            | matches!(*self, b':'..=b'@')
+            | matches!(*self, b'['..=b'`')
+            | matches!(*self, b'{'..=b'~')
     }
 
     /// Checks if the value is an ASCII graphic character:
@@ -1024,7 +1109,7 @@ impl u16 {
         Self = u16,
         ActualT = u16,
         SignedT = i16,
-        NonZeroT = NonZeroU16,
+        NonZeroT = NonZero<u16>,
         BITS = 16,
         MAX = 65535,
         rot = 4,
@@ -1040,6 +1125,7 @@ impl u16 {
         bound_condition = "",
     }
     widening_impl! { u16, u32, 16, unsigned }
+    midpoint_impl! { u16, u32, unsigned }
 
     /// Checks if the value is a Unicode surrogate code point, which are disallowed values for [`char`].
     ///
@@ -1072,7 +1158,7 @@ impl u32 {
         Self = u32,
         ActualT = u32,
         SignedT = i32,
-        NonZeroT = NonZeroU32,
+        NonZeroT = NonZero<u32>,
         BITS = 32,
         MAX = 4294967295,
         rot = 8,
@@ -1088,6 +1174,7 @@ impl u32 {
         bound_condition = "",
     }
     widening_impl! { u32, u64, 32, unsigned }
+    midpoint_impl! { u32, u64, unsigned }
 }
 
 impl u64 {
@@ -1095,7 +1182,7 @@ impl u64 {
         Self = u64,
         ActualT = u64,
         SignedT = i64,
-        NonZeroT = NonZeroU64,
+        NonZeroT = NonZero<u64>,
         BITS = 64,
         MAX = 18446744073709551615,
         rot = 12,
@@ -1111,6 +1198,7 @@ impl u64 {
         bound_condition = "",
     }
     widening_impl! { u64, u128, 64, unsigned }
+    midpoint_impl! { u64, u128, unsigned }
 }
 
 impl u128 {
@@ -1118,7 +1206,7 @@ impl u128 {
         Self = u128,
         ActualT = u128,
         SignedT = i128,
-        NonZeroT = NonZeroU128,
+        NonZeroT = NonZero<u128>,
         BITS = 128,
         MAX = 340282366920938463463374607431768211455,
         rot = 16,
@@ -1135,6 +1223,7 @@ impl u128 {
         from_xe_bytes_doc = "",
         bound_condition = "",
     }
+    midpoint_impl! { u128, unsigned }
 }
 
 #[cfg(target_pointer_width = "16")]
@@ -1143,7 +1232,7 @@ impl usize {
         Self = usize,
         ActualT = u16,
         SignedT = isize,
-        NonZeroT = NonZeroUsize,
+        NonZeroT = NonZero<usize>,
         BITS = 16,
         MAX = 65535,
         rot = 4,
@@ -1159,6 +1248,7 @@ impl usize {
         bound_condition = " on 16-bit targets",
     }
     widening_impl! { usize, u32, 16, unsigned }
+    midpoint_impl! { usize, u32, unsigned }
 }
 
 #[cfg(target_pointer_width = "32")]
@@ -1167,7 +1257,7 @@ impl usize {
         Self = usize,
         ActualT = u32,
         SignedT = isize,
-        NonZeroT = NonZeroUsize,
+        NonZeroT = NonZero<usize>,
         BITS = 32,
         MAX = 4294967295,
         rot = 8,
@@ -1183,6 +1273,7 @@ impl usize {
         bound_condition = " on 32-bit targets",
     }
     widening_impl! { usize, u64, 32, unsigned }
+    midpoint_impl! { usize, u64, unsigned }
 }
 
 #[cfg(target_pointer_width = "64")]
@@ -1191,7 +1282,7 @@ impl usize {
         Self = usize,
         ActualT = u64,
         SignedT = isize,
-        NonZeroT = NonZeroUsize,
+        NonZeroT = NonZero<usize>,
         BITS = 64,
         MAX = 18446744073709551615,
         rot = 12,
@@ -1207,6 +1298,7 @@ impl usize {
         bound_condition = " on 64-bit targets",
     }
     widening_impl! { usize, u128, 64, unsigned }
+    midpoint_impl! { usize, u128, unsigned }
 }
 
 impl usize {

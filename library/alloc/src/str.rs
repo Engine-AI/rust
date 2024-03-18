@@ -30,6 +30,8 @@ pub use core::str::SplitAsciiWhitespace;
 pub use core::str::SplitInclusive;
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use core::str::SplitWhitespace;
+#[unstable(feature = "str_from_raw_parts", issue = "119206")]
+pub use core::str::{from_raw_parts, from_raw_parts_mut};
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use core::str::{from_utf8, from_utf8_mut, Bytes, CharIndices, Chars};
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -223,8 +225,6 @@ impl str {
     ///
     /// # Examples
     ///
-    /// Basic usage:
-    ///
     /// ```
     /// let s = "this is a string";
     /// let boxed_str = s.to_owned().into_boxed_str();
@@ -404,12 +404,12 @@ impl str {
             // See https://www.unicode.org/versions/Unicode7.0.0/ch03.pdf#G33992
             // for the definition of `Final_Sigma`.
             debug_assert!('Σ'.len_utf8() == 2);
-            let is_word_final = case_ignoreable_then_cased(from[..i].chars().rev())
-                && !case_ignoreable_then_cased(from[i + 2..].chars());
+            let is_word_final = case_ignorable_then_cased(from[..i].chars().rev())
+                && !case_ignorable_then_cased(from[i + 2..].chars());
             to.push_str(if is_word_final { "ς" } else { "σ" });
         }
 
-        fn case_ignoreable_then_cased<I: Iterator<Item = char>>(iter: I) -> bool {
+        fn case_ignorable_then_cased<I: Iterator<Item = char>>(iter: I) -> bool {
             use core::unicode::{Case_Ignorable, Cased};
             match iter.skip_while(|&c| Case_Ignorable(c)).next() {
                 Some(c) => Cased(c),
@@ -486,8 +486,6 @@ impl str {
     /// Converts a [`Box<str>`] into a [`String`] without copying or allocating.
     ///
     /// # Examples
-    ///
-    /// Basic usage:
     ///
     /// ```
     /// let string = String::from("birthday gift");
@@ -602,8 +600,6 @@ impl str {
 ///
 /// # Examples
 ///
-/// Basic usage:
-///
 /// ```
 /// let smile_utf8 = Box::new([226, 152, 186]);
 /// let smile = unsafe { std::str::from_boxed_utf8_unchecked(smile_utf8) };
@@ -618,7 +614,7 @@ pub unsafe fn from_boxed_utf8_unchecked(v: Box<[u8]>) -> Box<str> {
 }
 
 /// Converts the bytes while the bytes are still ascii.
-/// For better average performance, this is happens in chunks of `2*size_of::<usize>()`.
+/// For better average performance, this happens in chunks of `2*size_of::<usize>()`.
 /// Returns a vec with the converted bytes.
 #[inline]
 #[cfg(not(test))]

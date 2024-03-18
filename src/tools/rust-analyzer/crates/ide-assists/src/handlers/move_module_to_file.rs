@@ -52,7 +52,7 @@ pub(crate) fn move_module_to_file(acc: &mut Assists, ctx: &AssistContext<'_>) ->
                 let mut buf = String::from("./");
                 match parent_module.name(ctx.db()) {
                     Some(name) if !parent_module.is_mod_rs(ctx.db()) => {
-                        format_to!(buf, "{name}/")
+                        format_to!(buf, "{}/", name.display(ctx.db()))
                     }
                     _ => (),
                 }
@@ -75,7 +75,7 @@ pub(crate) fn move_module_to_file(acc: &mut Assists, ctx: &AssistContext<'_>) ->
             let contents = {
                 let items = module_items.dedent(IndentLevel(1)).to_string();
                 let mut items =
-                    items.trim_start_matches('{').trim_end_matches('}').trim().to_string();
+                    items.trim_start_matches('{').trim_end_matches('}').trim().to_owned();
                 if !items.is_empty() {
                     items.push('\n');
                 }

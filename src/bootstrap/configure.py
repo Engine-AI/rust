@@ -9,7 +9,7 @@ rust_dir = os.path.dirname(os.path.abspath(__file__))
 rust_dir = os.path.dirname(rust_dir)
 rust_dir = os.path.dirname(rust_dir)
 sys.path.append(os.path.join(rust_dir, "src", "bootstrap"))
-import bootstrap
+import bootstrap # noqa: E402
 
 
 class Option(object):
@@ -45,20 +45,21 @@ o("llvm-static-stdcpp", "llvm.static-libstdcpp", "statically link to libstdc++ f
 o("llvm-link-shared", "llvm.link-shared", "prefer shared linking to LLVM (llvm-config --link-shared)")
 o("rpath", "rust.rpath", "build rpaths into rustc itself")
 o("codegen-tests", "rust.codegen-tests", "run the tests/codegen tests")
-o("option-checking", None, "complain about unrecognized options in this configure script")
 o("ninja", "llvm.ninja", "build LLVM using the Ninja generator (for MSVC, requires building in the correct environment)")
 o("locked-deps", "build.locked-deps", "force Cargo.lock to be up to date")
 o("vendor", "build.vendor", "enable usage of vendored Rust crates")
-o("sanitizers", "build.sanitizers", "build the sanitizer runtimes (asan, lsan, msan, tsan, hwasan)")
+o("sanitizers", "build.sanitizers", "build the sanitizer runtimes (asan, dfsan, lsan, msan, tsan, hwasan)")
 o("dist-src", "rust.dist-src", "when building tarballs enables building a source tarball")
 o("cargo-native-static", "build.cargo-native-static", "static native libraries in cargo")
 o("profiler", "build.profiler", "build the profiler runtime")
 o("full-tools", None, "enable all tools")
 o("lld", "rust.lld", "build lld")
+o("llvm-bitcode-linker", "rust.llvm-bitcode-linker", "build llvm bitcode linker")
 o("clang", "llvm.clang", "build clang")
-o("missing-tools", "dist.missing-tools", "allow failures when building tools")
 o("use-libcxx", "llvm.use-libcxx", "build LLVM with libc++")
 o("control-flow-guard", "rust.control-flow-guard", "Enable Control Flow Guard")
+o("patch-binaries-for-nix", "build.patch-binaries-for-nix", "whether patch binaries for usage with Nix toolchains")
+o("new-symbol-mangling", "rust.new-symbol-mangling", "use symbol-mangling-version v0")
 
 v("llvm-cflags", "llvm.cflags", "build LLVM with these extra compiler flags")
 v("llvm-cxxflags", "llvm.cxxflags", "build LLVM with these extra compiler flags")
@@ -97,20 +98,7 @@ v("llvm-root", None, "set LLVM root")
 v("llvm-config", None, "set path to llvm-config")
 v("llvm-filecheck", None, "set path to LLVM's FileCheck utility")
 v("python", "build.python", "set path to python")
-v("android-cross-path", "target.arm-linux-androideabi.android-ndk",
-  "Android NDK standalone path (deprecated)")
-v("i686-linux-android-ndk", "target.i686-linux-android.android-ndk",
-  "i686-linux-android NDK standalone path")
-v("arm-linux-androideabi-ndk", "target.arm-linux-androideabi.android-ndk",
-  "arm-linux-androideabi NDK standalone path")
-v("armv7-linux-androideabi-ndk", "target.armv7-linux-androideabi.android-ndk",
-  "armv7-linux-androideabi NDK standalone path")
-v("thumbv7neon-linux-androideabi-ndk", "target.thumbv7neon-linux-androideabi.android-ndk",
-  "thumbv7neon-linux-androideabi NDK standalone path")
-v("aarch64-linux-android-ndk", "target.aarch64-linux-android.android-ndk",
-  "aarch64-linux-android NDK standalone path")
-v("x86_64-linux-android-ndk", "target.x86_64-linux-android.android-ndk",
-  "x86_64-linux-android NDK standalone path")
+v("android-ndk", "build.android-ndk", "set path to Android NDK")
 v("musl-root", "target.x86_64-unknown-linux-musl.musl-root",
   "MUSL root installation directory (deprecated)")
 v("musl-root-x86_64", "target.x86_64-unknown-linux-musl.musl-root",
@@ -139,6 +127,12 @@ v("musl-root-mips64", "target.mips64-unknown-linux-muslabi64.musl-root",
   "mips64-unknown-linux-muslabi64 install directory")
 v("musl-root-mips64el", "target.mips64el-unknown-linux-muslabi64.musl-root",
   "mips64el-unknown-linux-muslabi64 install directory")
+v("musl-root-riscv32gc", "target.riscv32gc-unknown-linux-musl.musl-root",
+  "riscv32gc-unknown-linux-musl install directory")
+v("musl-root-riscv64gc", "target.riscv64gc-unknown-linux-musl.musl-root",
+  "riscv64gc-unknown-linux-musl install directory")
+v("musl-root-loongarch64", "target.loongarch64-unknown-linux-musl.musl-root",
+  "loongarch64-unknown-linux-musl install directory")
 v("qemu-armhf-rootfs", "target.arm-unknown-linux-gnueabihf.qemu-rootfs",
   "rootfs in qemu testing, you probably don't want to use this")
 v("qemu-aarch64-rootfs", "target.aarch64-unknown-linux-gnu.qemu-rootfs",
@@ -149,8 +143,7 @@ v("experimental-targets", "llvm.experimental-targets",
   "experimental LLVM targets to build")
 v("release-channel", "rust.channel", "the name of the release channel to build")
 v("release-description", "rust.description", "optional descriptive string for version output")
-v("dist-compression-formats", None,
-  "comma-separated list of compression formats to use")
+v("dist-compression-formats", None, "List of compression formats to use")
 
 # Used on systems where "cc" is unavailable
 v("default-linker", "rust.default-linker", "the default linker")
@@ -159,14 +152,18 @@ v("default-linker", "rust.default-linker", "the default linker")
 # (others are conditionally saved).
 o("manage-submodules", "build.submodules", "let the build manage the git submodules")
 o("full-bootstrap", "build.full-bootstrap", "build three compilers instead of two (not recommended except for testing reproducible builds)")
+o("bootstrap-cache-path", "build.bootstrap-cache-path", "use provided path for the bootstrap cache")
 o("extended", "build.extended", "build an extended rust tool set")
 
 v("tools", None, "List of extended tools will be installed")
 v("codegen-backends", None, "List of codegen backends to build")
 v("build", "build.build", "GNUs ./configure syntax LLVM build triple")
-v("host", None, "GNUs ./configure syntax LLVM host triples")
-v("target", None, "GNUs ./configure syntax LLVM target triples")
+v("host", None, "List of GNUs ./configure syntax LLVM host triples")
+v("target", None, "List of GNUs ./configure syntax LLVM target triples")
 
+# Options specific to this configure script
+o("option-checking", None, "complain about unrecognized options in this configure script")
+o("verbose-configure", None, "don't truncate options when printing them in this configure script")
 v("set", None, "set arbitrary key/value pairs in TOML configuration")
 
 
@@ -175,9 +172,14 @@ def p(msg):
 
 
 def err(msg):
-    print("configure: error: " + msg)
+    print("\nconfigure: ERROR: " + msg + "\n")
     sys.exit(1)
 
+def is_value_list(key):
+    for option in options:
+        if option.name == key and option.desc.startswith('List of'):
+            return True
+    return False
 
 if '--help' in sys.argv or '-h' in sys.argv:
     print('Usage: ./configure [options]')
@@ -202,6 +204,8 @@ if '--help' in sys.argv or '-h' in sys.argv:
     print('Also note that all options which take `--enable` can similarly')
     print('be passed with `--disable-foo` to forcibly disable the option')
     sys.exit(0)
+
+VERBOSE = False
 
 # Parse all command line arguments into one of these three lists, handling
 # boolean and value-based options separately
@@ -252,7 +256,7 @@ def parse_args(args):
         if not found:
             unknown_args.append(arg)
 
-    # Note: here and a few other places, we use [-1] to apply the *last* value
+    # NOTE: here and a few other places, we use [-1] to apply the *last* value
     # passed.  But if option-checking is enabled, then the known_args loop will
     # also assert that options are only passed once.
     option_checking = ('option-checking' not in known_args
@@ -263,9 +267,12 @@ def parse_args(args):
         if len(need_value_args) > 0:
             err("Option '{0}' needs a value ({0}=val)".format(need_value_args[0]))
 
+    global VERBOSE
+    VERBOSE = 'verbose-configure' in known_args
+
     config = {}
 
-    set('build.configure-args', sys.argv[1:], config)
+    set('build.configure-args', args, config)
     apply_args(known_args, option_checking, config)
     return parse_example_config(known_args, config)
 
@@ -282,7 +289,7 @@ def set(key, value, config):
         value = [v for v in value if v]
 
     s = "{:20} := {}".format(key, value)
-    if len(s) < 70:
+    if len(s) < 70 or VERBOSE:
         p(s)
     else:
         p(s[:70] + " ...")
@@ -291,6 +298,8 @@ def set(key, value, config):
     parts = key.split('.')
     for i, part in enumerate(parts):
         if i == len(parts) - 1:
+            if is_value_list(part) and isinstance(value, str):
+                value = value.split(',')
             arr[part] = value
         else:
             if part not in arr:
@@ -302,7 +311,7 @@ def apply_args(known_args, option_checking, config):
     for key in known_args:
         # The `set` option is special and can be passed a bunch of times
         if key == 'set':
-            for option, value in known_args[key]:
+            for _option, value in known_args[key]:
                 keyval = value.split('=', 1)
                 if len(keyval) == 1 or keyval[1] == "true":
                     value = True
@@ -360,8 +369,9 @@ def apply_args(known_args, option_checking, config):
             set('rust.codegen-backends', ['llvm'], config)
             set('rust.lld', True, config)
             set('rust.llvm-tools', True, config)
+            set('rust.llvm-bitcode-linker', True, config)
             set('build.extended', True, config)
-        elif option.name == 'option-checking':
+        elif option.name in ['option-checking', 'verbose-configure']:
             # this was handled above
             pass
         elif option.name == 'dist-compression-formats':
@@ -383,8 +393,10 @@ def parse_example_config(known_args, config):
     targets = {}
     top_level_keys = []
 
-    for line in open(rust_dir + '/config.example.toml').read().split("\n"):
-        if cur_section == None:
+    with open(rust_dir + '/config.example.toml') as example_config:
+        example_lines = example_config.read().split("\n")
+    for line in example_lines:
+        if cur_section is None:
             if line.count('=') == 1:
                 top_level_key = line.split('=')[0]
                 top_level_key = top_level_key.strip(' #')
@@ -417,6 +429,8 @@ def parse_example_config(known_args, config):
         # Avoid using quotes unless it's necessary.
         targets[target][0] = targets[target][0].replace("x86_64-unknown-linux-gnu", "'{}'".format(target) if "." in target else target)
 
+    if 'profile' not in config:
+        set('profile', 'dist', config)
     configure_file(sections, top_level_keys, targets, config)
     return section_order, sections, targets
 
@@ -467,7 +481,7 @@ def configure_section(lines, config):
             # These are used by rpm, but aren't accepted by x.py.
             # Give a warning that they're ignored, but not a hard error.
             if key in ["infodir", "localstatedir"]:
-                print("warning: {} will be ignored".format(key))
+                print("WARNING: {} will be ignored".format(key))
             else:
                 raise RuntimeError("failed to find config line for {}".format(key))
 
@@ -475,7 +489,7 @@ def configure_section(lines, config):
 def configure_top_level_key(lines, top_level_key, value):
     for i, line in enumerate(lines):
         if line.startswith('#' + top_level_key + ' = ') or line.startswith(top_level_key + ' = '):
-            lines[i] = "{} = {}".format(top_level_key, value)
+            lines[i] = "{} = {}".format(top_level_key, to_toml(value))
             return
 
     raise RuntimeError("failed to find config line for {}".format(top_level_key))
@@ -504,8 +518,8 @@ def write_uncommented(target, f):
         block.append(line)
         if len(line) == 0:
             if not is_comment:
-                for l in block:
-                    f.write(l + "\n")
+                for ln in block:
+                    f.write(ln + "\n")
             block = []
             is_comment = True
             continue
@@ -521,8 +535,23 @@ def write_config_toml(writer, section_order, targets, sections):
         else:
             writer = write_uncommented(sections[section], writer)
 
+def quit_if_file_exists(file):
+    if os.path.isfile(file):
+        msg = "Existing '{}' detected. Exiting".format(file)
+
+        # If the output object directory isn't empty, we can get these errors
+        host_objdir = os.environ.get("OBJDIR_ON_HOST")
+        if host_objdir is not None:
+            msg += "\nIs objdir '{}' clean?".format(host_objdir)
+
+        err(msg)
 
 if __name__ == "__main__":
+    # If 'config.toml' already exists, exit the script at this point
+    quit_if_file_exists('config.toml')
+
+    if "GITHUB_ACTIONS" in os.environ:
+        print("::group::Configure the build")
     p("processing command line")
     # Parse all known arguments into a configuration structure that reflects the
     # TOML we're going to write out
@@ -545,3 +574,5 @@ if __name__ == "__main__":
 
     p("")
     p("run `python {}/x.py --help`".format(rust_dir))
+    if "GITHUB_ACTIONS" in os.environ:
+        print("::endgroup::")

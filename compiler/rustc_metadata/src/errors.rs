@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use rustc_errors::{error_code, ErrorGuaranteed, IntoDiagnostic};
+use rustc_errors::{codes::*, Diag, DiagCtxt, Diagnostic, EmissionGuarantee, Level};
 use rustc_macros::Diagnostic;
 use rustc_session::config;
 use rustc_span::{sym, Span, Symbol};
@@ -120,7 +120,7 @@ pub struct WasmImportForm {
 }
 
 #[derive(Diagnostic)]
-#[diag(metadata_empty_link_name, code = "E0454")]
+#[diag(metadata_empty_link_name, code = E0454)]
 pub struct EmptyLinkName {
     #[primary_span]
     #[label]
@@ -128,21 +128,21 @@ pub struct EmptyLinkName {
 }
 
 #[derive(Diagnostic)]
-#[diag(metadata_link_framework_apple, code = "E0455")]
+#[diag(metadata_link_framework_apple, code = E0455)]
 pub struct LinkFrameworkApple {
     #[primary_span]
     pub span: Span,
 }
 
 #[derive(Diagnostic)]
-#[diag(metadata_framework_only_windows, code = "E0455")]
+#[diag(metadata_framework_only_windows, code = E0455)]
 pub struct FrameworkOnlyWindows {
     #[primary_span]
     pub span: Span,
 }
 
 #[derive(Diagnostic)]
-#[diag(metadata_unknown_link_kind, code = "E0458")]
+#[diag(metadata_unknown_link_kind, code = E0458)]
 pub struct UnknownLinkKind<'a> {
     #[primary_span]
     #[label]
@@ -237,7 +237,7 @@ pub struct IncompatibleWasmLink {
 }
 
 #[derive(Diagnostic)]
-#[diag(metadata_link_requires_name, code = "E0459")]
+#[diag(metadata_link_requires_name, code = E0459)]
 pub struct LinkRequiresName {
     #[primary_span]
     #[label]
@@ -308,14 +308,9 @@ pub struct FailCreateFileEncoder {
 }
 
 #[derive(Diagnostic)]
-#[diag(metadata_fail_seek_file)]
-pub struct FailSeekFile {
-    pub err: Error,
-}
-
-#[derive(Diagnostic)]
 #[diag(metadata_fail_write_file)]
-pub struct FailWriteFile {
+pub struct FailWriteFile<'a> {
+    pub path: &'a Path,
     pub err: Error,
 }
 
@@ -396,6 +391,17 @@ pub struct FailedWriteError {
 }
 
 #[derive(Diagnostic)]
+#[diag(metadata_failed_copy_to_stdout)]
+pub struct FailedCopyToStdout {
+    pub filename: PathBuf,
+    pub err: Error,
+}
+
+#[derive(Diagnostic)]
+#[diag(metadata_binary_output_to_tty)]
+pub struct BinaryOutputToTty;
+
+#[derive(Diagnostic)]
 #[diag(metadata_missing_native_library)]
 pub struct MissingNativeLibrary<'a> {
     libname: &'a str,
@@ -408,7 +414,9 @@ impl<'a> MissingNativeLibrary<'a> {
         // if it looks like the user has provided a complete filename rather just the bare lib name,
         // then provide a note that they might want to try trimming the name
         let suggested_name = if !verbatim {
-            if let Some(libname) = libname.strip_prefix("lib") && let Some(libname) = libname.strip_suffix(".a") {
+            if let Some(libname) = libname.strip_prefix("lib")
+                && let Some(libname) = libname.strip_suffix(".a")
+            {
                 // this is a unix style filename so trim prefix & suffix
                 Some(libname)
             } else if let Some(libname) = libname.strip_suffix(".lib") {
@@ -487,25 +495,24 @@ pub(crate) struct MultipleCandidates {
     pub candidates: Vec<PathBuf>,
 }
 
-impl IntoDiagnostic<'_> for MultipleCandidates {
-    fn into_diagnostic(
-        self,
-        handler: &'_ rustc_errors::Handler,
-    ) -> rustc_errors::DiagnosticBuilder<'_, ErrorGuaranteed> {
-        let mut diag = handler.struct_err(fluent::metadata_multiple_candidates);
-        diag.set_arg("crate_name", self.crate_name);
-        diag.set_arg("flavor", self.flavor);
-        diag.code(error_code!(E0464));
-        diag.set_span(self.span);
+impl<G: EmissionGuarantee> Diagnostic<'_, G> for MultipleCandidates {
+    fn into_diag(self, dcx: &'_ DiagCtxt, level: Level) -> Diag<'_, G> {
+        let mut diag = Diag::new(dcx, level, fluent::metadata_multiple_candidates);
+        diag.arg("crate_name", self.crate_name);
+        diag.arg("flavor", self.flavor);
+        diag.code(E0464);
+        diag.span(self.span);
         for (i, candidate) in self.candidates.iter().enumerate() {
-            diag.note(&format!("candidate #{}: {}", i + 1, candidate.display()));
+            // FIXME: make this translatable
+            #[allow(rustc::untranslatable_diagnostic)]
+            diag.note(format!("candidate #{}: {}", i + 1, candidate.display()));
         }
         diag
     }
 }
 
 #[derive(Diagnostic)]
-#[diag(metadata_symbol_conflicts_current, code = "E0519")]
+#[diag(metadata_symbol_conflicts_current, code = E0519)]
 pub struct SymbolConflictsCurrent {
     #[primary_span]
     pub span: Span,
@@ -526,11 +533,12 @@ pub struct StableCrateIdCollision {
 pub struct DlError {
     #[primary_span]
     pub span: Span,
+    pub path: String,
     pub err: String,
 }
 
 #[derive(Diagnostic)]
-#[diag(metadata_newer_crate_version, code = "E0460")]
+#[diag(metadata_newer_crate_version, code = E0460)]
 #[note]
 #[note(metadata_found_crate_versions)]
 pub struct NewerCrateVersion {
@@ -542,7 +550,7 @@ pub struct NewerCrateVersion {
 }
 
 #[derive(Diagnostic)]
-#[diag(metadata_no_crate_with_triple, code = "E0461")]
+#[diag(metadata_no_crate_with_triple, code = E0461)]
 #[note(metadata_found_crate_versions)]
 pub struct NoCrateWithTriple<'a> {
     #[primary_span]
@@ -554,7 +562,7 @@ pub struct NoCrateWithTriple<'a> {
 }
 
 #[derive(Diagnostic)]
-#[diag(metadata_found_staticlib, code = "E0462")]
+#[diag(metadata_found_staticlib, code = E0462)]
 #[note(metadata_found_crate_versions)]
 #[help]
 pub struct FoundStaticlib {
@@ -566,7 +574,7 @@ pub struct FoundStaticlib {
 }
 
 #[derive(Diagnostic)]
-#[diag(metadata_incompatible_rustc, code = "E0514")]
+#[diag(metadata_incompatible_rustc, code = E0514)]
 #[note(metadata_found_crate_versions)]
 #[help]
 pub struct IncompatibleRustc {
@@ -585,18 +593,17 @@ pub struct InvalidMetadataFiles {
     pub crate_rejections: Vec<String>,
 }
 
-impl IntoDiagnostic<'_> for InvalidMetadataFiles {
+impl<G: EmissionGuarantee> Diagnostic<'_, G> for InvalidMetadataFiles {
     #[track_caller]
-    fn into_diagnostic(
-        self,
-        handler: &'_ rustc_errors::Handler,
-    ) -> rustc_errors::DiagnosticBuilder<'_, ErrorGuaranteed> {
-        let mut diag = handler.struct_err(fluent::metadata_invalid_meta_files);
-        diag.set_arg("crate_name", self.crate_name);
-        diag.set_arg("add_info", self.add_info);
-        diag.code(error_code!(E0786));
-        diag.set_span(self.span);
+    fn into_diag(self, dcx: &'_ DiagCtxt, level: Level) -> Diag<'_, G> {
+        let mut diag = Diag::new(dcx, level, fluent::metadata_invalid_meta_files);
+        diag.arg("crate_name", self.crate_name);
+        diag.arg("add_info", self.add_info);
+        diag.code(E0786);
+        diag.span(self.span);
         for crate_rejection in self.crate_rejections {
+            // FIXME: make this translatable
+            #[allow(rustc::untranslatable_diagnostic)]
             diag.note(crate_rejection);
         }
         diag
@@ -612,21 +619,19 @@ pub struct CannotFindCrate {
     pub is_nightly_build: bool,
     pub profiler_runtime: Symbol,
     pub locator_triple: TargetTriple,
+    pub is_ui_testing: bool,
 }
 
-impl IntoDiagnostic<'_> for CannotFindCrate {
+impl<G: EmissionGuarantee> Diagnostic<'_, G> for CannotFindCrate {
     #[track_caller]
-    fn into_diagnostic(
-        self,
-        handler: &'_ rustc_errors::Handler,
-    ) -> rustc_errors::DiagnosticBuilder<'_, ErrorGuaranteed> {
-        let mut diag = handler.struct_err(fluent::metadata_cannot_find_crate);
-        diag.set_arg("crate_name", self.crate_name);
-        diag.set_arg("current_crate", self.current_crate);
-        diag.set_arg("add_info", self.add_info);
-        diag.set_arg("locator_triple", self.locator_triple.triple());
-        diag.code(error_code!(E0463));
-        diag.set_span(self.span);
+    fn into_diag(self, dcx: &'_ DiagCtxt, level: Level) -> Diag<'_, G> {
+        let mut diag = Diag::new(dcx, level, fluent::metadata_cannot_find_crate);
+        diag.arg("crate_name", self.crate_name);
+        diag.arg("current_crate", self.current_crate);
+        diag.arg("add_info", self.add_info);
+        diag.arg("locator_triple", self.locator_triple.triple());
+        diag.code(E0463);
+        diag.span(self.span);
         if (self.crate_name == sym::std || self.crate_name == sym::core)
             && self.locator_triple != TargetTriple::from_triple(config::host_triple())
         {
@@ -635,12 +640,19 @@ impl IntoDiagnostic<'_> for CannotFindCrate {
             } else {
                 diag.note(fluent::metadata_target_no_std_support);
             }
-            // NOTE: this suggests using rustup, even though the user may not have it installed.
-            // That's because they could choose to install it; or this may give them a hint which
-            // target they need to install from their distro.
+
             if self.missing_core {
-                diag.help(fluent::metadata_consider_downloading_target);
+                if env!("CFG_RELEASE_CHANNEL") == "dev" && !self.is_ui_testing {
+                    // Note: Emits the nicer suggestion only for the dev channel.
+                    diag.help(fluent::metadata_consider_adding_std);
+                } else {
+                    // NOTE: this suggests using rustup, even though the user may not have it installed.
+                    // That's because they could choose to install it; or this may give them a hint which
+                    // target they need to install from their distro.
+                    diag.help(fluent::metadata_consider_downloading_target);
+                }
             }
+
             // Suggest using #![no_std]. #[no_core] is unstable and not really supported anyway.
             // NOTE: this is a dummy span if `extern crate std` was injected by the compiler.
             // If it's not a dummy, that means someone added `extern crate std` explicitly and
@@ -659,14 +671,6 @@ impl IntoDiagnostic<'_> for CannotFindCrate {
         diag.span_label(self.span, fluent::metadata_cant_find_crate);
         diag
     }
-}
-
-#[derive(Diagnostic)]
-#[diag(metadata_no_dylib_plugin, code = "E0457")]
-pub struct NoDylibPlugin {
-    #[primary_span]
-    pub span: Span,
-    pub crate_name: Symbol,
 }
 
 #[derive(Diagnostic)]

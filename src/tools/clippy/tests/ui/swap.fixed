@@ -1,5 +1,4 @@
-// run-rustfix
-// aux-build: macro_rules.rs
+//@aux-build: macro_rules.rs
 
 #![warn(clippy::all)]
 #![allow(
@@ -10,7 +9,9 @@
     dead_code,
     unused_assignments,
     unused_variables,
-    clippy::let_and_return
+    clippy::let_and_return,
+    clippy::useless_vec,
+    clippy::redundant_locals
 )]
 
 struct Foo(u32);

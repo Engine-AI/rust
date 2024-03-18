@@ -15,16 +15,14 @@ use crate::config::LintcheckConfig;
 use crate::recursive::LintcheckServer;
 
 use std::collections::{HashMap, HashSet};
-use std::env;
 use std::env::consts::EXE_SUFFIX;
 use std::fmt::{self, Write as _};
-use std::fs;
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::thread;
 use std::time::Duration;
+use std::{env, fs, thread};
 
 use cargo_metadata::diagnostic::{Diagnostic, DiagnosticLevel};
 use cargo_metadata::Message;
@@ -311,7 +309,7 @@ impl Crate {
         target_dir_index: &AtomicUsize,
         total_crates_to_lint: usize,
         config: &LintcheckConfig,
-        lint_filter: &Vec<String>,
+        lint_filter: &[String],
         server: &Option<LintcheckServer>,
     ) -> Vec<ClippyWarning> {
         // advance the atomic index by one
@@ -369,7 +367,7 @@ impl Crate {
             //
             // The wrapper is set to the `lintcheck` so we can force enable linting and ignore certain crates
             // (see `crate::driver`)
-            let status = Command::new("cargo")
+            let status = Command::new(env::var("CARGO").unwrap_or("cargo".into()))
                 .arg("check")
                 .arg("--quiet")
                 .current_dir(&self.path)
@@ -421,7 +419,7 @@ impl Crate {
             {
                 let subcrate = &stderr[63..];
                 println!(
-                    "ERROR: failed to apply some suggetion to {} / to (sub)crate {subcrate}",
+                    "ERROR: failed to apply some suggestion to {} / to (sub)crate {subcrate}",
                     self.name
                 );
             }
@@ -443,7 +441,7 @@ impl Crate {
 
 /// Builds clippy inside the repo to make sure we have a clippy executable we can use.
 fn build_clippy() {
-    let status = Command::new("cargo")
+    let status = Command::new(env::var("CARGO").unwrap_or("cargo".into()))
         .arg("build")
         .status()
         .expect("Failed to build clippy!");
@@ -474,7 +472,7 @@ fn read_crates(toml_path: &Path) -> (Vec<CrateSource>, RecursiveOptions) {
             });
         } else if let Some(ref versions) = tk.versions {
             // if we have multiple versions, save each one
-            for ver in versions.iter() {
+            for ver in versions {
                 crate_sources.push(CrateSource::CratesIo {
                     name: tk.name.clone(),
                     version: ver.to_string(),
@@ -525,7 +523,7 @@ fn gather_stats(clippy_warnings: &[ClippyWarning]) -> (String, HashMap<&String, 
         .for_each(|wrn| *counter.entry(&wrn.lint_type).or_insert(0) += 1);
 
     // collect into a tupled list for sorting
-    let mut stats: Vec<(&&String, &usize)> = counter.iter().map(|(lint, count)| (lint, count)).collect();
+    let mut stats: Vec<(&&String, &usize)> = counter.iter().collect();
     // sort by "000{count} {clippy::lintname}"
     // to not have a lint with 200 and 2 warnings take the same spot
     stats.sort_by_key(|(lint, count)| format!("{count:0>4}, {lint}"));
@@ -730,7 +728,7 @@ fn read_stats_from_file(file_path: &Path) -> HashMap<String, usize> {
 }
 
 /// print how lint counts changed between runs
-fn print_stats(old_stats: HashMap<String, usize>, new_stats: HashMap<&String, usize>, lint_filter: &Vec<String>) {
+fn print_stats(old_stats: HashMap<String, usize>, new_stats: HashMap<&String, usize>, lint_filter: &[String]) {
     let same_in_both_hashmaps = old_stats
         .iter()
         .filter(|(old_key, old_val)| new_stats.get::<&String>(old_key) == Some(old_val))
@@ -751,7 +749,7 @@ fn print_stats(old_stats: HashMap<String, usize>, new_stats: HashMap<&String, us
     // list all new counts  (key is in new stats but not in old stats)
     new_stats_deduped
         .iter()
-        .filter(|(new_key, _)| old_stats_deduped.get::<str>(new_key).is_none())
+        .filter(|(new_key, _)| !old_stats_deduped.contains_key::<str>(new_key))
         .for_each(|(new_key, new_value)| {
             println!("{new_key} 0 => {new_value}");
         });
@@ -759,7 +757,7 @@ fn print_stats(old_stats: HashMap<String, usize>, new_stats: HashMap<&String, us
     // list all changed counts (key is in both maps but value differs)
     new_stats_deduped
         .iter()
-        .filter(|(new_key, _new_val)| old_stats_deduped.get::<str>(new_key).is_some())
+        .filter(|(new_key, _new_val)| old_stats_deduped.contains_key::<str>(new_key))
         .for_each(|(new_key, new_val)| {
             let old_val = old_stats_deduped.get::<str>(new_key).unwrap();
             println!("{new_key} {old_val} => {new_val}");
@@ -768,7 +766,7 @@ fn print_stats(old_stats: HashMap<String, usize>, new_stats: HashMap<&String, us
     // list all gone counts (key is in old status but not in new stats)
     old_stats_deduped
         .iter()
-        .filter(|(old_key, _)| new_stats_deduped.get::<&String>(old_key).is_none())
+        .filter(|(old_key, _)| !new_stats_deduped.contains_key::<&String>(old_key))
         .filter(|(old_key, _)| lint_filter.is_empty() || lint_filter.contains(old_key))
         .for_each(|(old_key, old_value)| {
             println!("{old_key} {old_value} => 0");
@@ -818,7 +816,7 @@ fn lintcheck_test() {
         "--crates-toml",
         "lintcheck/test_sources.toml",
     ];
-    let status = std::process::Command::new("cargo")
+    let status = std::process::Command::new(env::var("CARGO").unwrap_or("cargo".into()))
         .args(args)
         .current_dir("..") // repo root
         .status();

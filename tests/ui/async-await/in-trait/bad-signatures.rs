@@ -1,9 +1,5 @@
-// edition:2021
-// [next] compile-flags: -Zlower-impl-trait-in-trait-to-assoc-ty
-// revisions: current next
+//@ edition:2021
 
-#![feature(async_fn_in_trait)]
-//~^ WARN the feature `async_fn_in_trait` is incomplete
 
 trait MyTrait {
     async fn bar(&abc self);

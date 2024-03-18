@@ -1,5 +1,7 @@
 #![allow(unreachable_pub)]
 
+use std::str::FromStr;
+
 use crate::install::{ClientOpt, Malloc, ServerOpt};
 
 xflags::xflags! {
@@ -21,6 +23,8 @@ xflags::xflags! {
             optional --mimalloc
             /// Use jemalloc allocator for server
             optional --jemalloc
+            /// build in release with debug info set to 2
+            optional --dev-rel
         }
 
         cmd fuzz-tests {}
@@ -42,11 +46,16 @@ xflags::xflags! {
             required changelog: String
         }
         cmd metrics {
-            optional --dry-run
+            optional measurement_type: MeasurementType
         }
         /// Builds a benchmark version of rust-analyzer and puts it into `./target`.
         cmd bb {
             required suffix: String
+        }
+
+        cmd codegen {
+            optional codegen_type: CodegenType
+            optional --check
         }
     }
 }
@@ -69,8 +78,36 @@ pub enum XtaskCmd {
     PublishReleaseNotes(PublishReleaseNotes),
     Metrics(Metrics),
     Bb(Bb),
+    Codegen(Codegen),
 }
 
+#[derive(Debug)]
+pub struct Codegen {
+    pub check: bool,
+    pub codegen_type: Option<CodegenType>,
+}
+
+#[derive(Debug, Default)]
+pub enum CodegenType {
+    #[default]
+    All,
+    AssistsDocTests,
+    DiagnosticsDocs,
+    LintDefinitions,
+}
+
+impl FromStr for CodegenType {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "all" => Ok(Self::All),
+            "assists-doc-tests" => Ok(Self::AssistsDocTests),
+            "diagnostics-docs" => Ok(Self::DiagnosticsDocs),
+            "lints-definitions" => Ok(Self::LintDefinitions),
+            _ => Err("Invalid option".to_owned()),
+        }
+    }
+}
 #[derive(Debug)]
 pub struct Install {
     pub client: bool,
@@ -78,6 +115,7 @@ pub struct Install {
     pub server: bool,
     pub mimalloc: bool,
     pub jemalloc: bool,
+    pub dev_rel: bool,
 }
 
 #[derive(Debug)]
@@ -106,8 +144,48 @@ pub struct PublishReleaseNotes {
 }
 
 #[derive(Debug)]
+pub enum MeasurementType {
+    Build,
+    RustcTests,
+    AnalyzeSelf,
+    AnalyzeRipgrep,
+    AnalyzeWebRender,
+    AnalyzeDiesel,
+    AnalyzeHyper,
+}
+
+impl FromStr for MeasurementType {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "build" => Ok(Self::Build),
+            "rustc_tests" => Ok(Self::RustcTests),
+            "self" => Ok(Self::AnalyzeSelf),
+            "ripgrep-13.0.0" => Ok(Self::AnalyzeRipgrep),
+            "webrender-2022" => Ok(Self::AnalyzeWebRender),
+            "diesel-1.4.8" => Ok(Self::AnalyzeDiesel),
+            "hyper-0.14.18" => Ok(Self::AnalyzeHyper),
+            _ => Err("Invalid option".to_owned()),
+        }
+    }
+}
+impl AsRef<str> for MeasurementType {
+    fn as_ref(&self) -> &str {
+        match self {
+            Self::Build => "build",
+            Self::RustcTests => "rustc_tests",
+            Self::AnalyzeSelf => "self",
+            Self::AnalyzeRipgrep => "ripgrep-13.0.0",
+            Self::AnalyzeWebRender => "webrender-2022",
+            Self::AnalyzeDiesel => "diesel-1.4.8",
+            Self::AnalyzeHyper => "hyper-0.14.18",
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct Metrics {
-    pub dry_run: bool,
+    pub measurement_type: Option<MeasurementType>,
 }
 
 #[derive(Debug)]
@@ -145,7 +223,7 @@ impl Install {
         } else {
             Malloc::System
         };
-        Some(ServerOpt { malloc })
+        Some(ServerOpt { malloc, dev_rel: self.dev_rel })
     }
     pub(crate) fn client(&self) -> Option<ClientOpt> {
         if !self.client && self.server {

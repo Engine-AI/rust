@@ -1,17 +1,16 @@
 #[cfg(test)]
 mod tests;
 
-#[cfg(target_pointer_width = "64")]
+#[cfg(all(target_pointer_width = "64", not(target_os = "uefi")))]
 mod repr_bitpacked;
-#[cfg(target_pointer_width = "64")]
+#[cfg(all(target_pointer_width = "64", not(target_os = "uefi")))]
 use repr_bitpacked::Repr;
 
-#[cfg(not(target_pointer_width = "64"))]
+#[cfg(any(not(target_pointer_width = "64"), target_os = "uefi"))]
 mod repr_unpacked;
-#[cfg(not(target_pointer_width = "64"))]
+#[cfg(any(not(target_pointer_width = "64"), target_os = "uefi"))]
 use repr_unpacked::Repr;
 
-use crate::convert::From;
 use crate::error;
 use crate::fmt;
 use crate::result;
@@ -84,6 +83,18 @@ impl From<alloc::ffi::NulError> for Error {
     }
 }
 
+#[stable(feature = "io_error_from_try_reserve", since = "CURRENT_RUSTC_VERSION")]
+impl From<alloc::collections::TryReserveError> for Error {
+    /// Converts `TryReserveError` to an error with [`ErrorKind::OutOfMemory`].
+    ///
+    /// `TryReserveError` won't be available as the error `source()`,
+    /// but this may change in the future.
+    fn from(_: alloc::collections::TryReserveError) -> Error {
+        // ErrorData::Custom allocates, which isn't great for handling OOM errors.
+        ErrorKind::OutOfMemory.into()
+    }
+}
+
 // Only derive debug in tests, to make sure it
 // doesn't accidentally get printed.
 #[cfg_attr(test, derive(Debug))]
@@ -103,7 +114,7 @@ enum ErrorData<C> {
 ///
 /// [`into`]: Into::into
 #[unstable(feature = "raw_os_error_ty", issue = "107792")]
-pub type RawOsError = i32;
+pub type RawOsError = sys::RawOsError;
 
 // `#[repr(align(4))]` is probably redundant, it should have that value or
 // higher already. We include it just because repr_bitpacked.rs's encoding
@@ -512,6 +523,7 @@ impl Error {
     /// let eof_error = Error::from(ErrorKind::UnexpectedEof);
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
+    #[inline(never)]
     pub fn new<E>(kind: ErrorKind, error: E) -> Error
     where
         E: Into<Box<dyn error::Error + Send + Sync>>,
@@ -528,8 +540,6 @@ impl Error {
     /// # Examples
     ///
     /// ```
-    /// #![feature(io_error_other)]
-    ///
     /// use std::io::Error;
     ///
     /// // errors can be created from strings
@@ -538,7 +548,7 @@ impl Error {
     /// // errors can also be created from other errors
     /// let custom_error2 = Error::other(custom_error);
     /// ```
-    #[unstable(feature = "io_error_other", issue = "91946")]
+    #[stable(feature = "io_error_other", since = "1.74.0")]
     pub fn other<E>(error: E) -> Error
     where
         E: Into<Box<dyn error::Error + Send + Sync>>,
@@ -818,12 +828,12 @@ impl Error {
         }
     }
 
-    /// Attempt to downgrade the inner error to `E` if any.
+    /// Attempt to downcast the inner error to `E` if any.
     ///
     /// If this [`Error`] was constructed via [`new`] then this function will
     /// attempt to perform downgrade on it, otherwise it will return [`Err`].
     ///
-    /// If downgrade succeeds, it will return [`Ok`], otherwise it will also
+    /// If the downcast succeeds, it will return [`Ok`], otherwise it will also
     /// return [`Err`].
     ///
     /// [`new`]: Error::new
@@ -854,13 +864,39 @@ impl Error {
     /// impl From<io::Error> for E {
     ///     fn from(err: io::Error) -> E {
     ///         err.downcast::<E>()
-    ///             .map(|b| *b)
     ///             .unwrap_or_else(E::Io)
     ///     }
     /// }
+    ///
+    /// impl From<E> for io::Error {
+    ///     fn from(err: E) -> io::Error {
+    ///         match err {
+    ///             E::Io(io_error) => io_error,
+    ///             e => io::Error::new(io::ErrorKind::Other, e),
+    ///         }
+    ///     }
+    /// }
+    ///
+    /// # fn main() {
+    /// let e = E::SomeOtherVariant;
+    /// // Convert it to an io::Error
+    /// let io_error = io::Error::from(e);
+    /// // Cast it back to the original variant
+    /// let e = E::from(io_error);
+    /// assert!(matches!(e, E::SomeOtherVariant));
+    ///
+    /// let io_error = io::Error::from(io::ErrorKind::AlreadyExists);
+    /// // Convert it to E
+    /// let e = E::from(io_error);
+    /// // Cast it back to the original variant
+    /// let io_error = io::Error::from(e);
+    /// assert_eq!(io_error.kind(), io::ErrorKind::AlreadyExists);
+    /// assert!(io_error.get_ref().is_none());
+    /// assert!(io_error.raw_os_error().is_none());
+    /// # }
     /// ```
     #[unstable(feature = "io_error_downcast", issue = "99262")]
-    pub fn downcast<E>(self) -> result::Result<Box<E>, Self>
+    pub fn downcast<E>(self) -> result::Result<E, Self>
     where
         E: error::Error + Send + Sync + 'static,
     {
@@ -874,7 +910,7 @@ impl Error {
                 // And the compiler should be able to eliminate the branch
                 // that produces `Err` here since b.error.is::<E>()
                 // returns true.
-                Ok(res.unwrap())
+                Ok(*res.unwrap())
             }
             repr_data => Err(Self { repr: Repr::new(repr_data) }),
         }
@@ -915,6 +951,16 @@ impl Error {
             ErrorData::Custom(c) => c.kind,
             ErrorData::Simple(kind) => kind,
             ErrorData::SimpleMessage(m) => m.kind,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn is_interrupted(&self) -> bool {
+        match self.repr.data() {
+            ErrorData::Os(code) => sys::is_interrupted(code),
+            ErrorData::Custom(c) => c.kind == ErrorKind::Interrupted,
+            ErrorData::Simple(kind) => kind == ErrorKind::Interrupted,
+            ErrorData::SimpleMessage(m) => m.kind == ErrorKind::Interrupted,
         }
     }
 }

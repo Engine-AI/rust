@@ -13,14 +13,19 @@
 //! This API is completely unstable and subject to change.
 
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
+#![doc(rust_logo)]
+#![feature(rustdoc_internals)]
+#![allow(internal_features)]
+#![allow(rustc::diagnostic_outside_of_impl)]
+#![allow(rustc::untranslatable_diagnostic)]
 #![feature(associated_type_bounds)]
 #![feature(box_patterns)]
 #![feature(control_flow_enum)]
 #![feature(extend_one)]
 #![feature(let_chains)]
 #![feature(if_let_guard)]
-#![feature(min_specialization)]
-#![feature(never_type)]
+#![feature(iterator_try_collect)]
+#![cfg_attr(bootstrap, feature(min_specialization))]
 #![feature(try_blocks)]
 #![recursion_limit = "512"] // For rustdoc
 
@@ -34,11 +39,8 @@ extern crate tracing;
 #[macro_use]
 extern crate rustc_middle;
 
-use rustc_errors::{DiagnosticMessage, SubdiagnosticMessage};
-use rustc_macros::fluent_messages;
-
 mod errors;
 pub mod infer;
 pub mod traits;
 
-fluent_messages! { "../messages.ftl" }
+rustc_fluent_macro::fluent_messages! { "../messages.ftl" }

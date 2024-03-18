@@ -4,12 +4,20 @@ import * as path from "path";
 import * as readline from "readline";
 import * as vscode from "vscode";
 import { execute, log, memoizeAsync } from "./util";
+import { unwrapNullable } from "./nullable";
+import { unwrapUndefinable } from "./undefinable";
 
 interface CompilationArtifact {
     fileName: string;
+    workspace: string;
     name: string;
     kind: string;
     isTest: boolean;
+}
+
+export interface ExecutableInfo {
+    executable: string;
+    workspace: string;
 }
 
 export interface ArtifactSpec {
@@ -18,7 +26,11 @@ export interface ArtifactSpec {
 }
 
 export class Cargo {
-    constructor(readonly rootFolder: string, readonly output: vscode.OutputChannel) {}
+    constructor(
+        readonly rootFolder: string,
+        readonly output: vscode.OutputChannel,
+        readonly env: Record<string, string>,
+    ) {}
 
     // Made public for testing purposes
     static artifactSpec(args: readonly string[]): ArtifactSpec {
@@ -62,6 +74,7 @@ export class Cargo {
                             artifacts.push({
                                 fileName: message.executable,
                                 name: message.target.name,
+                                workspace: path.dirname(message.manifest_path),
                                 kind: message.target.kind[0],
                                 isTest: message.profile.test,
                             });
@@ -70,7 +83,7 @@ export class Cargo {
                         this.output.append(message.message.rendered);
                     }
                 },
-                (stderr) => this.output.append(stderr)
+                (stderr) => this.output.append(stderr),
             );
         } catch (err) {
             this.output.show(true);
@@ -80,7 +93,7 @@ export class Cargo {
         return spec.filter?.(artifacts) ?? artifacts;
     }
 
-    async executableFromArgs(args: readonly string[]): Promise<string> {
+    async executableInfoFromArgs(args: readonly string[]): Promise<ExecutableInfo> {
         const artifacts = await this.getArtifacts(Cargo.artifactSpec(args));
 
         if (artifacts.length === 0) {
@@ -89,19 +102,24 @@ export class Cargo {
             throw new Error("Multiple compilation artifacts are not supported.");
         }
 
-        return artifacts[0].fileName;
+        const artifact = unwrapUndefinable(artifacts[0]);
+        return {
+            executable: artifact.fileName,
+            workspace: artifact.workspace,
+        };
     }
 
     private async runCargo(
         cargoArgs: string[],
         onStdoutJson: (obj: any) => void,
-        onStderrString: (data: string) => void
+        onStderrString: (data: string) => void,
     ): Promise<number> {
         const path = await cargoPath();
         return await new Promise((resolve, reject) => {
             const cargo = cp.spawn(path, cargoArgs, {
                 stdio: ["ignore", "pipe", "pipe"],
                 cwd: this.rootFolder,
+                env: this.env,
             });
 
             cargo.on("error", (err) => reject(new Error(`could not launch cargo: ${err}`)));
@@ -137,7 +155,9 @@ export async function getRustcId(dir: string): Promise<string> {
     const data = await execute(`${rustcPath} -V -v`, { cwd: dir });
     const rx = /commit-hash:\s(.*)$/m;
 
-    return rx.exec(data)![1];
+    const result = unwrapNullable(rx.exec(data));
+    const first = unwrapUndefinable(result[1]);
+    return first;
 }
 
 /** Mirrors `toolchain::cargo()` implementation */
@@ -162,11 +182,11 @@ export const getPathForExecutable = memoizeAsync(
             if (await isFileAtUri(standardPath)) return standardPath.fsPath;
         }
         return executableName;
-    }
+    },
 );
 
 async function lookupInPath(exec: string): Promise<boolean> {
-    const paths = process.env.PATH ?? "";
+    const paths = process.env["PATH"] ?? "";
 
     const candidates = paths.split(path.delimiter).flatMap((dirInPath) => {
         const candidate = path.join(dirInPath, exec);

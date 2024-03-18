@@ -81,12 +81,13 @@
 //!
 //! [mm]: https://github.com/rust-lang/measureme/
 
-use crate::cold_path;
 use crate::fx::FxHashMap;
+use crate::outline;
 
 use std::borrow::Borrow;
 use std::collections::hash_map::Entry;
 use std::error::Error;
+use std::fmt::Display;
 use std::fs;
 use std::intrinsics::unlikely;
 use std::path::Path;
@@ -97,11 +98,11 @@ use std::time::{Duration, Instant};
 pub use measureme::EventId;
 use measureme::{EventIdBuilder, Profiler, SerializableString, StringId};
 use parking_lot::RwLock;
-use serde_json::json;
 use smallvec::SmallVec;
 
 bitflags::bitflags! {
-    struct EventFilter: u32 {
+    #[derive(Clone, Copy)]
+    struct EventFilter: u16 {
         const GENERIC_ACTIVITIES  = 1 << 0;
         const QUERY_PROVIDERS     = 1 << 1;
         const QUERY_CACHE_HITS    = 1 << 2;
@@ -114,14 +115,14 @@ bitflags::bitflags! {
         const INCR_RESULT_HASHING = 1 << 8;
         const ARTIFACT_SIZES = 1 << 9;
 
-        const DEFAULT = Self::GENERIC_ACTIVITIES.bits |
-                        Self::QUERY_PROVIDERS.bits |
-                        Self::QUERY_BLOCKED.bits |
-                        Self::INCR_CACHE_LOADS.bits |
-                        Self::INCR_RESULT_HASHING.bits |
-                        Self::ARTIFACT_SIZES.bits;
+        const DEFAULT = Self::GENERIC_ACTIVITIES.bits() |
+                        Self::QUERY_PROVIDERS.bits() |
+                        Self::QUERY_BLOCKED.bits() |
+                        Self::INCR_CACHE_LOADS.bits() |
+                        Self::INCR_RESULT_HASHING.bits() |
+                        Self::ARTIFACT_SIZES.bits();
 
-        const ARGS = Self::QUERY_KEYS.bits | Self::FUNCTION_ARGS.bits;
+        const ARGS = Self::QUERY_KEYS.bits() | Self::FUNCTION_ARGS.bits();
     }
 }
 
@@ -557,7 +558,7 @@ impl SelfProfiler {
         let crate_name = crate_name.unwrap_or("unknown-crate");
         // HACK(eddyb) we need to pad the PID, strange as it may seem, as its
         // length can behave as a source of entropy for heap addresses, when
-        // ASLR is disabled and the heap is otherwise determinic.
+        // ASLR is disabled and the heap is otherwise deterministic.
         let pid: u32 = process::id();
         let filename = format!("{crate_name}-{pid:07}.rustc_profile");
         let path = output_directory.join(&filename);
@@ -697,7 +698,7 @@ impl<'a> TimingGuard<'a> {
     #[inline]
     pub fn finish_with_query_invocation_id(self, query_invocation_id: QueryInvocationId) {
         if let Some(guard) = self.0 {
-            cold_path(|| {
+            outline(|| {
                 let event_id = StringId::new_virtual(query_invocation_id.0);
                 let event_id = EventId::from_virtual(event_id);
                 guard.finish_with_override_event_id(event_id);
@@ -763,6 +764,31 @@ impl Drop for VerboseTimingGuard<'_> {
     }
 }
 
+struct JsonTimePassesEntry<'a> {
+    pass: &'a str,
+    time: f64,
+    start_rss: Option<usize>,
+    end_rss: Option<usize>,
+}
+
+impl Display for JsonTimePassesEntry<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self { pass: what, time, start_rss, end_rss } = self;
+        write!(f, r#"{{"pass":"{what}","time":{time},"rss_start":"#).unwrap();
+        match start_rss {
+            Some(rss) => write!(f, "{rss}")?,
+            None => write!(f, "null")?,
+        }
+        write!(f, r#","rss_end":"#)?;
+        match end_rss {
+            Some(rss) => write!(f, "{rss}")?,
+            None => write!(f, "null")?,
+        }
+        write!(f, "}}")?;
+        Ok(())
+    }
+}
+
 pub fn print_time_passes_entry(
     what: &str,
     dur: Duration,
@@ -772,13 +798,10 @@ pub fn print_time_passes_entry(
 ) {
     match format {
         TimePassesFormat::Json => {
-            let json = json!({
-                "pass": what,
-                "time": dur.as_secs_f64(),
-                "rss_start": start_rss,
-                "rss_end": end_rss,
-            });
-            eprintln!("time: {}", json.to_string());
+            let entry =
+                JsonTimePassesEntry { pass: what, time: dur.as_secs_f64(), start_rss, end_rss };
+
+            eprintln!(r#"time: {entry}"#);
             return;
         }
         TimePassesFormat::Text => (),
@@ -837,8 +860,8 @@ fn get_thread_id() -> u32 {
 }
 
 // Memory reporting
-cfg_if! {
-    if #[cfg(windows)] {
+cfg_match! {
+    cfg(windows) => {
         pub fn get_resident_set_size() -> Option<usize> {
             use std::mem;
 
@@ -861,7 +884,8 @@ cfg_if! {
 
             Some(pmc.WorkingSetSize)
         }
-    } else if #[cfg(target_os = "macos")] {
+    }
+    cfg(target_os = "macos")  => {
         pub fn get_resident_set_size() -> Option<usize> {
             use libc::{c_int, c_void, getpid, proc_pidinfo, proc_taskinfo, PROC_PIDTASKINFO};
             use std::mem;
@@ -879,7 +903,8 @@ cfg_if! {
                 }
             }
         }
-    } else if #[cfg(unix)] {
+    }
+    cfg(unix) => {
         pub fn get_resident_set_size() -> Option<usize> {
             let field = 1;
             let contents = fs::read("/proc/self/statm").ok()?;
@@ -888,9 +913,13 @@ cfg_if! {
             let npages = s.parse::<usize>().ok()?;
             Some(npages * 4096)
         }
-    } else {
+    }
+    _ => {
         pub fn get_resident_set_size() -> Option<usize> {
             None
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

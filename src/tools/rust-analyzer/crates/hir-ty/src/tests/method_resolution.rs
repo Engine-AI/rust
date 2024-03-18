@@ -389,6 +389,24 @@ mod bar_test {
 }
 
 #[test]
+fn infer_trait_method_multiple_mutable_reference() {
+    check_types(
+        r#"
+trait Trait {
+    fn method(&mut self) -> i32 { 5 }
+}
+struct S;
+impl Trait for &mut &mut S {}
+fn test() {
+    let s = &mut &mut &mut S;
+    s.method();
+  //^^^^^^^^^^ i32
+}
+        "#,
+    );
+}
+
+#[test]
 fn infer_trait_method_generic_1() {
     // the trait implementation is intentionally incomplete -- it shouldn't matter
     check_types(
@@ -1198,6 +1216,73 @@ fn main() {
 }
 
 #[test]
+fn inherent_method_deref_raw() {
+    check_types(
+        r#"
+struct Val;
+
+impl Val {
+    pub fn method(self: *const Val) -> u32 {
+        0
+    }
+}
+
+fn main() {
+    let foo: *const Val;
+    foo.method();
+ // ^^^^^^^^^^^^ u32
+}
+"#,
+    );
+}
+
+#[test]
+fn inherent_method_ref_self_deref_raw() {
+    check_types(
+        r#"
+struct Val;
+
+impl Val {
+    pub fn method(&self) -> u32 {
+        0
+    }
+}
+
+fn main() {
+    let foo: *const Val;
+    foo.method();
+ // ^^^^^^^^^^^^ {unknown}
+}
+"#,
+    );
+}
+
+#[test]
+fn trait_method_deref_raw() {
+    check_types(
+        r#"
+trait Trait {
+    fn method(self: *const Self) -> u32;
+}
+
+struct Val;
+
+impl Trait for Val {
+    fn method(self: *const Self) -> u32 {
+        0
+    }
+}
+
+fn main() {
+    let foo: *const Val;
+    foo.method();
+ // ^^^^^^^^^^^^ u32
+}
+"#,
+    );
+}
+
+#[test]
 fn method_on_dyn_impl() {
     check_types(
         r#"
@@ -1255,7 +1340,6 @@ fn foo<T: Trait>(a: &T) {
 
 #[test]
 fn autoderef_visibility_field() {
-    // FIXME: We should know mutability in overloaded deref
     check(
         r#"
 //- minicore: deref
@@ -1277,7 +1361,7 @@ mod a {
 mod b {
     fn foo() {
         let x = super::a::Bar::new().0;
-             // ^^^^^^^^^^^^^^^^^^^^ adjustments: Deref(Some(OverloadedDeref(None)))
+             // ^^^^^^^^^^^^^^^^^^^^ adjustments: Deref(Some(OverloadedDeref(Some(Not))))
              // ^^^^^^^^^^^^^^^^^^^^^^ type: char
     }
 }
@@ -1366,28 +1450,6 @@ trait Tr {
 }
 
 const _: () = {
-    impl Tr for S {}
-};
-
-fn f() {
-    S.method();
-  //^^^^^^^^^^ u16
-}
-    "#,
-    );
-}
-
-#[test]
-fn trait_impl_in_synstructure_const() {
-    check_types(
-        r#"
-struct S;
-
-trait Tr {
-    fn method(&self) -> u16;
-}
-
-const _DERIVE_Tr_: () = {
     impl Tr for S {}
 };
 
@@ -1712,6 +1774,21 @@ fn test() {
 }
 
 #[test]
+fn deref_into_inference_var() {
+    check_types(
+        r#"
+//- minicore:deref
+struct A<T>(T);
+impl core::ops::Deref for A<u32> {}
+impl A<i32> { fn foo(&self) {} }
+fn main() {
+    A(0).foo();
+  //^^^^^^^^^^ ()
+}
+"#,
+    );
+}
+#[test]
 fn receiver_adjustment_autoref() {
     check(
         r#"
@@ -1723,7 +1800,7 @@ fn test() {
     Foo.foo();
   //^^^ adjustments: Borrow(Ref(Not))
     (&Foo).foo();
-  // ^^^^ adjustments: ,
+  // ^^^^ adjustments: Deref(None), Borrow(Ref(Not))
 }
 "#,
     );
@@ -1918,6 +1995,57 @@ fn foo() {
     let s = module::Struct;
     s.func();
   //^^^^^^^^ type: ()
+}
+"#,
+    );
+}
+
+#[test]
+fn box_deref_is_builtin() {
+    check(
+        r#"
+//- minicore: deref
+use core::ops::Deref;
+
+#[lang = "owned_box"]
+struct Box<T>(*mut T);
+
+impl<T> Box<T> {
+    fn new(t: T) -> Self {
+        loop {}
+    }
+}
+
+impl<T> Deref for Box<T> {
+    type Target = T;
+    fn deref(&self) -> &Self::Target;
+}
+
+struct Foo;
+impl Foo {
+    fn foo(&self) {}
+}
+fn test() {
+    Box::new(Foo).foo();
+  //^^^^^^^^^^^^^ adjustments: Deref(None), Borrow(Ref(Not))
+}
+"#,
+    );
+}
+
+#[test]
+fn manually_drop_deref_is_not_builtin() {
+    check(
+        r#"
+//- minicore: manually_drop, deref
+struct Foo;
+impl Foo {
+    fn foo(&self) {}
+}
+use core::mem::ManuallyDrop;
+fn test() {
+    ManuallyDrop::new(Foo).foo();
+  //^^^^^^^^^^^^^^^^^^^^^^ adjustments: Deref(Some(OverloadedDeref(Some(Not)))), Borrow(Ref(Not))
 }
 "#,
     );

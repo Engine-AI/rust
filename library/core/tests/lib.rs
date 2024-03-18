@@ -1,41 +1,39 @@
 #![feature(alloc_layout_extra)]
 #![feature(array_chunks)]
-#![feature(array_methods)]
+#![feature(array_ptr_get)]
 #![feature(array_windows)]
+#![feature(ascii_char)]
+#![feature(ascii_char_variants)]
+#![feature(async_iter_from_iter)]
+#![feature(async_iterator)]
 #![feature(bigint_helper_methods)]
 #![feature(cell_update)]
 #![feature(const_align_offset)]
-#![feature(const_assume)]
 #![feature(const_align_of_val_raw)]
 #![feature(const_black_box)]
-#![feature(const_bool_to_option)]
 #![feature(const_caller_location)]
 #![feature(const_cell_into_inner)]
-#![feature(const_convert)]
-#![feature(const_for)]
 #![feature(const_hash)]
 #![feature(const_heap)]
-#![feature(const_intoiterator_identity)]
-#![feature(const_iter)]
+#![feature(const_intrinsic_copy)]
 #![feature(const_maybe_uninit_as_mut_ptr)]
-#![feature(const_maybe_uninit_assume_init_read)]
 #![feature(const_nonnull_new)]
-#![feature(const_num_from_num)]
-#![feature(const_pointer_byte_offsets)]
 #![feature(const_pointer_is_aligned)]
 #![feature(const_ptr_as_ref)]
-#![feature(const_ptr_read)]
 #![feature(const_ptr_write)]
 #![feature(const_trait_impl)]
 #![feature(const_likely)]
 #![feature(const_location_fields)]
 #![feature(core_intrinsics)]
+#![feature(core_io_borrowed_buf)]
 #![feature(core_private_bignum)]
 #![feature(core_private_diy_float)]
 #![feature(dec2flt)]
 #![feature(div_duration)]
+#![feature(duration_abs_diff)]
 #![feature(duration_consts_float)]
 #![feature(duration_constants)]
+#![feature(duration_constructors)]
 #![feature(exact_size_is_empty)]
 #![feature(extern_types)]
 #![feature(flt2dec)]
@@ -43,6 +41,7 @@
 #![feature(float_minimum_maximum)]
 #![feature(future_join)]
 #![feature(generic_assert_internals)]
+#![feature(generic_nonzero)]
 #![feature(array_try_from_fn)]
 #![feature(hasher_prefixfree_extras)]
 #![feature(hashmap_internals)]
@@ -54,12 +53,19 @@
 #![feature(sort_internals)]
 #![feature(slice_take)]
 #![feature(slice_from_ptr_range)]
+#![feature(slice_ptr_len)]
+#![feature(slice_split_once)]
 #![feature(split_as_slice)]
+#![feature(maybe_uninit_fill)]
 #![feature(maybe_uninit_uninit_array)]
 #![feature(maybe_uninit_write_slice)]
 #![feature(maybe_uninit_uninit_array_transpose)]
 #![feature(min_specialization)]
+#![feature(noop_waker)]
 #![feature(numfmt)]
+#![feature(num_midpoint)]
+#![feature(offset_of_nested)]
+#![feature(isqrt)]
 #![feature(step_trait)]
 #![feature(str_internals)]
 #![feature(std_internals)]
@@ -70,7 +76,6 @@
 #![feature(slice_internals)]
 #![feature(slice_partition_dedup)]
 #![feature(ip)]
-#![feature(ip_in_core)]
 #![feature(iter_advance_by)]
 #![feature(iter_array_chunks)]
 #![feature(iter_collect_into)]
@@ -90,7 +95,6 @@
 #![feature(const_waker)]
 #![feature(never_type)]
 #![feature(unwrap_infallible)]
-#![feature(pointer_byte_offsets)]
 #![feature(pointer_is_aligned)]
 #![feature(portable_simd)]
 #![feature(ptr_metadata)]
@@ -99,9 +103,9 @@
 #![feature(const_option)]
 #![feature(const_option_ext)]
 #![feature(const_result)]
-#![feature(integer_atomics)]
+#![cfg_attr(target_has_atomic = "128", feature(integer_atomics))]
+#![cfg_attr(test, feature(cfg_match))]
 #![feature(int_roundings)]
-#![feature(slice_group_by)]
 #![feature(split_array)]
 #![feature(strict_provenance)]
 #![feature(strict_provenance_atomic_ptr)]
@@ -111,20 +115,23 @@
 #![feature(const_slice_from_ref)]
 #![feature(waker_getters)]
 #![feature(slice_flatten)]
-#![feature(provide_any)]
+#![feature(error_generic_member_access)]
+#![feature(error_in_core)]
+#![feature(trait_upcasting)]
 #![feature(utf8_chunks)]
 #![feature(is_ascii_octdigit)]
 #![feature(get_many_mut)]
+#![feature(iter_map_windows)]
+#![allow(internal_features)]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![deny(fuzzy_provenance_casts)]
-
-extern crate test;
 
 mod alloc;
 mod any;
 mod array;
 mod ascii;
 mod asserting;
+mod async_iter;
 mod atomic;
 mod bool;
 mod cell;
@@ -137,8 +144,10 @@ mod fmt;
 mod future;
 mod hash;
 mod intrinsics;
+mod io;
 mod iter;
 mod lazy;
+#[cfg(test)]
 mod macros;
 mod manually_drop;
 mod mem;
@@ -168,7 +177,7 @@ mod waker;
 #[allow(dead_code)] // Not used in all configurations.
 pub(crate) fn test_rng() -> rand_xorshift::XorShiftRng {
     use core::hash::{BuildHasher, Hash, Hasher};
-    let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+    let mut hasher = std::hash::RandomState::new().build_hasher();
     core::panic::Location::caller().hash(&mut hasher);
     let hc64 = hasher.finish();
     let seed_vec = hc64.to_le_bytes().into_iter().chain(0u8..8).collect::<Vec<u8>>();

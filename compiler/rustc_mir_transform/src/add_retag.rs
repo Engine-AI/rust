@@ -4,7 +4,6 @@
 //! of MIR building, and only after this pass we think of the program has having the
 //! normal MIR semantics.
 
-use crate::MirPass;
 use rustc_middle::mir::*;
 use rustc_middle::ty::{self, Ty, TyCtxt};
 
@@ -28,6 +27,7 @@ fn may_contain_reference<'tcx>(ty: Ty<'tcx>, depth: u32, tcx: TyCtxt<'tcx>) -> b
         // References
         ty::Ref(..) => true,
         ty::Adt(..) if ty.is_box() => true,
+        ty::Adt(adt, _) if Some(adt.did()) == tcx.lang_items().ptr_unique() => true,
         // Compound types: recurse
         ty::Array(ty, _) | ty::Slice(ty) => {
             // This does not branch so we keep the depth the same.
@@ -36,10 +36,10 @@ fn may_contain_reference<'tcx>(ty: Ty<'tcx>, depth: u32, tcx: TyCtxt<'tcx>) -> b
         ty::Tuple(tys) => {
             depth == 0 || tys.iter().any(|ty| may_contain_reference(ty, depth - 1, tcx))
         }
-        ty::Adt(adt, subst) => {
+        ty::Adt(adt, args) => {
             depth == 0
                 || adt.variants().iter().any(|v| {
-                    v.fields.iter().any(|f| may_contain_reference(f.ty(tcx, subst), depth - 1, tcx))
+                    v.fields.iter().any(|f| may_contain_reference(f.ty(tcx, args), depth - 1, tcx))
                 })
         }
         // Conservative fallback
@@ -59,7 +59,7 @@ impl<'tcx> MirPass<'tcx> for AddRetag {
         let basic_blocks = body.basic_blocks.as_mut();
         let local_decls = &body.local_decls;
         let needs_retag = |place: &Place<'tcx>| {
-            !place.has_deref() // we're not eally interested in stores to "outside" locations, they are hard to keep track of anyway
+            !place.is_indirect_first_projection() // we're not really interested in stores to "outside" locations, they are hard to keep track of anyway
                 && may_contain_reference(place.ty(&*local_decls, tcx).ty, /*depth*/ 3, tcx)
                 && !local_decls[place.local].is_deref_temp()
         };
@@ -118,7 +118,7 @@ impl<'tcx> MirPass<'tcx> for AddRetag {
         }
 
         // PART 3
-        // Add retag after assignments where data "enters" this function: the RHS is behind a deref and the LHS is not.
+        // Add retag after assignments.
         for block_data in basic_blocks {
             // We want to insert statements as we iterate. To this end, we
             // iterate backwards using indices.

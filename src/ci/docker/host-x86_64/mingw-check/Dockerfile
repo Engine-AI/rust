@@ -39,17 +39,26 @@ COPY host-x86_64/mingw-check/validate-toolstate.sh /scripts/
 COPY host-x86_64/mingw-check/validate-error-codes.sh /scripts/
 
 ENV RUN_CHECK_WITH_PARALLEL_QUERIES 1
+
 ENV SCRIPT python3 ../x.py --stage 2 test src/tools/expand-yaml-anchors && \
+           # Check library crates on all tier 1 targets.
+           # We disable optimized compiler built-ins because that requires a C toolchain for the target.
+           # We also skip the x86_64-unknown-linux-gnu target as it is well-tested by other jobs.
+           python3 ../x.py check --stage 0 --set build.optimized-compiler-builtins=false core alloc std --target=aarch64-unknown-linux-gnu,i686-pc-windows-msvc,i686-unknown-linux-gnu,x86_64-apple-darwin,x86_64-pc-windows-gnu,x86_64-pc-windows-msvc && \
            python3 ../x.py check --target=i686-pc-windows-gnu --host=i686-pc-windows-gnu && \
+           python3 ../x.py clippy compiler -Aclippy::all -Dclippy::correctness && \
            python3 ../x.py build --stage 0 src/tools/build-manifest && \
            python3 ../x.py test --stage 0 src/tools/compiletest && \
            python3 ../x.py test --stage 0 core alloc std test proc_macro && \
            # Build both public and internal documentation.
+           RUSTDOCFLAGS=\"--document-private-items --document-hidden-items\" python3 ../x.py doc --stage 0 library && \
+           mkdir -p /checkout/obj/staging/doc && \
+           cp -r build/x86_64-unknown-linux-gnu/doc /checkout/obj/staging && \
            RUSTDOCFLAGS=\"--document-private-items --document-hidden-items\" python3 ../x.py doc --stage 0 compiler && \
            RUSTDOCFLAGS=\"--document-private-items --document-hidden-items\" python3 ../x.py doc --stage 0 library/test && \
            /scripts/validate-toolstate.sh && \
            /scripts/validate-error-codes.sh && \
-           reuse lint && \
+           reuse --include-submodules lint && \
            # Runs checks to ensure that there are no ES5 issues in our JS code.
            es-check es6 ../src/librustdoc/html/static/js/*.js && \
            eslint -c ../src/librustdoc/html/static/.eslintrc.js ../src/librustdoc/html/static/js/*.js && \

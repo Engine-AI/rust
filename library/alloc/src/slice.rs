@@ -33,8 +33,6 @@ use crate::vec::Vec;
 #[cfg(test)]
 mod tests;
 
-#[unstable(feature = "slice_range", issue = "76393")]
-pub use core::slice::range;
 #[unstable(feature = "array_chunks", issue = "74985")]
 pub use core::slice::ArrayChunks;
 #[unstable(feature = "array_chunks", issue = "74985")]
@@ -51,14 +49,16 @@ pub use core::slice::{from_mut, from_ref};
 pub use core::slice::{from_mut_ptr_range, from_ptr_range};
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use core::slice::{from_raw_parts, from_raw_parts_mut};
+#[unstable(feature = "slice_range", issue = "76393")]
+pub use core::slice::{range, try_range};
+#[stable(feature = "slice_group_by", since = "1.77.0")]
+pub use core::slice::{ChunkBy, ChunkByMut};
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use core::slice::{Chunks, Windows};
 #[stable(feature = "chunks_exact", since = "1.31.0")]
 pub use core::slice::{ChunksExact, ChunksExactMut};
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use core::slice::{ChunksMut, Split, SplitMut};
-#[unstable(feature = "slice_group_by", issue = "80552")]
-pub use core::slice::{GroupBy, GroupByMut};
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use core::slice::{Iter, IterMut};
 #[stable(feature = "rchunks", since = "1.31.0")]
@@ -592,7 +592,7 @@ impl<T> [T] {
     /// ```
     #[rustc_allow_incoherent_impl]
     #[stable(feature = "rust1", since = "1.0.0")]
-    #[deprecated(since = "1.3.0", note = "renamed to join")]
+    #[deprecated(since = "1.3.0", note = "renamed to join", suggestion = "join")]
     pub fn connect<Separator>(&self, sep: Separator) -> <Self as Join<Separator>>::Output
     where
         Self: Join<Separator>,

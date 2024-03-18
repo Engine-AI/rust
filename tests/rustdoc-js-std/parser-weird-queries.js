@@ -1,76 +1,44 @@
 // This test is mostly to check that the parser still kinda outputs something
 // (and doesn't enter an infinite loop!) even though the query is completely
 // invalid.
-const QUERY = [
-    'a b',
-    'a   b',
-    'a,b(c)',
-    'aaa,a',
-    ',,,,',
-    'mod    :',
-    'mod\t:',
-];
 
 const PARSED = [
     {
+        query: 'a b',
         elems: [
             {
-                name: "a",
-                fullPath: ["a"],
-                pathWithoutLast: [],
-                pathLast: "a",
-                generics: [],
-                typeFilter: -1,
-            },
-            {
-                name: "b",
-                fullPath: ["b"],
-                pathWithoutLast: [],
+                name: "a b",
+                fullPath: ["a", "b"],
+                pathWithoutLast: ["a"],
                 pathLast: "b",
                 generics: [],
-                typeFilter: -1,
             },
         ],
-        foundElems: 2,
+        foundElems: 1,
         original: "a b",
         returned: [],
         userQuery: "a b",
         error: null,
     },
     {
+        query: 'a   b',
         elems: [
             {
-                name: "a",
-                fullPath: ["a"],
-                pathWithoutLast: [],
-                pathLast: "a",
-                generics: [],
-                typeFilter: -1,
-            },
-            {
-                name: "b",
-                fullPath: ["b"],
-                pathWithoutLast: [],
+                name: "a   b",
+                fullPath: ["a", "b"],
+                pathWithoutLast: ["a"],
                 pathLast: "b",
                 generics: [],
-                typeFilter: -1,
             },
         ],
-        foundElems: 2,
+        foundElems: 1,
         original: "a   b",
         returned: [],
         userQuery: "a   b",
         error: null,
     },
     {
-        elems: [],
-        foundElems: 0,
-        original: "a,b(c)",
-        returned: [],
-        userQuery: "a,b(c)",
-        error: "Unexpected `(`",
-    },
-    {
+        query: 'aaa,a',
         elems: [
             {
                 name: "aaa",
@@ -78,7 +46,6 @@ const PARSED = [
                 pathWithoutLast: [],
                 pathLast: "aaa",
                 generics: [],
-                typeFilter: -1,
             },
             {
                 name: "a",
@@ -86,7 +53,6 @@ const PARSED = [
                 pathWithoutLast: [],
                 pathLast: "a",
                 generics: [],
-                typeFilter: -1,
             },
         ],
         foundElems: 2,
@@ -96,6 +62,7 @@ const PARSED = [
         error: null,
     },
     {
+        query: ',,,,',
         elems: [],
         foundElems: 0,
         original: ",,,,",
@@ -104,19 +71,21 @@ const PARSED = [
         error: null,
     },
     {
+        query: 'mod    :',
         elems: [],
         foundElems: 0,
         original: 'mod    :',
         returned: [],
         userQuery: 'mod    :',
-        error: "Unexpected `:` (expected path after type filter)",
+        error: "Unexpected `:` (expected path after type filter `mod:`)",
     },
     {
+        query: 'mod\t:',
         elems: [],
         foundElems: 0,
-        original: 'mod\t:',
+        original: 'mod :',
         returned: [],
-        userQuery: 'mod\t:',
-        error: "Unexpected `:` (expected path after type filter)",
+        userQuery: 'mod :',
+        error: "Unexpected `:` (expected path after type filter `mod:`)",
     },
 ];

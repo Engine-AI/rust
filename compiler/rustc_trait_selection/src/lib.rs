@@ -11,17 +11,22 @@
 //! This API is completely unstable and subject to change.
 
 #![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
+#![doc(rust_logo)]
+#![feature(rustdoc_internals)]
+#![allow(internal_features)]
+#![allow(rustc::diagnostic_outside_of_impl)]
+#![allow(rustc::untranslatable_diagnostic)]
+#![feature(assert_matches)]
 #![feature(associated_type_bounds)]
+#![feature(associated_type_defaults)]
 #![feature(box_patterns)]
 #![feature(control_flow_enum)]
-#![feature(drain_filter)]
-#![feature(hash_drain_filter)]
+#![feature(extract_if)]
 #![feature(let_chains)]
-#![feature(if_let_guard)]
+#![feature(option_take_if)]
 #![feature(never_type)]
-#![feature(result_option_inspect)]
 #![feature(type_alias_impl_trait)]
-#![feature(min_specialization)]
+#![cfg_attr(bootstrap, feature(min_specialization))]
 #![recursion_limit = "512"] // For rustdoc
 
 #[macro_use]
@@ -36,12 +41,10 @@ extern crate rustc_middle;
 #[macro_use]
 extern crate smallvec;
 
-use rustc_errors::{DiagnosticMessage, SubdiagnosticMessage};
-use rustc_macros::fluent_messages;
-
 pub mod errors;
 pub mod infer;
+pub mod regions;
 pub mod solve;
 pub mod traits;
 
-fluent_messages! { "../messages.ftl" }
+rustc_fluent_macro::fluent_messages! { "../messages.ftl" }

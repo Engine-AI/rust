@@ -1,11 +1,15 @@
-use super::{possible_origin::PossibleOriginVisitor, transitive_relation::TransitiveRelation};
+use super::possible_origin::PossibleOriginVisitor;
+use super::transitive_relation::TransitiveRelation;
 use crate::ty::is_copy;
 use rustc_data_structures::fx::FxHashMap;
 use rustc_index::bit_set::{BitSet, HybridBitSet};
 use rustc_lint::LateContext;
-use rustc_middle::mir::{self, visit::Visitor as _, Mutability};
-use rustc_middle::ty::{self, visit::TypeVisitor, TyCtxt};
-use rustc_mir_dataflow::{impls::MaybeStorageLive, Analysis, ResultsCursor};
+use rustc_middle::mir::visit::Visitor as _;
+use rustc_middle::mir::{self, Mutability};
+use rustc_middle::ty::visit::TypeVisitor;
+use rustc_middle::ty::{self, TyCtxt};
+use rustc_mir_dataflow::impls::MaybeStorageLive;
+use rustc_mir_dataflow::{Analysis, ResultsCursor};
 use std::borrow::Cow;
 use std::ops::ControlFlow;
 
@@ -100,7 +104,7 @@ impl<'a, 'b, 'tcx> mir::visit::Visitor<'tcx> for PossibleBorrowerVisitor<'a, 'b,
             let mut mutable_borrowers = vec![];
 
             for op in args {
-                match op {
+                match &op.node {
                     mir::Operand::Copy(p) | mir::Operand::Move(p) => {
                         if let ty::Ref(_, _, Mutability::Mut) = self.body.local_decls[p.local].ty.kind() {
                             mutable_borrowers.push(p.local);
@@ -137,9 +141,9 @@ impl<'a, 'b, 'tcx> mir::visit::Visitor<'tcx> for PossibleBorrowerVisitor<'a, 'b,
 struct ContainsRegion;
 
 impl TypeVisitor<TyCtxt<'_>> for ContainsRegion {
-    type BreakTy = ();
+    type Result = ControlFlow<()>;
 
-    fn visit_region(&mut self, _: ty::Region<'_>) -> ControlFlow<Self::BreakTy> {
+    fn visit_region(&mut self, _: ty::Region<'_>) -> Self::Result {
         ControlFlow::Break(())
     }
 }

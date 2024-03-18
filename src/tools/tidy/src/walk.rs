@@ -4,6 +4,8 @@ use std::{ffi::OsStr, fs::File, io::Read, path::Path};
 
 /// The default directory filter.
 pub fn filter_dirs(path: &Path) -> bool {
+    // FIXME: sync submodule exclusion list with rustfmt.toml
+    // bootstrap/etc
     let skip = [
         "tidy-test-file",
         "compiler/rustc_codegen_cranelift",
@@ -15,9 +17,7 @@ pub fn filter_dirs(path: &Path) -> bool {
         "src/tools/cargo",
         "src/tools/clippy",
         "src/tools/miri",
-        "src/tools/rls",
         "src/tools/rust-analyzer",
-        "src/tools/rust-installer",
         "src/tools/rustfmt",
         "src/doc/book",
         "src/doc/edition-guide",
@@ -83,6 +83,23 @@ pub(crate) fn walk_no_read(
                 continue;
             }
             f(&entry);
+        }
+    }
+}
+
+// Walk through directories and skip symlinks.
+pub(crate) fn walk_dir(
+    path: &Path,
+    skip: impl Send + Sync + 'static + Fn(&Path) -> bool,
+    f: &mut dyn FnMut(&DirEntry),
+) {
+    let mut walker = ignore::WalkBuilder::new(path);
+    let walker = walker.filter_entry(move |e| !skip(e.path()));
+    for entry in walker.build() {
+        if let Ok(entry) = entry {
+            if entry.path().is_dir() {
+                f(&entry);
+            }
         }
     }
 }

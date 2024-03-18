@@ -1,3 +1,5 @@
+#![allow(invalid_from_utf8)]
+
 use std::assert_matches::assert_matches;
 use std::borrow::Cow;
 use std::cmp::Ordering::{Equal, Greater, Less};
@@ -1169,6 +1171,17 @@ fn test_iterator() {
 }
 
 #[test]
+fn test_iterator_advance() {
+    let s = "「赤錆」と呼ばれる鉄錆は、水の存在下での鉄の自然酸化によって生じる、オキシ水酸化鉄(III) 等の（含水）酸化物粒子の疎な凝集膜であるとみなせる。";
+    let chars: Vec<char> = s.chars().collect();
+    let mut it = s.chars();
+    it.advance_by(1).unwrap();
+    assert_eq!(it.next(), Some(chars[1]));
+    it.advance_by(33).unwrap();
+    assert_eq!(it.next(), Some(chars[35]));
+}
+
+#[test]
 fn test_rev_iterator() {
     let s = "ศไทย中华Việt Nam";
     let v = ['m', 'a', 'N', ' ', 't', 'ệ', 'i', 'V', '华', '中', 'ย', 'ท', 'ไ', 'ศ'];
@@ -1734,6 +1747,28 @@ fn test_rev_split_char_iterator_no_trailing() {
 #[test]
 fn test_utf16_code_units() {
     assert_eq!("é\u{1F4A9}".encode_utf16().collect::<Vec<u16>>(), [0xE9, 0xD83D, 0xDCA9])
+}
+
+#[test]
+fn test_utf16_size_hint() {
+    assert_eq!("".encode_utf16().size_hint(), (0, Some(0)));
+    assert_eq!("123".encode_utf16().size_hint(), (1, Some(3)));
+    assert_eq!("1234".encode_utf16().size_hint(), (2, Some(4)));
+    assert_eq!("12345678".encode_utf16().size_hint(), (3, Some(8)));
+
+    fn hint_vec(src: &str) -> Vec<(usize, Option<usize>)> {
+        let mut it = src.encode_utf16();
+        let mut result = Vec::new();
+        result.push(it.size_hint());
+        while it.next().is_some() {
+            result.push(it.size_hint())
+        }
+        result
+    }
+
+    assert_eq!(hint_vec("12"), [(1, Some(2)), (1, Some(1)), (0, Some(0))]);
+    assert_eq!(hint_vec("\u{101234}"), [(2, Some(4)), (1, Some(1)), (0, Some(0))]);
+    assert_eq!(hint_vec("\u{101234}a"), [(2, Some(5)), (2, Some(2)), (1, Some(1)), (0, Some(0))]);
 }
 
 #[test]
@@ -2414,10 +2449,7 @@ fn ceil_char_boundary() {
     check_many("🇯🇵", 0..=0, 0);
     check_many("🇯🇵", 1..=4, 4);
     check_many("🇯🇵", 5..=8, 8);
-}
 
-#[test]
-#[should_panic]
-fn ceil_char_boundary_above_len_panic() {
-    let _ = "x".ceil_char_boundary(2);
+    // above len
+    check_many("hello", 5..=10, 5);
 }

@@ -1,13 +1,15 @@
-use crate::errors::{InvalidMetaItem, SuffixedLiteralInAttribute};
+use crate::errors::{
+    InvalidMetaItem, InvalidMetaItemSuggQuoteIdent, InvalidMetaItemUnquotedIdent,
+    SuffixedLiteralInAttribute,
+};
 use crate::fluent_generated as fluent;
 
 use super::{AttrWrapper, Capturing, FnParseMode, ForceCollect, Parser, PathStyle};
 use rustc_ast as ast;
 use rustc_ast::attr;
 use rustc_ast::token::{self, Delimiter, Nonterminal};
-use rustc_errors::{error_code, Diagnostic, IntoDiagnostic, PResult};
+use rustc_errors::{codes::*, Diag, PResult};
 use rustc_span::{sym, BytePos, Span};
-use std::convert::TryInto;
 use thin_vec::ThinVec;
 use tracing::debug;
 
@@ -36,7 +38,7 @@ impl<'a> Parser<'a> {
     pub(super) fn parse_outer_attributes(&mut self) -> PResult<'a, AttrWrapper> {
         let mut outer_attrs = ast::AttrVec::new();
         let mut just_parsed_doc_comment = false;
-        let start_pos = self.token_cursor.num_next_calls;
+        let start_pos = self.num_bump_calls;
         loop {
             let attr = if self.check(&token::Pound) {
                 let prev_outer_attr_sp = outer_attrs.last().map(|attr| attr.span);
@@ -45,10 +47,10 @@ impl<'a> Parser<'a> {
                     Some(InnerAttrForbiddenReason::AfterOuterDocComment {
                         prev_doc_comment_span: prev_outer_attr_sp.unwrap(),
                     })
-                } else if let Some(prev_outer_attr_sp) = prev_outer_attr_sp {
-                    Some(InnerAttrForbiddenReason::AfterOuterAttribute { prev_outer_attr_sp })
                 } else {
-                    None
+                    prev_outer_attr_sp.map(|prev_outer_attr_sp| {
+                        InnerAttrForbiddenReason::AfterOuterAttribute { prev_outer_attr_sp }
+                    })
                 };
                 let inner_parse_policy = InnerAttrPolicy::Forbidden(inner_error_reason);
                 just_parsed_doc_comment = false;
@@ -56,11 +58,10 @@ impl<'a> Parser<'a> {
             } else if let token::DocComment(comment_kind, attr_style, data) = self.token.kind {
                 if attr_style != ast::AttrStyle::Outer {
                     let span = self.token.span;
-                    let mut err = self.sess.span_diagnostic.struct_span_err_with_code(
-                        span,
-                        fluent::parse_inner_doc_comment_not_permitted,
-                        error_code!(E0753),
-                    );
+                    let mut err = self
+                        .dcx()
+                        .struct_span_err(span, fluent::parse_inner_doc_comment_not_permitted);
+                    err.code(E0753);
                     if let Some(replacement_span) = self.annotate_following_item_if_applicable(
                         &mut err,
                         span,
@@ -84,7 +85,7 @@ impl<'a> Parser<'a> {
                 // Always make an outer attribute - this allows us to recover from a misplaced
                 // inner attribute.
                 Some(attr::mk_doc_comment(
-                    &self.sess.attr_id_generator,
+                    &self.psess.attr_id_generator,
                     comment_kind,
                     ast::AttrStyle::Outer,
                     data,
@@ -134,13 +135,13 @@ impl<'a> Parser<'a> {
                 this.error_on_forbidden_inner_attr(attr_sp, inner_parse_policy);
             }
 
-            Ok(attr::mk_attr_from_item(&self.sess.attr_id_generator, item, None, style, attr_sp))
+            Ok(attr::mk_attr_from_item(&self.psess.attr_id_generator, item, None, style, attr_sp))
         })
     }
 
     fn annotate_following_item_if_applicable(
         &self,
-        err: &mut Diagnostic,
+        err: &mut Diag<'_>,
         span: Span,
         attr_type: OuterAttributeType,
     ) -> Option<Span> {
@@ -175,7 +176,7 @@ impl<'a> Parser<'a> {
         ) {
             Ok(Some(item)) => {
                 // FIXME(#100717)
-                err.set_arg("item", item.kind.descr());
+                err.arg("item", item.kind.descr());
                 err.span_label(item.span, fluent::parse_label_does_not_annotate_this);
                 err.span_suggestion_verbose(
                     replacement_span,
@@ -201,25 +202,27 @@ impl<'a> Parser<'a> {
         if let InnerAttrPolicy::Forbidden(reason) = policy {
             let mut diag = match reason.as_ref().copied() {
                 Some(InnerAttrForbiddenReason::AfterOuterDocComment { prev_doc_comment_span }) => {
-                    let mut diag = self.struct_span_err(
-                        attr_sp,
-                        fluent::parse_inner_attr_not_permitted_after_outer_doc_comment,
-                    );
-                    diag.span_label(attr_sp, fluent::parse_label_attr)
-                        .span_label(prev_doc_comment_span, fluent::parse_label_prev_doc_comment);
-                    diag
+                    self.dcx()
+                        .struct_span_err(
+                            attr_sp,
+                            fluent::parse_inner_attr_not_permitted_after_outer_doc_comment,
+                        )
+                        .with_span_label(attr_sp, fluent::parse_label_attr)
+                        .with_span_label(
+                            prev_doc_comment_span,
+                            fluent::parse_label_prev_doc_comment,
+                        )
                 }
-                Some(InnerAttrForbiddenReason::AfterOuterAttribute { prev_outer_attr_sp }) => {
-                    let mut diag = self.struct_span_err(
+                Some(InnerAttrForbiddenReason::AfterOuterAttribute { prev_outer_attr_sp }) => self
+                    .dcx()
+                    .struct_span_err(
                         attr_sp,
                         fluent::parse_inner_attr_not_permitted_after_outer_attr,
-                    );
-                    diag.span_label(attr_sp, fluent::parse_label_attr)
-                        .span_label(prev_outer_attr_sp, fluent::parse_label_prev_attr);
-                    diag
-                }
+                    )
+                    .with_span_label(attr_sp, fluent::parse_label_attr)
+                    .with_span_label(prev_outer_attr_sp, fluent::parse_label_prev_attr),
                 Some(InnerAttrForbiddenReason::InCodeBlock) | None => {
-                    self.struct_span_err(attr_sp, fluent::parse_inner_attr_not_permitted)
+                    self.dcx().struct_span_err(attr_sp, fluent::parse_inner_attr_not_permitted)
                 }
             };
 
@@ -249,7 +252,7 @@ impl<'a> Parser<'a> {
     /// The delimiters or `=` are still put into the resulting token stream.
     pub fn parse_attr_item(&mut self, capture_tokens: bool) -> PResult<'a, ast::AttrItem> {
         let item = match &self.token.kind {
-            token::Interpolated(nt) => match &**nt {
+            token::Interpolated(nt) => match &nt.0 {
                 Nonterminal::NtMeta(item) => Some(item.clone().into_inner()),
                 _ => None,
             },
@@ -277,7 +280,7 @@ impl<'a> Parser<'a> {
     pub(crate) fn parse_inner_attributes(&mut self) -> PResult<'a, ast::AttrVec> {
         let mut attrs = ast::AttrVec::new();
         loop {
-            let start_pos: u32 = self.token_cursor.num_next_calls.try_into().unwrap();
+            let start_pos: u32 = self.num_bump_calls.try_into().unwrap();
             // Only try to parse if it is an inner attribute (has `!`).
             let attr = if self.check(&token::Pound) && self.look_ahead(1, |t| t == &token::Not) {
                 Some(self.parse_attribute(InnerAttrPolicy::Permitted)?)
@@ -285,7 +288,7 @@ impl<'a> Parser<'a> {
                 if attr_style == ast::AttrStyle::Inner {
                     self.bump();
                     Some(attr::mk_doc_comment(
-                        &self.sess.attr_id_generator,
+                        &self.psess.attr_id_generator,
                         comment_kind,
                         attr_style,
                         data,
@@ -298,7 +301,7 @@ impl<'a> Parser<'a> {
                 None
             };
             if let Some(attr) = attr {
-                let end_pos: u32 = self.token_cursor.num_next_calls.try_into().unwrap();
+                let end_pos: u32 = self.num_bump_calls.try_into().unwrap();
                 // If we are currently capturing tokens, mark the location of this inner attribute.
                 // If capturing ends up creating a `LazyAttrTokenStream`, we will include
                 // this replace range with it, removing the inner attribute from the final
@@ -324,7 +327,7 @@ impl<'a> Parser<'a> {
         debug!("checking if {:?} is unsuffixed", lit);
 
         if !lit.kind.is_unsuffixed() {
-            self.sess.emit_err(SuffixedLiteralInAttribute { span: lit.span });
+            self.dcx().emit_err(SuffixedLiteralInAttribute { span: lit.span });
         }
 
         Ok(lit)
@@ -369,7 +372,7 @@ impl<'a> Parser<'a> {
     /// ```
     pub fn parse_meta_item(&mut self) -> PResult<'a, ast::MetaItem> {
         let nt_meta = match &self.token.kind {
-            token::Interpolated(nt) => match &**nt {
+            token::Interpolated(nt) => match &nt.0 {
                 token::NtMeta(e) => Some(e.clone()),
                 _ => None,
             },
@@ -417,20 +420,35 @@ impl<'a> Parser<'a> {
             Err(err) => err.cancel(),
         }
 
-        Err(InvalidMetaItem { span: self.token.span, token: self.token.clone() }
-            .into_diagnostic(&self.sess.span_diagnostic))
+        let token = self.token.clone();
+
+        // Check for unquoted idents in meta items, e.g.: #[cfg(key = foo)]
+        // `from_expansion()` ensures we don't suggest for cases such as
+        // `#[cfg(feature = $expr)]` in macros
+        if self.prev_token == token::Eq && !self.token.span.from_expansion() {
+            let before = self.token.span.shrink_to_lo();
+            while matches!(self.token.kind, token::Ident(..)) {
+                self.bump();
+            }
+            let after = self.prev_token.span.shrink_to_hi();
+            let sugg = InvalidMetaItemSuggQuoteIdent { before, after };
+            return Err(self.dcx().create_err(InvalidMetaItemUnquotedIdent {
+                span: token.span,
+                token,
+                sugg,
+            }));
+        }
+
+        Err(self.dcx().create_err(InvalidMetaItem { span: token.span, token }))
     }
 }
 
-pub fn maybe_needs_tokens(attrs: &[ast::Attribute]) -> bool {
-    // One of the attributes may either itself be a macro,
-    // or expand to macro attributes (`cfg_attr`).
-    attrs.iter().any(|attr| {
-        if attr.is_doc_comment() {
-            return false;
-        }
-        attr.ident().map_or(true, |ident| {
-            ident.name == sym::cfg_attr || !rustc_feature::is_builtin_attr_name(ident.name)
-        })
+/// The attributes are complete if all attributes are either a doc comment or a builtin attribute other than `cfg_attr`
+pub fn is_complete(attrs: &[ast::Attribute]) -> bool {
+    attrs.iter().all(|attr| {
+        attr.is_doc_comment()
+            || attr.ident().is_some_and(|ident| {
+                ident.name != sym::cfg_attr && rustc_feature::is_builtin_attr_name(ident.name)
+            })
     })
 }

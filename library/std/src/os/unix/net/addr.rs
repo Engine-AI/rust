@@ -21,7 +21,7 @@ mod libc {
 fn sun_path_offset(addr: &libc::sockaddr_un) -> usize {
     // Work with an actual instance of the type since using a null pointer is UB
     let base = (addr as *const libc::sockaddr_un).addr();
-    let path = (&addr.sun_path as *const libc::c_char).addr();
+    let path = core::ptr::addr_of!(addr.sun_path).addr();
     path - base
 }
 
@@ -98,7 +98,7 @@ impl SocketAddr {
         unsafe {
             let mut addr: libc::sockaddr_un = mem::zeroed();
             let mut len = mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
-            cvt(f(&mut addr as *mut _ as *mut _, &mut len))?;
+            cvt(f(core::ptr::addr_of_mut!(addr) as *mut _, &mut len))?;
             SocketAddr::from_parts(addr, len)
         }
     }
@@ -245,12 +245,12 @@ impl SocketAddr {
     }
 }
 
-#[stable(feature = "unix_socket_abstract", since = "CURRENT_RUSTC_VERSION")]
+#[stable(feature = "unix_socket_abstract", since = "1.70.0")]
 impl Sealed for SocketAddr {}
 
 #[doc(cfg(any(target_os = "android", target_os = "linux")))]
 #[cfg(any(doc, target_os = "android", target_os = "linux"))]
-#[stable(feature = "unix_socket_abstract", since = "CURRENT_RUSTC_VERSION")]
+#[stable(feature = "unix_socket_abstract", since = "1.70.0")]
 impl linux_ext::addr::SocketAddrExt for SocketAddr {
     fn as_abstract_name(&self) -> Option<&[u8]> {
         if let AddressKind::Abstract(name) = self.address() { Some(name) } else { None }

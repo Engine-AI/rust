@@ -2,7 +2,8 @@ use clippy_utils::diagnostics::span_lint_and_then;
 use clippy_utils::source::{snippet, snippet_with_applicability};
 use clippy_utils::{path_def_id, qpath_generic_tys};
 use rustc_errors::Applicability;
-use rustc_hir::{self as hir, def_id::DefId, QPath, TyKind};
+use rustc_hir::def_id::DefId;
+use rustc_hir::{self as hir, QPath, TyKind};
 use rustc_hir_analysis::hir_ty_to_ty;
 use rustc_lint::LateContext;
 use rustc_middle::ty::TypeVisitableExt;
@@ -10,7 +11,7 @@ use rustc_span::symbol::sym;
 
 use super::{utils, REDUNDANT_ALLOCATION};
 
-pub(super) fn check(cx: &LateContext<'_>, hir_ty: &hir::Ty<'_>, qpath: &QPath<'_>, def_id: DefId) -> bool {
+pub(super) fn check<'tcx>(cx: &LateContext<'tcx>, hir_ty: &hir::Ty<'tcx>, qpath: &QPath<'tcx>, def_id: DefId) -> bool {
     let mut applicability = Applicability::MaybeIncorrect;
     let outer_sym = if Some(def_id) == cx.tcx.lang_items().owned_box() {
         "Box"
@@ -39,7 +40,9 @@ pub(super) fn check(cx: &LateContext<'_>, hir_ty: &hir::Ty<'_>, qpath: &QPath<'_
         return true;
     }
 
-    let Some(ty) = qpath_generic_tys(qpath).next() else { return false };
+    let Some(ty) = qpath_generic_tys(qpath).next() else {
+        return false;
+    };
     let Some(id) = path_def_id(cx, ty) else { return false };
     let (inner_sym, ty) = match cx.tcx.get_diagnostic_name(id) {
         Some(sym::Arc) => ("Arc", ty),
@@ -49,7 +52,7 @@ pub(super) fn check(cx: &LateContext<'_>, hir_ty: &hir::Ty<'_>, qpath: &QPath<'_
     };
 
     let TyKind::Path(inner_qpath) = &ty.kind else {
-        return false
+        return false;
     };
     let inner_span = match qpath_generic_tys(inner_qpath).next() {
         Some(hir_ty) => {

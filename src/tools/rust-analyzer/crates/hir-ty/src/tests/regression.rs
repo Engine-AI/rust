@@ -246,6 +246,7 @@ fn infer_std_crash_5() {
     // taken from rustc
     check_infer(
         r#"
+        //- minicore: iterator
         fn extra_compiler_flags() {
             for content in doesnt_matter {
                 let name = if doesnt_matter {
@@ -264,13 +265,22 @@ fn infer_std_crash_5() {
         "#,
         expect![[r#"
             26..322 '{     ...   } }': ()
+            32..320 'for co...     }': fn into_iter<{unknown}>({unknown}) -> <{unknown} as IntoIterator>::IntoIter
+            32..320 'for co...     }': {unknown}
+            32..320 'for co...     }': !
+            32..320 'for co...     }': {unknown}
+            32..320 'for co...     }': &mut {unknown}
+            32..320 'for co...     }': fn next<{unknown}>(&mut {unknown}) -> Option<<{unknown} as Iterator>::Item>
+            32..320 'for co...     }': Option<{unknown}>
+            32..320 'for co...     }': ()
+            32..320 'for co...     }': ()
             32..320 'for co...     }': ()
             36..43 'content': {unknown}
             47..60 'doesnt_matter': {unknown}
             61..320 '{     ...     }': ()
             75..79 'name': &{unknown}
             82..166 'if doe...     }': &{unknown}
-            85..98 'doesnt_matter': {unknown}
+            85..98 'doesnt_matter': bool
             99..128 '{     ...     }': &{unknown}
             113..118 'first': &{unknown}
             134..166 '{     ...     }': &{unknown}
@@ -279,7 +289,7 @@ fn infer_std_crash_5() {
             181..188 'content': &{unknown}
             191..313 'if ICE...     }': &{unknown}
             194..231 'ICE_RE..._VALUE': {unknown}
-            194..247 'ICE_RE...&name)': {unknown}
+            194..247 'ICE_RE...&name)': bool
             241..246 '&name': &&{unknown}
             242..246 'name': &{unknown}
             248..276 '{     ...     }': &{unknown}
@@ -634,7 +644,7 @@ fn issue_4953() {
         "#,
         expect![[r#"
             58..72 '{ Self(0i64) }': Foo
-            60..64 'Self': Foo(i64) -> Foo
+            60..64 'Self': extern "rust-call" Foo(i64) -> Foo
             60..70 'Self(0i64)': Foo
             65..69 '0i64': i64
         "#]],
@@ -648,7 +658,7 @@ fn issue_4953() {
         "#,
         expect![[r#"
             64..78 '{ Self(0i64) }': Foo<i64>
-            66..70 'Self': Foo<i64>(i64) -> Foo<i64>
+            66..70 'Self': extern "rust-call" Foo<i64>(i64) -> Foo<i64>
             66..76 'Self(0i64)': Foo<i64>
             71..75 '0i64': i64
         "#]],
@@ -805,19 +815,19 @@ fn issue_4966() {
             225..229 'iter': T
             244..246 '{}': Vec<A>
             258..402 '{     ...r(); }': ()
-            268..273 'inner': Map<|&f64| -> f64>
-            276..300 'Map { ... 0.0 }': Map<|&f64| -> f64>
-            285..298 '|_: &f64| 0.0': |&f64| -> f64
+            268..273 'inner': Map<impl Fn(&f64) -> f64>
+            276..300 'Map { ... 0.0 }': Map<impl Fn(&f64) -> f64>
+            285..298 '|_: &f64| 0.0': impl Fn(&f64) -> f64
             286..287 '_': &f64
             295..298 '0.0': f64
-            311..317 'repeat': Repeat<Map<|&f64| -> f64>>
-            320..345 'Repeat...nner }': Repeat<Map<|&f64| -> f64>>
-            338..343 'inner': Map<|&f64| -> f64>
-            356..359 'vec': Vec<IntoIterator::Item<Repeat<Map<|&f64| -> f64>>>>
-            362..371 'from_iter': fn from_iter<IntoIterator::Item<Repeat<Map<|&f64| -> f64>>>, Repeat<Map<|&f64| -> f64>>>(Repeat<Map<|&f64| -> f64>>) -> Vec<IntoIterator::Item<Repeat<Map<|&f64| -> f64>>>>
-            362..379 'from_i...epeat)': Vec<IntoIterator::Item<Repeat<Map<|&f64| -> f64>>>>
-            372..378 'repeat': Repeat<Map<|&f64| -> f64>>
-            386..389 'vec': Vec<IntoIterator::Item<Repeat<Map<|&f64| -> f64>>>>
+            311..317 'repeat': Repeat<Map<impl Fn(&f64) -> f64>>
+            320..345 'Repeat...nner }': Repeat<Map<impl Fn(&f64) -> f64>>
+            338..343 'inner': Map<impl Fn(&f64) -> f64>
+            356..359 'vec': Vec<IntoIterator::Item<Repeat<Map<impl Fn(&f64) -> f64>>>>
+            362..371 'from_iter': fn from_iter<IntoIterator::Item<Repeat<Map<impl Fn(&f64) -> f64>>>, Repeat<Map<impl Fn(&f64) -> f64>>>(Repeat<Map<impl Fn(&f64) -> f64>>) -> Vec<IntoIterator::Item<Repeat<Map<impl Fn(&f64) -> f64>>>>
+            362..379 'from_i...epeat)': Vec<IntoIterator::Item<Repeat<Map<impl Fn(&f64) -> f64>>>>
+            372..378 'repeat': Repeat<Map<impl Fn(&f64) -> f64>>
+            386..389 'vec': Vec<IntoIterator::Item<Repeat<Map<impl Fn(&f64) -> f64>>>>
             386..399 'vec.foo_bar()': {unknown}
         "#]],
     );
@@ -848,11 +858,11 @@ fn main() {
             94..96 '{}': ()
             109..160 '{     ...10); }': ()
             119..120 's': S<i32>
-            123..124 'S': S<i32>() -> S<i32>
+            123..124 'S': extern "rust-call" S<i32>() -> S<i32>
             123..126 'S()': S<i32>
             132..133 's': S<i32>
             132..144 's.g(|_x| {})': ()
-            136..143 '|_x| {}': |&i32| -> ()
+            136..143 '|_x| {}': impl FnOnce(&i32)
             137..139 '_x': &i32
             141..143 '{}': ()
             150..151 's': S<i32>
@@ -886,13 +896,13 @@ fn flush(&self) {
 "#,
         expect![[r#"
             123..127 'self': &Mutex<T>
-            150..152 '{}': MutexGuard<T>
+            150..152 '{}': MutexGuard<'_, T>
             234..238 'self': &{unknown}
             240..290 '{     ...()); }': ()
             250..251 'w': &Mutex<BufWriter>
             276..287 '*(w.lock())': BufWriter
             278..279 'w': &Mutex<BufWriter>
-            278..286 'w.lock()': MutexGuard<BufWriter>
+            278..286 'w.lock()': MutexGuard<'_, BufWriter>
         "#]],
     );
 }
@@ -1060,11 +1070,28 @@ fn infix_parse<T, S>(_state: S, _level_code: &Fn(S)) -> T {
     loop {}
 }
 
-fn parse_arule() {
+fn parse_a_rule() {
     infix_parse((), &(|_recurse| ()))
 }
         "#,
     )
+}
+
+#[test]
+fn nested_closure() {
+    check_types(
+        r#"
+//- minicore: fn, option
+
+fn map<T, U>(o: Option<T>, f: impl FnOnce(T) -> U) -> Option<U> { loop {} }
+
+fn test() {
+    let o = Some(Some(2));
+    map(o, |s| map(s, |x| x));
+                    // ^ i32
+}
+        "#,
+    );
 }
 
 #[test]
@@ -1198,6 +1225,7 @@ fn mamba(a: U32!(), p: u32) -> u32 {
 fn for_loop_block_expr_iterable() {
     check_infer(
         r#"
+//- minicore: iterator
 fn test() {
     for _ in { let x = 0; } {
         let y = 0;
@@ -1206,8 +1234,17 @@ fn test() {
         "#,
         expect![[r#"
             10..68 '{     ...   } }': ()
+            16..66 'for _ ...     }': fn into_iter<()>(()) -> <() as IntoIterator>::IntoIter
+            16..66 'for _ ...     }': IntoIterator::IntoIter<()>
+            16..66 'for _ ...     }': !
+            16..66 'for _ ...     }': IntoIterator::IntoIter<()>
+            16..66 'for _ ...     }': &mut IntoIterator::IntoIter<()>
+            16..66 'for _ ...     }': fn next<IntoIterator::IntoIter<()>>(&mut IntoIterator::IntoIter<()>) -> Option<<IntoIterator::IntoIter<()> as Iterator>::Item>
+            16..66 'for _ ...     }': Option<IntoIterator::Item<()>>
             16..66 'for _ ...     }': ()
-            20..21 '_': {unknown}
+            16..66 'for _ ...     }': ()
+            16..66 'for _ ...     }': ()
+            20..21 '_': IntoIterator::Item<()>
             25..39 '{ let x = 0; }': ()
             31..32 'x': i32
             35..36 '0': i32
@@ -1230,6 +1267,8 @@ fn test() {
         "#,
         expect![[r#"
             10..59 '{     ...   } }': ()
+            16..57 'while ...     }': !
+            16..57 'while ...     }': ()
             16..57 'while ...     }': ()
             22..30 '{ true }': bool
             24..28 'true': bool
@@ -1458,13 +1497,12 @@ fn regression_11688_3() {
         struct Ar<T, const N: u8>(T);
         fn f<const LEN: usize, T, const BASE: u8>(
             num_zeros: usize,
-        ) -> dyn Iterator<Item = [Ar<T, BASE>; LEN]> {
+        ) -> &dyn Iterator<Item = [Ar<T, BASE>; LEN]> {
             loop {}
         }
         fn dynamic_programming() {
-            for board in f::<9, u8, 7>(1) {
-              //^^^^^ [Ar<u8, 7>; 9]
-            }
+            let board = f::<9, u8, 7>(1).next();
+              //^^^^^ Option<[Ar<u8, 7>; 9]>
         }
         "#,
     );
@@ -1651,18 +1689,18 @@ fn main() {
 }
         "#,
         expect![[r#"
-        27..85 '{     ...1,); }': ()
-        37..48 'S(.., a, b)': S
-        43..44 'a': usize
-        46..47 'b': {unknown}
-        51..52 'S': S(usize) -> S
-        51..55 'S(1)': S
-        53..54 '1': usize
-        65..75 '(.., a, b)': (i32, {unknown})
-        70..71 'a': i32
-        73..74 'b': {unknown}
-        78..82 '(1,)': (i32,)
-        79..80 '1': i32
+            27..85 '{     ...1,); }': ()
+            37..48 'S(.., a, b)': S
+            43..44 'a': usize
+            46..47 'b': {unknown}
+            51..52 'S': extern "rust-call" S(usize) -> S
+            51..55 'S(1)': S
+            53..54 '1': usize
+            65..75 '(.., a, b)': (i32, {unknown})
+            70..71 'a': i32
+            73..74 'b': {unknown}
+            78..82 '(1,)': (i32,)
+            79..80 '1': i32
         "#]],
     );
 }
@@ -1758,6 +1796,21 @@ const C: usize = 2 + 2;
 }
 
 #[test]
+fn regression_14456() {
+    check_types(
+        r#"
+//- minicore: future
+async fn x() {}
+fn f() {
+    let fut = x();
+    let t = [0u8; { let a = 2 + 2; a }];
+      //^ [u8; 4]
+}
+"#,
+    );
+}
+
+#[test]
 fn regression_14164() {
     check_types(
         r#"
@@ -1787,4 +1840,203 @@ where
 }
 "#,
     );
+}
+
+#[test]
+fn match_ergonomics_with_binding_modes_interaction() {
+    check_types(
+        r"
+enum E { A }
+fn foo() {
+    match &E::A {
+        b @ (x @ E::A | x) => {
+            b;
+          //^ &E
+            x;
+          //^ &E
+        }
+    }
+}",
+    );
+}
+
+#[test]
+fn regression_14844() {
+    check_no_mismatches(
+        r#"
+pub type Ty = Unknown;
+
+pub struct Inner<T>();
+
+pub struct Outer {
+    pub inner: Inner<Ty>,
+}
+
+fn main() {
+    _ = Outer {
+        inner: Inner::<i32>(),
+    };
+}
+        "#,
+    );
+    check_no_mismatches(
+        r#"
+pub const ONE: usize = 1;
+
+pub struct Inner<const P: usize>();
+
+pub struct Outer {
+    pub inner: Inner<ONE>,
+}
+
+fn main() {
+    _ = Outer {
+        inner: Inner::<1>(),
+    };
+}
+        "#,
+    );
+    check_no_mismatches(
+        r#"
+pub const ONE: usize = unknown();
+
+pub struct Inner<const P: usize>();
+
+pub struct Outer {
+    pub inner: Inner<ONE>,
+}
+
+fn main() {
+    _ = Outer {
+        inner: Inner::<1>(),
+    };
+}
+        "#,
+    );
+    check_no_mismatches(
+        r#"
+pub const N: usize = 2 + 2;
+
+fn f(t: [u8; N]) {}
+
+fn main() {
+    let a = [1, 2, 3, 4];
+    f(a);
+    let b = [1; 4];
+    let c: [u8; N] = b;
+    let d = [1; N];
+    let e: [u8; N] = d;
+    let f = [1; N];
+    let g = match f {
+        [a, b, c, d] => a + b + c + d,
+    };
+}
+        "#,
+    );
+}
+
+#[test]
+fn regression_14844_2() {
+    check_no_mismatches(
+        r#"
+//- minicore: fn
+pub const ONE: usize = 1;
+
+pub type MyInner = Inner<ONE>;
+
+pub struct Inner<const P: usize>();
+
+impl Inner<1> {
+    fn map<F>(&self, func: F) -> bool
+    where
+        F: Fn(&MyInner) -> bool,
+    {
+        func(self)
+    }
+}
+        "#,
+    );
+}
+
+#[test]
+fn dont_crash_on_slice_unsizing() {
+    check_no_mismatches(
+        r#"
+//- minicore: slice, unsize, coerce_unsized
+trait Tr {
+    fn f(self);
+}
+
+impl Tr for [i32] {
+    fn f(self) {
+        let t;
+        x(t);
+    }
+}
+
+fn x(a: [i32; 4]) {
+    let b = a.f();
+}
+        "#,
+    );
+}
+
+#[test]
+fn dont_unify_on_casts() {
+    // #15246
+    check_types(
+        r#"
+fn unify(_: [bool; 1]) {}
+fn casted(_: *const bool) {}
+fn default<T>() -> T { loop {} }
+
+fn test() {
+    let foo = default();
+      //^^^ [bool; 1]
+
+    casted(&foo as *const _);
+    unify(foo);
+}
+"#,
+    );
+}
+
+#[test]
+fn rustc_test_issue_52437() {
+    check_types(
+        r#"
+    fn main() {
+        let x = [(); &(&'static: loop { |x| {}; }) as *const _ as usize]
+          //^ [(); _]
+    }
+    "#,
+    );
+}
+
+#[test]
+fn incorrect_variant_form_through_alias_caught() {
+    check_types(
+        r#"
+enum Enum { Braced {}, Unit, Tuple() }
+type Alias = Enum;
+
+fn main() {
+    Alias::Braced;
+  //^^^^^^^^^^^^^ {unknown}
+    let Alias::Braced = loop {};
+      //^^^^^^^^^^^^^ !
+  let Alias::Braced(..) = loop {};
+    //^^^^^^^^^^^^^^^^^ Enum
+
+    Alias::Unit();
+  //^^^^^^^^^^^^^ {unknown}
+    Alias::Unit{};
+  //^^^^^^^^^^^^^ Enum
+    let Alias::Unit() = loop {};
+      //^^^^^^^^^^^^^ Enum
+    let Alias::Unit{} = loop {};
+      //^^^^^^^^^^^^^ Enum
+}
+"#,
+    )
 }

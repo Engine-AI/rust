@@ -27,7 +27,6 @@ fn d<const C: S>() {}
 
 trait Foo<'a> {}
 struct Bar<const N: &'a (dyn for<'a> Foo<'a>)>;
-//~^ ERROR use of non-static lifetime `'a` in const generic
-//~| ERROR `&dyn for<'a> Foo<'a>` is forbidden as the type of a const generic parameter
+//~^ ERROR the type of const parameters must not depend on other generic parameters
 
 fn main() {}

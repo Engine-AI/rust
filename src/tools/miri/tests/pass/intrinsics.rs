@@ -3,7 +3,7 @@
 //! Tests for various intrinsics that do not fit anywhere else.
 
 use std::intrinsics;
-use std::mem::{size_of, size_of_val, size_of_val_raw};
+use std::mem::{discriminant, size_of, size_of_val, size_of_val_raw};
 
 struct Bomb;
 
@@ -33,10 +33,28 @@ fn main() {
     assert_eq!(intrinsics::likely(false), false);
     assert_eq!(intrinsics::unlikely(true), true);
 
+    let mut saw_true = false;
+    let mut saw_false = false;
+
+    for _ in 0..50 {
+        if intrinsics::is_val_statically_known(0) {
+            saw_true = true;
+        } else {
+            saw_false = true;
+        }
+    }
+    assert!(
+        saw_true && saw_false,
+        "`is_val_statically_known` failed to return both true and false. Congrats, you won the lottery!"
+    );
+
     intrinsics::forget(Bomb);
 
     let _v = intrinsics::discriminant_value(&Some(()));
     let _v = intrinsics::discriminant_value(&0);
     let _v = intrinsics::discriminant_value(&true);
     let _v = intrinsics::discriminant_value(&vec![1, 2, 3]);
+    // Make sure that even if the discriminant is stored together with data, the intrinsic returns
+    // only the discriminant, nothing about the data.
+    assert_eq!(discriminant(&Some(false)), discriminant(&Some(true)));
 }

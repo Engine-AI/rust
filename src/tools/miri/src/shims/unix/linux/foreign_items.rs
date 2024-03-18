@@ -2,26 +2,33 @@ use rustc_span::Symbol;
 use rustc_target::spec::abi::Abi;
 
 use crate::machine::SIGRTMAX;
+use crate::machine::SIGRTMIN;
 use crate::*;
-use shims::foreign_items::EmulateByNameResult;
+use shims::foreign_items::EmulateForeignItemResult;
 use shims::unix::fs::EvalContextExt as _;
 use shims::unix::linux::fd::EvalContextExt as _;
+use shims::unix::linux::mem::EvalContextExt as _;
 use shims::unix::linux::sync::futex;
+use shims::unix::mem::EvalContextExt as _;
 use shims::unix::sync::EvalContextExt as _;
 use shims::unix::thread::EvalContextExt as _;
 
+pub fn is_dyn_sym(name: &str) -> bool {
+    matches!(name, "getrandom")
+}
+
 impl<'mir, 'tcx: 'mir> EvalContextExt<'mir, 'tcx> for crate::MiriInterpCx<'mir, 'tcx> {}
 pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
-    fn emulate_foreign_item_by_name(
+    fn emulate_foreign_item_inner(
         &mut self,
         link_name: Symbol,
         abi: Abi,
         args: &[OpTy<'tcx, Provenance>],
-        dest: &PlaceTy<'tcx, Provenance>,
-    ) -> InterpResult<'tcx, EmulateByNameResult<'mir, 'tcx>> {
+        dest: &MPlaceTy<'tcx, Provenance>,
+    ) -> InterpResult<'tcx, EmulateForeignItemResult> {
         let this = self.eval_context_mut();
 
-        // See `fn emulate_foreign_item_by_name` in `shims/foreign_items.rs` for the general pattern.
+        // See `fn emulate_foreign_item_inner` in `shims/foreign_items.rs` for the general pattern.
 
         match link_name.as_str() {
             // errno
@@ -37,6 +44,14 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                 let result = this.linux_readdir64(dirp)?;
                 this.write_scalar(result, dest)?;
             }
+            "mmap64" => {
+                let [addr, length, prot, flags, fd, offset] =
+                    this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
+                let offset = this.read_scalar(offset)?.to_i64()?;
+                let ptr = this.mmap(addr, length, prot, flags, fd, offset.into())?;
+                this.write_scalar(ptr, dest)?;
+            }
+
             // Linux-only
             "sync_file_range" => {
                 let [fd, offset, nbytes, flags] =
@@ -67,12 +82,23 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                 let result = this.eventfd(val, flag)?;
                 this.write_scalar(result, dest)?;
             }
+            "mremap" => {
+                let [old_address, old_size, new_size, flags] =
+                    this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
+                let ptr = this.mremap(old_address, old_size, new_size, flags)?;
+                this.write_scalar(ptr, dest)?;
+            }
             "socketpair" => {
                 let [domain, type_, protocol, sv] =
                     this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
 
                 let result = this.socketpair(domain, type_, protocol, sv)?;
                 this.write_scalar(result, dest)?;
+            }
+            "__libc_current_sigrtmin" => {
+                let [] = this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
+
+                this.write_scalar(Scalar::from_i32(SIGRTMIN), dest)?;
             }
             "__libc_current_sigrtmax" => {
                 let [] = this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
@@ -163,33 +189,22 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                             this.linux_statx(&args[1], &args[2], &args[3], &args[4], &args[5])?;
                         this.write_scalar(Scalar::from_target_isize(result.into(), this), dest)?;
                     }
-                    // `futex` is used by some synchonization primitives.
+                    // `futex` is used by some synchronization primitives.
                     id if id == sys_futex => {
                         futex(this, &args[1..], dest)?;
                     }
                     id => {
                         this.handle_unsupported(format!("can't execute syscall with ID {id}"))?;
-                        return Ok(EmulateByNameResult::AlreadyJumped);
+                        return Ok(EmulateForeignItemResult::AlreadyJumped);
                     }
                 }
             }
 
-            // Miscelanneous
+            // Miscellaneous
             "getrandom" => {
                 let [ptr, len, flags] =
                     this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
                 getrandom(this, ptr, len, flags, dest)?;
-            }
-            "sched_getaffinity" => {
-                let [pid, cpusetsize, mask] =
-                    this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
-                this.read_scalar(pid)?.to_i32()?;
-                this.read_target_usize(cpusetsize)?;
-                this.deref_operand(mask)?;
-                // FIXME: we just return an error; `num_cpus` then falls back to `sysconf`.
-                let einval = this.eval_libc("EINVAL");
-                this.set_last_error(einval)?;
-                this.write_scalar(Scalar::from_i32(-1), dest)?;
             }
 
             // Incomplete shims that we "stub out" just to get pre-main initialization code to work.
@@ -200,10 +215,10 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                 this.write_null(dest)?;
             }
 
-            _ => return Ok(EmulateByNameResult::NotSupported),
+            _ => return Ok(EmulateForeignItemResult::NotSupported),
         };
 
-        Ok(EmulateByNameResult::NeedsJumping)
+        Ok(EmulateForeignItemResult::NeedsJumping)
     }
 }
 
@@ -213,7 +228,7 @@ fn getrandom<'tcx>(
     ptr: &OpTy<'tcx, Provenance>,
     len: &OpTy<'tcx, Provenance>,
     flags: &OpTy<'tcx, Provenance>,
-    dest: &PlaceTy<'tcx, Provenance>,
+    dest: &MPlaceTy<'tcx, Provenance>,
 ) -> InterpResult<'tcx> {
     let ptr = this.read_pointer(ptr)?;
     let len = this.read_target_usize(len)?;

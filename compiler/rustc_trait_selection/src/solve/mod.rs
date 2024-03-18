@@ -1,35 +1,57 @@
-//! The new trait solver, currently still WIP.
+//! The next-generation trait solver, currently still WIP.
 //!
-//! As a user of the trait system, you can use `TyCtxt::evaluate_goal` to
-//! interact with this solver.
+//! As a user of rust, you can use `-Znext-solver` to enable the new trait solver.
+//!
+//! As a developer of rustc, you shouldn't be using the new trait
+//! solver without asking the trait-system-refactor-initiative, but it can
+//! be enabled with `InferCtxtBuilder::with_next_trait_solver`. This will
+//! ensure that trait solving using that inference context will be routed
+//! to the new trait solver.
 //!
 //! For a high-level overview of how this solver works, check out the relevant
 //! section of the rustc-dev-guide.
 //!
 //! FIXME(@lcnr): Write that section. If you read this before then ask me
 //! about it on zulip.
-
 use rustc_hir::def_id::DefId;
 use rustc_infer::infer::canonical::{Canonical, CanonicalVarValues};
 use rustc_infer::traits::query::NoSolution;
+use rustc_middle::infer::canonical::CanonicalVarInfos;
 use rustc_middle::traits::solve::{
-    CanonicalResponse, Certainty, ExternalConstraintsData, Goal, QueryResult, Response,
+    CanonicalResponse, Certainty, ExternalConstraintsData, Goal, GoalSource, IsNormalizesToHack,
+    QueryResult, Response,
 };
-use rustc_middle::ty::{self, Ty, TyCtxt};
+use rustc_middle::ty::{self, AliasRelationDirection, Ty, TyCtxt, UniverseIndex};
 use rustc_middle::ty::{
     CoercePredicate, RegionOutlivesPredicate, SubtypePredicate, TypeOutlivesPredicate,
 };
 
+mod alias_relate;
 mod assembly;
-mod canonicalize;
 mod eval_ctxt;
 mod fulfill;
+pub mod inspect;
+mod normalize;
+mod normalizes_to;
 mod project_goals;
 mod search_graph;
 mod trait_goals;
 
-pub use eval_ctxt::{EvalCtxt, InferCtxtEvalExt};
+pub use eval_ctxt::{EvalCtxt, GenerateProofTree, InferCtxtEvalExt, InferCtxtSelectExt};
 pub use fulfill::FulfillmentCtxt;
+pub(crate) use normalize::deeply_normalize_for_diagnostics;
+pub use normalize::{deeply_normalize, deeply_normalize_with_skipped_universes};
+
+/// How many fixpoint iterations we should attempt inside of the solver before bailing
+/// with overflow.
+///
+/// We previously used  `tcx.recursion_limit().0.checked_ilog2().unwrap_or(0)` for this.
+/// However, it feels unlikely that uncreasing the recursion limit by a power of two
+/// to get one more itereation is every useful or desirable. We now instead used a constant
+/// here. If there ever ends up some use-cases where a bigger number of fixpoint iterations
+/// is required, we can add a new attribute for that or revert this to be dependant on the
+/// recursion limit again. However, this feels very unlikely.
+const FIXPOINT_STEP_LIMIT: usize = 8;
 
 #[derive(Debug, Clone, Copy)]
 enum SolverMode {
@@ -44,11 +66,14 @@ enum SolverMode {
     Coherence,
 }
 
-trait CanonicalResponseExt {
-    fn has_no_inference_or_external_constraints(&self) -> bool;
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum GoalEvaluationKind {
+    Root,
+    Nested { is_normalizes_to_hack: IsNormalizesToHack },
 }
 
-impl<'tcx> CanonicalResponseExt for Canonical<'tcx, Response<'tcx>> {
+#[extension(trait CanonicalResponseExt)]
+impl<'tcx> Canonical<'tcx, Response<'tcx>> {
     fn has_no_inference_or_external_constraints(&self) -> bool {
         self.value.external_constraints.region_constraints.is_empty()
             && self.value.var_values.is_identity()
@@ -105,25 +130,6 @@ impl<'a, 'tcx> EvalCtxt<'a, 'tcx> {
         }
     }
 
-    #[instrument(level = "debug", skip(self))]
-    fn compute_closure_kind_goal(
-        &mut self,
-        goal: Goal<'tcx, (DefId, ty::SubstsRef<'tcx>, ty::ClosureKind)>,
-    ) -> QueryResult<'tcx> {
-        let (_, substs, expected_kind) = goal.predicate;
-        let found_kind = substs.as_closure().kind_ty().to_opt_closure_kind();
-
-        let Some(found_kind) = found_kind else {
-            return self.evaluate_added_goals_and_make_canonical_response(Certainty::AMBIGUOUS);
-        };
-        if found_kind.extends(expected_kind) {
-            self.evaluate_added_goals_and_make_canonical_response(Certainty::Yes)
-        } else {
-            Err(NoSolution)
-        }
-    }
-
-    #[instrument(level = "debug", skip(self))]
     fn compute_object_safe_goal(&mut self, trait_def_id: DefId) -> QueryResult<'tcx> {
         if self.tcx().check_is_object_safe(trait_def_id) {
             self.evaluate_added_goals_and_make_canonical_response(Certainty::Yes)
@@ -139,119 +145,46 @@ impl<'a, 'tcx> EvalCtxt<'a, 'tcx> {
     ) -> QueryResult<'tcx> {
         match self.well_formed_goals(goal.param_env, goal.predicate) {
             Some(goals) => {
-                self.add_goals(goals);
+                self.add_goals(GoalSource::Misc, goals);
                 self.evaluate_added_goals_and_make_canonical_response(Certainty::Yes)
             }
             None => self.evaluate_added_goals_and_make_canonical_response(Certainty::AMBIGUOUS),
         }
     }
 
-    #[instrument(level = "debug", skip(self), ret)]
-    fn compute_alias_relate_goal(
+    #[instrument(level = "debug", skip(self))]
+    fn compute_const_evaluatable_goal(
         &mut self,
-        goal: Goal<'tcx, (ty::Term<'tcx>, ty::Term<'tcx>, ty::AliasRelationDirection)>,
+        Goal { param_env, predicate: ct }: Goal<'tcx, ty::Const<'tcx>>,
     ) -> QueryResult<'tcx> {
-        let tcx = self.tcx();
-        // We may need to invert the alias relation direction if dealing an alias on the RHS.
-        #[derive(Debug)]
-        enum Invert {
-            No,
-            Yes,
-        }
-        let evaluate_normalizes_to =
-            |ecx: &mut EvalCtxt<'_, 'tcx>, alias, other, direction, invert| {
-                let span = tracing::span!(
-                    tracing::Level::DEBUG,
-                    "compute_alias_relate_goal(evaluate_normalizes_to)",
-                    ?alias,
-                    ?other,
-                    ?direction,
-                    ?invert
-                );
-                let _enter = span.enter();
-                let result = ecx.probe(|ecx| {
-                    let other = match direction {
-                        // This is purely an optimization.
-                        ty::AliasRelationDirection::Equate => other,
+        match ct.kind() {
+            ty::ConstKind::Unevaluated(uv) => {
+                // We never return `NoSolution` here as `try_const_eval_resolve` emits an
+                // error itself when failing to evaluate, so emitting an additional fulfillment
+                // error in that case is unnecessary noise. This may change in the future once
+                // evaluation failures are allowed to impact selection, e.g. generic const
+                // expressions in impl headers or `where`-clauses.
 
-                        ty::AliasRelationDirection::Subtype => {
-                            let fresh = ecx.next_term_infer_of_kind(other);
-                            let (sub, sup) = match invert {
-                                Invert::No => (fresh, other),
-                                Invert::Yes => (other, fresh),
-                            };
-                            ecx.sub(goal.param_env, sub, sup)?;
-                            fresh
-                        }
-                    };
-                    ecx.add_goal(goal.with(
-                        tcx,
-                        ty::Binder::dummy(ty::ProjectionPredicate {
-                            projection_ty: alias,
-                            term: other,
-                        }),
-                    ));
-                    ecx.evaluate_added_goals_and_make_canonical_response(Certainty::Yes)
-                });
-                debug!(?result);
-                result
-            };
-
-        let (lhs, rhs, direction) = goal.predicate;
-
-        if lhs.is_infer() || rhs.is_infer() {
-            bug!(
-                "`AliasRelate` goal with an infer var on lhs or rhs which should have been instantiated"
-            );
-        }
-
-        match (lhs.to_projection_term(tcx), rhs.to_projection_term(tcx)) {
-            (None, None) => bug!("`AliasRelate` goal without an alias on either lhs or rhs"),
-
-            // RHS is not a projection, only way this is true is if LHS normalizes-to RHS
-            (Some(alias_lhs), None) => {
-                evaluate_normalizes_to(self, alias_lhs, rhs, direction, Invert::No)
+                // FIXME(generic_const_exprs): Implement handling for generic
+                // const expressions here.
+                if let Some(_normalized) = self.try_const_eval_resolve(param_env, uv, ct.ty()) {
+                    self.evaluate_added_goals_and_make_canonical_response(Certainty::Yes)
+                } else {
+                    self.evaluate_added_goals_and_make_canonical_response(Certainty::AMBIGUOUS)
+                }
             }
-
-            // LHS is not a projection, only way this is true is if RHS normalizes-to LHS
-            (None, Some(alias_rhs)) => {
-                evaluate_normalizes_to(self, alias_rhs, lhs, direction, Invert::Yes)
+            ty::ConstKind::Infer(_) => {
+                self.evaluate_added_goals_and_make_canonical_response(Certainty::AMBIGUOUS)
             }
-
-            (Some(alias_lhs), Some(alias_rhs)) => {
-                debug!("both sides are aliases");
-
-                let candidates = vec![
-                    // LHS normalizes-to RHS
-                    evaluate_normalizes_to(self, alias_lhs, rhs, direction, Invert::No),
-                    // RHS normalizes-to RHS
-                    evaluate_normalizes_to(self, alias_rhs, lhs, direction, Invert::Yes),
-                    // Relate via substs
-                    self.probe(|ecx| {
-                        let span = tracing::span!(
-                            tracing::Level::DEBUG,
-                            "compute_alias_relate_goal(relate_via_substs)",
-                            ?alias_lhs,
-                            ?alias_rhs,
-                            ?direction
-                        );
-                        let _enter = span.enter();
-
-                        match direction {
-                            ty::AliasRelationDirection::Equate => {
-                                ecx.eq(goal.param_env, alias_lhs, alias_rhs)?;
-                            }
-                            ty::AliasRelationDirection::Subtype => {
-                                ecx.sub(goal.param_env, alias_lhs, alias_rhs)?;
-                            }
-                        }
-
-                        ecx.evaluate_added_goals_and_make_canonical_response(Certainty::Yes)
-                    }),
-                ];
-                debug!(?candidates);
-
-                self.try_merge_responses(candidates.into_iter())
+            ty::ConstKind::Placeholder(_) | ty::ConstKind::Value(_) | ty::ConstKind::Error(_) => {
+                self.evaluate_added_goals_and_make_canonical_response(Certainty::Yes)
+            }
+            // We can freely ICE here as:
+            // - `Param` gets replaced with a placeholder during canonicalization
+            // - `Bound` cannot exist as we don't have a binder around the self Type
+            // - `Expr` is part of `feature(generic_const_exprs)` and is not implemented yet
+            ty::ConstKind::Param(_) | ty::ConstKind::Bound(_, _) | ty::ConstKind::Expr(_) => {
+                bug!("unexpect const kind: {:?}", ct)
             }
         }
     }
@@ -269,7 +202,7 @@ impl<'a, 'tcx> EvalCtxt<'a, 'tcx> {
 
 impl<'tcx> EvalCtxt<'_, 'tcx> {
     #[instrument(level = "debug", skip(self))]
-    fn set_normalizes_to_hack_goal(&mut self, goal: Goal<'tcx, ty::ProjectionPredicate<'tcx>>) {
+    fn set_normalizes_to_hack_goal(&mut self, goal: Goal<'tcx, ty::NormalizesTo<'tcx>>) {
         assert!(
             self.nested_goals.normalizes_to_hack_goal.is_none(),
             "attempted to set the projection eq hack goal when one already exists"
@@ -278,71 +211,114 @@ impl<'tcx> EvalCtxt<'_, 'tcx> {
     }
 
     #[instrument(level = "debug", skip(self))]
-    fn add_goal(&mut self, goal: Goal<'tcx, ty::Predicate<'tcx>>) {
-        self.nested_goals.goals.push(goal);
+    fn add_goal(&mut self, source: GoalSource, goal: Goal<'tcx, ty::Predicate<'tcx>>) {
+        inspect::ProofTreeBuilder::add_goal(self, source, goal);
+        self.nested_goals.goals.push((source, goal));
     }
 
     #[instrument(level = "debug", skip(self, goals))]
-    fn add_goals(&mut self, goals: impl IntoIterator<Item = Goal<'tcx, ty::Predicate<'tcx>>>) {
-        let current_len = self.nested_goals.goals.len();
-        self.nested_goals.goals.extend(goals);
-        debug!("added_goals={:?}", &self.nested_goals.goals[current_len..]);
+    fn add_goals(
+        &mut self,
+        source: GoalSource,
+        goals: impl IntoIterator<Item = Goal<'tcx, ty::Predicate<'tcx>>>,
+    ) {
+        for goal in goals {
+            self.add_goal(source, goal);
+        }
     }
 
-    #[instrument(level = "debug", skip(self, responses))]
+    /// Try to merge multiple possible ways to prove a goal, if that is not possible returns `None`.
+    ///
+    /// In this case we tend to flounder and return ambiguity by calling `[EvalCtxt::flounder]`.
+    #[instrument(level = "debug", skip(self), ret)]
     fn try_merge_responses(
         &mut self,
-        responses: impl Iterator<Item = QueryResult<'tcx>>,
-    ) -> QueryResult<'tcx> {
-        let candidates = responses.into_iter().flatten().collect::<Box<[_]>>();
+        responses: &[CanonicalResponse<'tcx>],
+    ) -> Option<CanonicalResponse<'tcx>> {
+        if responses.is_empty() {
+            return None;
+        }
 
-        if candidates.is_empty() {
+        // FIXME(-Znext-solver): We should instead try to find a `Certainty::Yes` response with
+        // a subset of the constraints that all the other responses have.
+        let one = responses[0];
+        if responses[1..].iter().all(|&resp| resp == one) {
+            return Some(one);
+        }
+
+        responses
+            .iter()
+            .find(|response| {
+                response.value.certainty == Certainty::Yes
+                    && response.has_no_inference_or_external_constraints()
+            })
+            .copied()
+    }
+
+    /// If we fail to merge responses we flounder and return overflow or ambiguity.
+    #[instrument(level = "debug", skip(self), ret)]
+    fn flounder(&mut self, responses: &[CanonicalResponse<'tcx>]) -> QueryResult<'tcx> {
+        if responses.is_empty() {
             return Err(NoSolution);
         }
 
-        // FIXME(-Ztrait-solver=next): We should instead try to find a `Certainty::Yes` response with
-        // a subset of the constraints that all the other responses have.
-        let one = candidates[0];
-        if candidates[1..].iter().all(|resp| resp == &one) {
-            return Ok(one);
-        }
+        let Certainty::Maybe(maybe_cause) =
+            responses.iter().fold(Certainty::AMBIGUOUS, |certainty, response| {
+                certainty.unify_with(response.value.certainty)
+            })
+        else {
+            bug!("expected flounder response to be ambiguous")
+        };
 
-        if let Some(response) = candidates.iter().find(|response| {
-            response.value.certainty == Certainty::Yes
-                && response.has_no_inference_or_external_constraints()
-        }) {
-            return Ok(*response);
-        }
+        Ok(self.make_ambiguous_response_no_constraints(maybe_cause))
+    }
 
-        let certainty = candidates.iter().fold(Certainty::AMBIGUOUS, |certainty, response| {
-            certainty.unify_and(response.value.certainty)
-        });
-        // FIXME(-Ztrait-solver=next): We should take the intersection of the constraints on all the
-        // responses and use that for the constraints of this ambiguous response.
-        debug!(">1 response, bailing with {certainty:?}");
-        let response = self.evaluate_added_goals_and_make_canonical_response(certainty);
-        if let Ok(response) = &response {
-            assert!(response.has_no_inference_or_external_constraints());
+    /// Normalize a type for when it is structurally matched on.
+    ///
+    /// This function is necessary in nearly all cases before matching on a type.
+    /// Not doing so is likely to be incomplete and therefore unsound during
+    /// coherence.
+    #[instrument(level = "debug", skip(self, param_env), ret)]
+    fn structurally_normalize_ty(
+        &mut self,
+        param_env: ty::ParamEnv<'tcx>,
+        ty: Ty<'tcx>,
+    ) -> Result<Ty<'tcx>, NoSolution> {
+        if let ty::Alias(..) = ty.kind() {
+            let normalized_ty = self.next_ty_infer();
+            let alias_relate_goal = Goal::new(
+                self.tcx(),
+                param_env,
+                ty::PredicateKind::AliasRelate(
+                    ty.into(),
+                    normalized_ty.into(),
+                    AliasRelationDirection::Equate,
+                ),
+            );
+            self.add_goal(GoalSource::Misc, alias_relate_goal);
+            self.try_evaluate_added_goals()?;
+            Ok(self.resolve_vars_if_possible(normalized_ty))
+        } else {
+            Ok(ty)
         }
-
-        response
     }
 }
 
-pub(super) fn response_no_constraints<'tcx>(
+fn response_no_constraints_raw<'tcx>(
     tcx: TyCtxt<'tcx>,
-    goal: Canonical<'tcx, impl Sized>,
+    max_universe: UniverseIndex,
+    variables: CanonicalVarInfos<'tcx>,
     certainty: Certainty,
-) -> QueryResult<'tcx> {
-    Ok(Canonical {
-        max_universe: goal.max_universe,
-        variables: goal.variables,
+) -> CanonicalResponse<'tcx> {
+    Canonical {
+        max_universe,
+        variables,
         value: Response {
-            var_values: CanonicalVarValues::make_identity(tcx, goal.variables),
+            var_values: CanonicalVarValues::make_identity(tcx, variables),
             // FIXME: maybe we should store the "no response" version in tcx, like
             // we do for tcx.types and stuff.
             external_constraints: tcx.mk_external_constraints(ExternalConstraintsData::default()),
             certainty,
         },
-    })
+    }
 }

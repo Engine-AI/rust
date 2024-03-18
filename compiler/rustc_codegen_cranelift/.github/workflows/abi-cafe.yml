@@ -33,10 +33,14 @@ jobs:
               TARGET_TRIPLE: x86_64-pc-windows-gnu
 
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
+
+    - name: CPU features
+      if: matrix.os == 'ubuntu-latest'
+      run: cat /proc/cpuinfo
 
     - name: Cache cargo target dir
-      uses: actions/cache@v3
+      uses: actions/cache@v4
       with:
         path: build/cg_clif
         key: ${{ runner.os }}-${{ matrix.env.TARGET_TRIPLE }}-cargo-build-target-${{ hashFiles('rust-toolchain', '**/Cargo.lock') }}
@@ -45,20 +49,13 @@ jobs:
       if: matrix.env.TARGET_TRIPLE == 'x86_64-pc-windows-gnu'
       run: rustup set default-host x86_64-pc-windows-gnu
 
-    - name: Use sparse cargo registry
-      run: |
-        cat >> ~/.cargo/config.toml <<EOF
-        [unstable]
-        sparse-registry = true
-        EOF
-
     - name: Prepare dependencies
-      run: ./y.rs prepare
+      run: ./y.sh prepare
 
     - name: Build
-      run: ./y.rs build --sysroot none
+      run: ./y.sh build --sysroot none
 
     - name: Test abi-cafe
       env:
         TARGET_TRIPLE: ${{ matrix.env.TARGET_TRIPLE }}
-      run: ./y.rs abi-cafe
+      run: ./y.sh abi-cafe

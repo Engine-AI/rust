@@ -22,6 +22,12 @@ function contentToDiffLine(key, value) {
     return `"${key}": "${value}",`;
 }
 
+function shouldIgnoreField(fieldName) {
+    return fieldName === "query" || fieldName === "correction" ||
+        fieldName === "proposeCorrectionFrom" ||
+        fieldName === "proposeCorrectionTo";
+}
+
 // This function is only called when no matching result was found and therefore will only display
 // the diff between the two items.
 function betterLookingDiff(entry, data) {
@@ -116,7 +122,31 @@ function checkNeededFields(fullPath, expected, error_text, queryName, position) 
 }
 
 function valueCheck(fullPath, expected, result, error_text, queryName) {
-    if (Array.isArray(expected)) {
+    if (Array.isArray(expected) && result instanceof Map) {
+        const expected_set = new Set();
+        for (const [key, expected_value] of expected) {
+            expected_set.add(key);
+            checkNeededFields(fullPath, expected_value, error_text, queryName, key);
+            if (result.has(key)) {
+                valueCheck(
+                    fullPath + "[" + key + "]",
+                    expected_value,
+                    result.get(key),
+                    error_text,
+                    queryName
+                );
+            } else {
+                error_text.push(`${queryName}==> EXPECTED has extra key in map from field ` +
+                    `\`${fullPath}\` (key ${key}): \`${JSON.stringify(expected_value)}\``);
+            }
+        }
+        for (const [key, result_value] of result.entries()) {
+            if (!expected_set.has(key)) {
+                error_text.push(`${queryName}==> EXPECTED missing key in map from field ` +
+                    `\`${fullPath}\` (key ${key}): \`${JSON.stringify(result_value)}\``);
+            }
+        }
+    } else if (Array.isArray(expected)) {
         let i;
         for (i = 0; i < expected.length; ++i) {
             checkNeededFields(fullPath, expected[i], error_text, queryName, i);
@@ -135,6 +165,9 @@ function valueCheck(fullPath, expected, result, error_text, queryName) {
     } else if (expected !== null && typeof expected !== "undefined" &&
                expected.constructor == Object) { // eslint-disable-line eqeqeq
         for (const key in expected) {
+            if (shouldIgnoreField(key)) {
+                continue;
+            }
             if (!Object.prototype.hasOwnProperty.call(expected, key)) {
                 continue;
             }
@@ -144,6 +177,9 @@ function valueCheck(fullPath, expected, result, error_text, queryName) {
             }
             let result_v = result[key];
             if (result_v !== null && key === "error") {
+                if (!result_v.forEach) {
+                    throw result_v;
+                }
                 result_v.forEach((value, index) => {
                     value = value.split("&nbsp;").join(" ");
                     if (index % 2 === 1) {
@@ -184,6 +220,9 @@ function runSearch(query, expected, doSearch, loadedFile, queryName) {
     const error_text = [];
 
     for (const key in expected) {
+        if (shouldIgnoreField(key)) {
+            continue;
+        }
         if (!Object.prototype.hasOwnProperty.call(expected, key)) {
             continue;
         }
@@ -226,6 +265,24 @@ function runSearch(query, expected, doSearch, loadedFile, queryName) {
     return error_text;
 }
 
+function runCorrections(query, corrections, getCorrections, loadedFile) {
+    const qc = getCorrections(query, loadedFile.FILTER_CRATE);
+    const error_text = [];
+
+    if (corrections === null) {
+        if (qc !== null) {
+            error_text.push(`==> expected = null, found = ${qc}`);
+        }
+        return error_text;
+    }
+
+    if (qc !== corrections.toLowerCase()) {
+        error_text.push(`==> expected = ${corrections}, found = ${qc}`);
+    }
+
+    return error_text;
+}
+
 function checkResult(error_text, loadedFile, displaySuccess) {
     if (error_text.length === 0 && loadedFile.should_fail === true) {
         console.log("FAILED");
@@ -242,40 +299,49 @@ function checkResult(error_text, loadedFile, displaySuccess) {
     return 1;
 }
 
-function runCheck(loadedFile, key, callback) {
-    const expected = loadedFile[key];
-    const query = loadedFile.QUERY;
-
-    if (Array.isArray(query)) {
-        if (!Array.isArray(expected)) {
-            console.log("FAILED");
-            console.log(`==> If QUERY variable is an array, ${key} should be an array too`);
-            return 1;
-        } else if (query.length !== expected.length) {
-            console.log("FAILED");
-            console.log(`==> QUERY variable should have the same length as ${key}`);
-            return 1;
+function runCheckInner(callback, loadedFile, entry, getCorrections, extra) {
+    if (typeof entry.query !== "string") {
+        console.log("FAILED");
+        console.log("==> Missing `query` field");
+        return false;
+    }
+    let error_text = callback(entry.query, entry, extra ? "[ query `" + entry.query + "`]" : "");
+    if (checkResult(error_text, loadedFile, false) !== 0) {
+        return false;
+    }
+    if (entry.correction !== undefined) {
+        error_text = runCorrections(entry.query, entry.correction, getCorrections, loadedFile);
+        if (checkResult(error_text, loadedFile, false) !== 0) {
+            return false;
         }
-        for (let i = 0; i < query.length; ++i) {
-            const error_text = callback(query[i], expected[i], "[ query `" + query[i] + "`]");
-            if (checkResult(error_text, loadedFile, false) !== 0) {
+    }
+    return true;
+}
+
+function runCheck(loadedFile, key, getCorrections, callback) {
+    const expected = loadedFile[key];
+
+    if (Array.isArray(expected)) {
+        for (const entry of expected) {
+            if (!runCheckInner(callback, loadedFile, entry, getCorrections, true)) {
                 return 1;
             }
         }
-        console.log("OK");
-    } else {
-        const error_text = callback(query, expected, "");
-        if (checkResult(error_text, loadedFile, true) !== 0) {
-            return 1;
-        }
+    } else if (!runCheckInner(callback, loadedFile, expected, getCorrections, false)) {
+        return 1;
     }
+    console.log("OK");
     return 0;
 }
 
-function runChecks(testFile, doSearch, parseQuery) {
+function hasCheck(content, checkName) {
+    return content.startsWith(`const ${checkName}`) || content.includes(`\nconst ${checkName}`);
+}
+
+function runChecks(testFile, doSearch, parseQuery, getCorrections) {
     let checkExpected = false;
     let checkParsed = false;
-    let testFileContent = readFile(testFile) + "exports.QUERY = QUERY;";
+    let testFileContent = readFile(testFile);
 
     if (testFileContent.indexOf("FILTER_CRATE") !== -1) {
         testFileContent += "exports.FILTER_CRATE = FILTER_CRATE;";
@@ -283,11 +349,11 @@ function runChecks(testFile, doSearch, parseQuery) {
         testFileContent += "exports.FILTER_CRATE = null;";
     }
 
-    if (testFileContent.indexOf("\nconst EXPECTED") !== -1) {
+    if (hasCheck(testFileContent, "EXPECTED")) {
         testFileContent += "exports.EXPECTED = EXPECTED;";
         checkExpected = true;
     }
-    if (testFileContent.indexOf("\nconst PARSED") !== -1) {
+    if (hasCheck(testFileContent, "PARSED")) {
         testFileContent += "exports.PARSED = PARSED;";
         checkParsed = true;
     }
@@ -301,12 +367,12 @@ function runChecks(testFile, doSearch, parseQuery) {
     let res = 0;
 
     if (checkExpected) {
-        res += runCheck(loadedFile, "EXPECTED", (query, expected, text) => {
+        res += runCheck(loadedFile, "EXPECTED", getCorrections, (query, expected, text) => {
             return runSearch(query, expected, doSearch, loadedFile, text);
         });
     }
     if (checkParsed) {
-        res += runCheck(loadedFile, "PARSED", (query, expected, text) => {
+        res += runCheck(loadedFile, "PARSED", getCorrections, (query, expected, text) => {
             return runParser(query, expected, parseQuery, text);
         });
     }
@@ -318,9 +384,10 @@ function runChecks(testFile, doSearch, parseQuery) {
  *
  * @param {string} doc_folder      - Path to a folder generated by running rustdoc
  * @param {string} resource_suffix - Version number between filename and .js, e.g. "1.59.0"
- * @returns {Object}               - Object containing two keys: `doSearch`, which runs a search
- *   with the loaded index and returns a table of results; and `parseQuery`, which is the
- *   `parseQuery` function exported from the search module.
+ * @returns {Object}               - Object containing keys: `doSearch`, which runs a search
+ *   with the loaded index and returns a table of results; `parseQuery`, which is the
+ *   `parseQuery` function exported from the search module; and `getCorrections`, which runs
+ *   a search but returns type name corrections instead of results.
  */
 function loadSearchJS(doc_folder, resource_suffix) {
     const searchIndexJs = path.join(doc_folder, "search-index" + resource_suffix + ".js");
@@ -329,12 +396,17 @@ function loadSearchJS(doc_folder, resource_suffix) {
     const staticFiles = path.join(doc_folder, "static.files");
     const searchJs = fs.readdirSync(staticFiles).find(f => f.match(/search.*\.js$/));
     const searchModule = require(path.join(staticFiles, searchJs));
-    const searchWords = searchModule.initSearch(searchIndex.searchIndex);
+    searchModule.initSearch(searchIndex.searchIndex);
 
     return {
         doSearch: function(queryStr, filterCrate, currentCrate) {
-            return searchModule.execQuery(searchModule.parseQuery(queryStr), searchWords,
+            return searchModule.execQuery(searchModule.parseQuery(queryStr),
                 filterCrate, currentCrate);
+        },
+        getCorrections: function(queryStr, filterCrate, currentCrate) {
+            const parsedQuery = searchModule.parseQuery(queryStr);
+            searchModule.execQuery(parsedQuery, filterCrate, currentCrate);
+            return parsedQuery.correction;
         },
         parseQuery: searchModule.parseQuery,
     };
@@ -417,11 +489,14 @@ function main(argv) {
     const doSearch = function(queryStr, filterCrate) {
         return parseAndSearch.doSearch(queryStr, filterCrate, opts["crate_name"]);
     };
+    const getCorrections = function(queryStr, filterCrate) {
+        return parseAndSearch.getCorrections(queryStr, filterCrate, opts["crate_name"]);
+    };
 
     if (opts["test_file"].length !== 0) {
         opts["test_file"].forEach(file => {
             process.stdout.write(`Testing ${file} ... `);
-            errors += runChecks(file, doSearch, parseAndSearch.parseQuery);
+            errors += runChecks(file, doSearch, parseAndSearch.parseQuery, getCorrections);
         });
     } else if (opts["test_folder"].length !== 0) {
         fs.readdirSync(opts["test_folder"]).forEach(file => {
@@ -430,7 +505,7 @@ function main(argv) {
             }
             process.stdout.write(`Testing ${file} ... `);
             errors += runChecks(path.join(opts["test_folder"], file), doSearch,
-                    parseAndSearch.parseQuery);
+                    parseAndSearch.parseQuery, getCorrections);
         });
     }
     return errors > 0 ? 1 : 0;

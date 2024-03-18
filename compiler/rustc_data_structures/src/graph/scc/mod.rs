@@ -8,7 +8,7 @@
 use crate::fx::FxHashSet;
 use crate::graph::vec_graph::VecGraph;
 use crate::graph::{DirectedGraph, GraphSuccessors, WithNumEdges, WithNumNodes, WithSuccessors};
-use rustc_index::vec::{Idx, IndexSlice, IndexVec};
+use rustc_index::{Idx, IndexSlice, IndexVec};
 use std::ops::Range;
 
 #[cfg(test)]
@@ -492,7 +492,7 @@ where
             let returned_walk =
                 return_value.take().into_iter().map(|walk| (*successor_node, Some(walk)));
 
-            let successor_walk = successors.by_ref().map(|successor_node| {
+            let successor_walk = successors.map(|successor_node| {
                 debug!(?node, ?successor_node);
                 (successor_node, self.inspect_node(successor_node))
             });

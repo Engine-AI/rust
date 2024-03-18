@@ -81,7 +81,8 @@ where
         Self::Seq(vec![Self::uninit(); width_in_bytes])
     }
 
-    /// Remove all `Def` nodes, and all branches of the layout for which `f` produces false.
+    /// Remove all `Def` nodes, and all branches of the layout for which `f`
+    /// produces `true`.
     pub(crate) fn prune<F>(self, f: &F) -> Tree<!, R>
     where
         F: Fn(D) -> bool,
@@ -106,7 +107,7 @@ where
             Self::Byte(b) => Tree::Byte(b),
             Self::Ref(r) => Tree::Ref(r),
             Self::Def(d) => {
-                if !f(d) {
+                if f(d) {
                     Tree::uninhabited()
                 } else {
                     Tree::unit()
@@ -167,36 +168,40 @@ where
     }
 }
 
-#[derive(Debug, Copy, Clone)]
-pub(crate) enum Err {
-    /// The layout of the type is unspecified.
-    Unspecified,
-    /// This error will be surfaced elsewhere by rustc, so don't surface it.
-    Unknown,
-}
-
 #[cfg(feature = "rustc")]
 pub(crate) mod rustc {
-    use super::{Err, Tree};
+    use super::Tree;
     use crate::layout::rustc::{Def, Ref};
 
-    use rustc_middle::ty;
     use rustc_middle::ty::layout::LayoutError;
     use rustc_middle::ty::util::Discr;
     use rustc_middle::ty::AdtDef;
+    use rustc_middle::ty::GenericArgsRef;
     use rustc_middle::ty::ParamEnv;
-    use rustc_middle::ty::SubstsRef;
-    use rustc_middle::ty::Ty;
-    use rustc_middle::ty::TyCtxt;
     use rustc_middle::ty::VariantDef;
+    use rustc_middle::ty::{self, Ty, TyCtxt, TypeVisitableExt};
+    use rustc_span::ErrorGuaranteed;
     use rustc_target::abi::Align;
     use std::alloc;
 
-    impl<'tcx> From<LayoutError<'tcx>> for Err {
-        fn from(err: LayoutError<'tcx>) -> Self {
+    #[derive(Debug, Copy, Clone)]
+    pub(crate) enum Err {
+        /// The layout of the type is not yet supported.
+        NotYetSupported,
+        /// This error will be surfaced elsewhere by rustc, so don't surface it.
+        UnknownLayout,
+        /// Overflow size
+        SizeOverflow,
+        TypeError(ErrorGuaranteed),
+    }
+
+    impl<'tcx> From<&LayoutError<'tcx>> for Err {
+        fn from(err: &LayoutError<'tcx>) -> Self {
             match err {
-                LayoutError::Unknown(..) => Self::Unknown,
-                err @ _ => unimplemented!("{:?}", err),
+                LayoutError::Unknown(..) | LayoutError::ReferencesError(..) => Self::UnknownLayout,
+                LayoutError::SizeOverflow(..) => Self::SizeOverflow,
+                LayoutError::Cycle(err) => Self::TypeError(*err),
+                err => unimplemented!("{:?}", err),
             }
         }
     }
@@ -221,7 +226,7 @@ pub(crate) mod rustc {
     }
 
     impl LayoutSummary {
-        fn from_ty<'tcx>(ty: Ty<'tcx>, ctx: TyCtxt<'tcx>) -> Result<Self, LayoutError<'tcx>> {
+        fn from_ty<'tcx>(ty: Ty<'tcx>, ctx: TyCtxt<'tcx>) -> Result<Self, &'tcx LayoutError<'tcx>> {
             use rustc_middle::ty::ParamEnvAnd;
             use rustc_target::abi::{TyAndLayout, Variants};
 
@@ -261,6 +266,10 @@ pub(crate) mod rustc {
             use rustc_middle::ty::UintTy::*;
             use rustc_target::abi::HasDataLayout;
 
+            if let Err(e) = ty.error_reported() {
+                return Err(Err::TypeError(e));
+            }
+
             let target = tcx.data_layout();
 
             match ty.kind() {
@@ -279,26 +288,26 @@ pub(crate) mod rustc {
                     if members.len() == 0 {
                         Ok(Tree::unit())
                     } else {
-                        Err(Err::Unspecified)
+                        Err(Err::NotYetSupported)
                     }
                 }
 
                 ty::Array(ty, len) => {
                     let len = len
                         .try_eval_target_usize(tcx, ParamEnv::reveal_all())
-                        .ok_or(Err::Unspecified)?;
+                        .ok_or(Err::NotYetSupported)?;
                     let elt = Tree::from_ty(*ty, tcx)?;
                     Ok(std::iter::repeat(elt)
                         .take(len as usize)
                         .fold(Tree::unit(), |tree, elt| tree.then(elt)))
                 }
 
-                ty::Adt(adt_def, substs_ref) => {
+                ty::Adt(adt_def, args_ref) => {
                     use rustc_middle::ty::AdtKind;
 
                     // If the layout is ill-specified, halt.
                     if !(adt_def.repr().c() || adt_def.repr().int.is_some()) {
-                        return Err(Err::Unspecified);
+                        return Err(Err::NotYetSupported);
                     }
 
                     // Compute a summary of the type's layout.
@@ -312,7 +321,7 @@ pub(crate) mod rustc {
                         AdtKind::Struct => Self::from_repr_c_variant(
                             ty,
                             *adt_def,
-                            substs_ref,
+                            args_ref,
                             &layout_summary,
                             None,
                             adt_def.non_enum_variant(),
@@ -326,7 +335,7 @@ pub(crate) mod rustc {
                                 tree = tree.or(Self::from_repr_c_variant(
                                     ty,
                                     *adt_def,
-                                    substs_ref,
+                                    args_ref,
                                     &layout_summary,
                                     Some(discr),
                                     adt_def.variant(idx),
@@ -339,7 +348,7 @@ pub(crate) mod rustc {
                         AdtKind::Union => {
                             // is the layout well-defined?
                             if !adt_def.repr().c() {
-                                return Err(Err::Unspecified);
+                                return Err(Err::NotYetSupported);
                             }
 
                             let ty_layout = layout_of(tcx, ty)?;
@@ -347,7 +356,7 @@ pub(crate) mod rustc {
                             let mut tree = Tree::uninhabited();
 
                             for field in adt_def.all_fields() {
-                                let variant_ty = field.ty(tcx, substs_ref);
+                                let variant_ty = field.ty(tcx, args_ref);
                                 let variant_layout = layout_of(tcx, variant_ty)?;
                                 let padding_needed = ty_layout.size() - variant_layout.size();
                                 let variant = Self::def(Def::Field(field))
@@ -361,14 +370,28 @@ pub(crate) mod rustc {
                         }
                     }))
                 }
-                _ => Err(Err::Unspecified),
+
+                ty::Ref(lifetime, ty, mutability) => {
+                    let layout = layout_of(tcx, *ty)?;
+                    let align = layout.align();
+                    let size = layout.size();
+                    Ok(Tree::Ref(Ref {
+                        lifetime: *lifetime,
+                        ty: *ty,
+                        mutability: *mutability,
+                        align,
+                        size,
+                    }))
+                }
+
+                _ => Err(Err::NotYetSupported),
             }
         }
 
         fn from_repr_c_variant(
             ty: Ty<'tcx>,
             adt_def: AdtDef<'tcx>,
-            substs_ref: SubstsRef<'tcx>,
+            args_ref: GenericArgsRef<'tcx>,
             layout_summary: &LayoutSummary,
             discr: Option<Discr<'tcx>>,
             variant_def: &'tcx VariantDef,
@@ -412,7 +435,7 @@ pub(crate) mod rustc {
             // Next come fields.
             let fields_span = trace_span!("treeifying fields").entered();
             for field_def in variant_def.fields.iter() {
-                let field_ty = field_def.ty(tcx, substs_ref);
+                let field_ty = field_def.ty(tcx, args_ref);
                 let _span = trace_span!("treeifying field", field = ?field_ty).entered();
 
                 // begin with the field's visibility
@@ -467,7 +490,7 @@ pub(crate) mod rustc {
     fn layout_of<'tcx>(
         ctx: TyCtxt<'tcx>,
         ty: Ty<'tcx>,
-    ) -> Result<alloc::Layout, LayoutError<'tcx>> {
+    ) -> Result<alloc::Layout, &'tcx LayoutError<'tcx>> {
         use rustc_middle::ty::ParamEnvAnd;
         use rustc_target::abi::TyAndLayout;
 

@@ -55,12 +55,13 @@ fn llvm_machine_type(cpu: &str) -> LLVMMachineType {
         "x86_64" => LLVMMachineType::AMD64,
         "x86" => LLVMMachineType::I386,
         "aarch64" => LLVMMachineType::ARM64,
+        "arm64ec" => LLVMMachineType::ARM64EC,
         "arm" => LLVMMachineType::ARM,
-        _ => panic!("unsupported cpu type {}", cpu),
+        _ => panic!("unsupported cpu type {cpu}"),
     }
 }
 
-impl<'a> ArchiveBuilder<'a> for LlvmArchiveBuilder<'a> {
+impl<'a> ArchiveBuilder for LlvmArchiveBuilder<'a> {
     fn add_archive(
         &mut self,
         archive: &Path,
@@ -68,7 +69,7 @@ impl<'a> ArchiveBuilder<'a> for LlvmArchiveBuilder<'a> {
     ) -> io::Result<()> {
         let mut archive = archive.to_path_buf();
         if self.sess.target.llvm_target.contains("-apple-macosx") {
-            if let Some(new_archive) = try_extract_macho_fat_archive(&self.sess, &archive)? {
+            if let Some(new_archive) = try_extract_macho_fat_archive(self.sess, &archive)? {
                 archive = new_archive
             }
         }
@@ -99,7 +100,7 @@ impl<'a> ArchiveBuilder<'a> for LlvmArchiveBuilder<'a> {
     fn build(mut self: Box<Self>, output: &Path) -> bool {
         match self.build_with_llvm(output) {
             Ok(any_members) => any_members,
-            Err(e) => self.sess.emit_fatal(ArchiveBuildFailure { error: e }),
+            Err(e) => self.sess.dcx().emit_fatal(ArchiveBuildFailure { error: e }),
         }
     }
 }
@@ -107,7 +108,7 @@ impl<'a> ArchiveBuilder<'a> for LlvmArchiveBuilder<'a> {
 pub struct LlvmArchiveBuilderBuilder;
 
 impl ArchiveBuilderBuilder for LlvmArchiveBuilderBuilder {
-    fn new_archive_builder<'a>(&self, sess: &'a Session) -> Box<dyn ArchiveBuilder<'a> + 'a> {
+    fn new_archive_builder<'a>(&self, sess: &'a Session) -> Box<dyn ArchiveBuilder + 'a> {
         // FIXME use ArArchiveBuilder on most targets again once reading thin archives is
         // implemented
         if true {
@@ -128,7 +129,7 @@ impl ArchiveBuilderBuilder for LlvmArchiveBuilderBuilder {
         let name_suffix = if is_direct_dependency { "_imports" } else { "_imports_indirect" };
         let output_path = {
             let mut output_path: PathBuf = tmpdir.to_path_buf();
-            output_path.push(format!("{}{}", lib_name, name_suffix));
+            output_path.push(format!("{lib_name}{name_suffix}"));
             output_path.with_extension("lib")
         };
 
@@ -156,7 +157,7 @@ impl ArchiveBuilderBuilder for LlvmArchiveBuilderBuilder {
             // functions. Therefore, use binutils to create the import library instead,
             // by writing a .DEF file to the temp dir and calling binutils's dlltool.
             let def_file_path =
-                tmpdir.join(format!("{}{}", lib_name, name_suffix)).with_extension("def");
+                tmpdir.join(format!("{lib_name}{name_suffix}")).with_extension("def");
 
             let def_file_content = format!(
                 "EXPORTS\n{}",
@@ -164,7 +165,7 @@ impl ArchiveBuilderBuilder for LlvmArchiveBuilderBuilder {
                     .into_iter()
                     .map(|(name, ordinal)| {
                         match ordinal {
-                            Some(n) => format!("{} @{} NONAME", name, n),
+                            Some(n) => format!("{name} @{n} NONAME"),
                             None => name,
                         }
                     })
@@ -175,7 +176,7 @@ impl ArchiveBuilderBuilder for LlvmArchiveBuilderBuilder {
             match std::fs::write(&def_file_path, def_file_content) {
                 Ok(_) => {}
                 Err(e) => {
-                    sess.emit_fatal(ErrorWritingDEFFile { error: e });
+                    sess.dcx().emit_fatal(ErrorWritingDEFFile { error: e });
                 }
             };
 
@@ -198,30 +199,39 @@ impl ArchiveBuilderBuilder for LlvmArchiveBuilderBuilder {
                 "arm" => ("arm", "--32"),
                 _ => panic!("unsupported arch {}", sess.target.arch),
             };
-            let result = std::process::Command::new(dlltool)
-                .args([
-                    "-d",
-                    def_file_path.to_str().unwrap(),
-                    "-D",
-                    lib_name,
-                    "-l",
-                    output_path.to_str().unwrap(),
-                    "-m",
-                    dlltool_target_arch,
-                    "-f",
-                    dlltool_target_bitness,
-                    "--no-leading-underscore",
-                    "--temp-prefix",
-                    temp_prefix.to_str().unwrap(),
-                ])
-                .output();
+            let mut dlltool_cmd = std::process::Command::new(&dlltool);
+            dlltool_cmd.args([
+                "-d",
+                def_file_path.to_str().unwrap(),
+                "-D",
+                lib_name,
+                "-l",
+                output_path.to_str().unwrap(),
+                "-m",
+                dlltool_target_arch,
+                "-f",
+                dlltool_target_bitness,
+                "--no-leading-underscore",
+                "--temp-prefix",
+                temp_prefix.to_str().unwrap(),
+            ]);
 
-            match result {
+            match dlltool_cmd.output() {
                 Err(e) => {
-                    sess.emit_fatal(ErrorCallingDllTool { error: e });
+                    sess.dcx().emit_fatal(ErrorCallingDllTool {
+                        dlltool_path: dlltool.to_string_lossy(),
+                        error: e,
+                    });
                 }
-                Ok(output) if !output.status.success() => {
-                    sess.emit_fatal(DlltoolFailImportLibrary {
+                // dlltool returns '0' on failure, so check for error output instead.
+                Ok(output) if !output.stderr.is_empty() => {
+                    sess.dcx().emit_fatal(DlltoolFailImportLibrary {
+                        dlltool_path: dlltool.to_string_lossy(),
+                        dlltool_args: dlltool_cmd
+                            .get_args()
+                            .map(|arg| arg.to_string_lossy())
+                            .collect::<Vec<_>>()
+                            .join(" "),
                         stdout: String::from_utf8_lossy(&output.stdout),
                         stderr: String::from_utf8_lossy(&output.stderr),
                     })
@@ -273,7 +283,7 @@ impl ArchiveBuilderBuilder for LlvmArchiveBuilderBuilder {
             };
 
             if result == crate::llvm::LLVMRustResult::Failure {
-                sess.emit_fatal(ErrorCreatingImportLibrary {
+                sess.dcx().emit_fatal(ErrorCreatingImportLibrary {
                     lib_name,
                     error: llvm::last_error().unwrap_or("unknown LLVM error".to_string()),
                 });
@@ -304,7 +314,7 @@ fn get_llvm_object_symbols(
             llvm::LLVMRustGetSymbols(
                 buf.as_ptr(),
                 buf.len(),
-                &mut *state as *mut &mut _ as *mut c_void,
+                std::ptr::addr_of_mut!(*state) as *mut c_void,
                 callback,
                 error_callback,
             )
@@ -345,7 +355,7 @@ impl<'a> LlvmArchiveBuilder<'a> {
         let kind = kind
             .parse::<ArchiveKind>()
             .map_err(|_| kind)
-            .unwrap_or_else(|kind| self.sess.emit_fatal(UnknownArchiveKind { kind }));
+            .unwrap_or_else(|kind| self.sess.dcx().emit_fatal(UnknownArchiveKind { kind }));
 
         let mut additions = mem::take(&mut self.additions);
         let mut strings = Vec::new();
@@ -358,7 +368,7 @@ impl<'a> LlvmArchiveBuilder<'a> {
                 match addition {
                     Addition::File { path, name_in_archive } => {
                         let path = CString::new(path.to_str().unwrap())?;
-                        let name = CString::new(name_in_archive.clone())?;
+                        let name = CString::new(name_in_archive.as_bytes())?;
                         members.push(llvm::LLVMRustArchiveMemberNew(
                             path.as_ptr(),
                             name.as_ptr(),
@@ -426,12 +436,12 @@ impl<'a> LlvmArchiveBuilder<'a> {
 }
 
 fn string_to_io_error(s: String) -> io::Error {
-    io::Error::new(io::ErrorKind::Other, format!("bad archive: {}", s))
+    io::Error::new(io::ErrorKind::Other, format!("bad archive: {s}"))
 }
 
 fn find_binutils_dlltool(sess: &Session) -> OsString {
     assert!(sess.target.options.is_like_windows && !sess.target.options.is_like_msvc);
-    if let Some(dlltool_path) = &sess.opts.unstable_opts.dlltool {
+    if let Some(dlltool_path) = &sess.opts.cg.dlltool {
         return dlltool_path.clone().into_os_string();
     }
 

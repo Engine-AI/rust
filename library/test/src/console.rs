@@ -199,7 +199,7 @@ pub fn list_tests_console(opts: &TestOpts, tests: Vec<TestDescAndFn>) -> io::Res
         let TestDescAndFn { desc, testfn } = test;
 
         let fntype = match testfn {
-            StaticTestFn(..) | DynTestFn(..) => {
+            StaticTestFn(..) | DynTestFn(..) | StaticBenchAsTestFn(..) | DynBenchAsTestFn(..) => {
                 st.tests += 1;
                 "test"
             }
@@ -323,9 +323,11 @@ pub fn run_tests_console(opts: &TestOpts, tests: Vec<TestDescAndFn>) -> io::Resu
     // Prevent the usage of `Instant` in some cases:
     // - It's currently not supported for wasm targets.
     // - We disable it for miri because it's not available when isolation is enabled.
-    let is_instant_supported = !cfg!(target_family = "wasm") && !cfg!(miri);
+    let is_instant_unsupported = (cfg!(target_family = "wasm") && !cfg!(target_os = "wasi"))
+        || cfg!(target_os = "zkvm")
+        || cfg!(miri);
 
-    let start_time = is_instant_supported.then(Instant::now);
+    let start_time = (!is_instant_unsupported).then(Instant::now);
     run_tests(opts, tests, |x| on_test_event(&x, &mut st, &mut *out))?;
     st.exec_time = start_time.map(|t| TestSuiteExecTime(t.elapsed()));
 

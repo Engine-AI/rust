@@ -24,8 +24,9 @@ use std::fmt;
 
 use base_db::{AnchoredPathBuf, FileId, FileRange};
 use either::Either;
-use hir::{FieldSource, HasSource, InFile, ModuleSource, Semantics};
-use stdx::never;
+use hir::{FieldSource, HasSource, HirFileIdExt, InFile, ModuleSource, Semantics};
+use span::SyntaxContextId;
+use stdx::{never, TupleExt};
 use syntax::{
     ast::{self, HasName},
     AstNode, SyntaxKind, TextRange, T,
@@ -34,7 +35,7 @@ use text_edit::{TextEdit, TextEditBuilder};
 
 use crate::{
     defs::Definition,
-    search::FileReference,
+    search::{FileReference, FileReferenceNode},
     source_change::{FileSystemEdit, SourceChange},
     syntax_helpers::node_ext::expr_as_name_ref,
     traits::convert_to_def_in_trait,
@@ -71,20 +72,41 @@ impl Definition {
         sema: &Semantics<'_, RootDatabase>,
         new_name: &str,
     ) -> Result<SourceChange> {
+        // self.krate() returns None if
+        // self is a built-in attr, built-in type or tool module.
+        // it is not allowed for these defs to be renamed.
+        // cases where self.krate() is None is handled below.
+        if let Some(krate) = self.krate(sema.db) {
+            // Can we not rename non-local items?
+            // Then bail if non-local
+            if !krate.origin(sema.db).is_local() {
+                bail!("Cannot rename a non-local definition")
+            }
+        }
+
         match *self {
             Definition::Module(module) => rename_mod(sema, module, new_name),
+            Definition::ToolModule(_) => {
+                bail!("Cannot rename a tool module")
+            }
             Definition::BuiltinType(_) => {
                 bail!("Cannot rename builtin type")
             }
+            Definition::BuiltinAttr(_) => {
+                bail!("Cannot rename a builtin attr.")
+            }
             Definition::SelfType(_) => bail!("Cannot rename `Self`"),
+            Definition::Macro(mac) => rename_reference(sema, Definition::Macro(mac), new_name),
             def => rename_reference(sema, def, new_name),
         }
     }
 
     /// Textual range of the identifier which will change when renaming this
-    /// `Definition`. Note that some definitions, like builtin types, can't be
-    /// renamed.
+    /// `Definition`. Note that builtin types can't be
+    /// renamed and extern crate names will report its range, though a rename will introduce
+    /// an alias instead.
     pub fn range_for_rename(self, sema: &Semantics<'_, RootDatabase>) -> Option<FileRange> {
+        let syn_ctx_is_root = |(range, ctx): (_, SyntaxContextId)| ctx.is_root().then_some(range);
         let res = match self {
             Definition::Macro(mac) => {
                 let src = mac.source(sema.db)?;
@@ -92,14 +114,18 @@ impl Definition {
                     Either::Left(it) => it.name()?,
                     Either::Right(it) => it.name()?,
                 };
-                src.with_value(name.syntax()).original_file_range_opt(sema.db)
+                src.with_value(name.syntax())
+                    .original_file_range_opt(sema.db)
+                    .and_then(syn_ctx_is_root)
             }
             Definition::Field(field) => {
                 let src = field.source(sema.db)?;
                 match &src.value {
                     FieldSource::Named(record_field) => {
                         let name = record_field.name()?;
-                        src.with_value(name.syntax()).original_file_range_opt(sema.db)
+                        src.with_value(name.syntax())
+                            .original_file_range_opt(sema.db)
+                            .and_then(syn_ctx_is_root)
                     }
                     FieldSource::Pos(_) => None,
                 }
@@ -107,25 +133,31 @@ impl Definition {
             Definition::Module(module) => {
                 let src = module.declaration_source(sema.db)?;
                 let name = src.value.name()?;
-                src.with_value(name.syntax()).original_file_range_opt(sema.db)
+                src.with_value(name.syntax())
+                    .original_file_range_opt(sema.db)
+                    .and_then(syn_ctx_is_root)
             }
-            Definition::Function(it) => name_range(it, sema),
+            Definition::Function(it) => name_range(it, sema).and_then(syn_ctx_is_root),
             Definition::Adt(adt) => match adt {
-                hir::Adt::Struct(it) => name_range(it, sema),
-                hir::Adt::Union(it) => name_range(it, sema),
-                hir::Adt::Enum(it) => name_range(it, sema),
+                hir::Adt::Struct(it) => name_range(it, sema).and_then(syn_ctx_is_root),
+                hir::Adt::Union(it) => name_range(it, sema).and_then(syn_ctx_is_root),
+                hir::Adt::Enum(it) => name_range(it, sema).and_then(syn_ctx_is_root),
             },
-            Definition::Variant(it) => name_range(it, sema),
-            Definition::Const(it) => name_range(it, sema),
-            Definition::Static(it) => name_range(it, sema),
-            Definition::Trait(it) => name_range(it, sema),
-            Definition::TraitAlias(it) => name_range(it, sema),
-            Definition::TypeAlias(it) => name_range(it, sema),
-            Definition::Local(it) => name_range(it.primary_source(sema.db), sema),
+            Definition::Variant(it) => name_range(it, sema).and_then(syn_ctx_is_root),
+            Definition::Const(it) => name_range(it, sema).and_then(syn_ctx_is_root),
+            Definition::Static(it) => name_range(it, sema).and_then(syn_ctx_is_root),
+            Definition::Trait(it) => name_range(it, sema).and_then(syn_ctx_is_root),
+            Definition::TraitAlias(it) => name_range(it, sema).and_then(syn_ctx_is_root),
+            Definition::TypeAlias(it) => name_range(it, sema).and_then(syn_ctx_is_root),
+            Definition::Local(it) => {
+                name_range(it.primary_source(sema.db), sema).and_then(syn_ctx_is_root)
+            }
             Definition::GenericParam(generic_param) => match generic_param {
                 hir::GenericParam::LifetimeParam(lifetime_param) => {
                     let src = lifetime_param.source(sema.db)?;
-                    src.with_value(src.value.lifetime()?.syntax()).original_file_range_opt(sema.db)
+                    src.with_value(src.value.lifetime()?.syntax())
+                        .original_file_range_opt(sema.db)
+                        .and_then(syn_ctx_is_root)
                 }
                 _ => {
                     let x = match generic_param {
@@ -138,24 +170,46 @@ impl Definition {
                         Either::Left(x) => x.name()?,
                         Either::Right(_) => return None,
                     };
-                    src.with_value(name.syntax()).original_file_range_opt(sema.db)
+                    src.with_value(name.syntax())
+                        .original_file_range_opt(sema.db)
+                        .and_then(syn_ctx_is_root)
                 }
             },
             Definition::Label(label) => {
                 let src = label.source(sema.db);
                 let lifetime = src.value.lifetime()?;
-                src.with_value(lifetime.syntax()).original_file_range_opt(sema.db)
+                src.with_value(lifetime.syntax())
+                    .original_file_range_opt(sema.db)
+                    .and_then(syn_ctx_is_root)
+            }
+            Definition::ExternCrateDecl(it) => {
+                let src = it.source(sema.db)?;
+                if let Some(rename) = src.value.rename() {
+                    let name = rename.name()?;
+                    src.with_value(name.syntax())
+                        .original_file_range_opt(sema.db)
+                        .and_then(syn_ctx_is_root)
+                } else {
+                    let name = src.value.name_ref()?;
+                    src.with_value(name.syntax())
+                        .original_file_range_opt(sema.db)
+                        .and_then(syn_ctx_is_root)
+                }
             }
             Definition::BuiltinType(_) => return None,
             Definition::SelfType(_) => return None,
             Definition::BuiltinAttr(_) => return None,
             Definition::ToolModule(_) => return None,
+            Definition::TupleField(_) => return None,
             // FIXME: This should be doable in theory
             Definition::DeriveHelper(_) => return None,
         };
         return res;
 
-        fn name_range<D>(def: D, sema: &Semantics<'_, RootDatabase>) -> Option<FileRange>
+        fn name_range<D>(
+            def: D,
+            sema: &Semantics<'_, RootDatabase>,
+        ) -> Option<(FileRange, SyntaxContextId)>
         where
             D: HasSource,
             D::Ast: ast::HasName,
@@ -178,7 +232,7 @@ fn rename_mod(
 
     let mut source_change = SourceChange::default();
 
-    if module.is_crate_root(sema.db) {
+    if module.is_crate_root() {
         return Ok(source_change);
     }
 
@@ -202,12 +256,13 @@ fn rename_mod(
         //  - Module has submodules defined in separate files
         let dir_paths = match (is_mod_rs, has_detached_child, module.name(sema.db)) {
             // Go up one level since the anchor is inside the dir we're trying to rename
-            (true, _, Some(mod_name)) => {
-                Some((format!("../{}", mod_name.unescaped()), format!("../{new_name}")))
-            }
+            (true, _, Some(mod_name)) => Some((
+                format!("../{}", mod_name.unescaped().display(sema.db)),
+                format!("../{new_name}"),
+            )),
             // The anchor is on the same level as target dir
             (false, true, Some(mod_name)) => {
-                Some((mod_name.unescaped().to_string(), new_name.to_string()))
+                Some((mod_name.unescaped().display(sema.db).to_string(), new_name.to_owned()))
             }
             _ => None,
         };
@@ -227,12 +282,14 @@ fn rename_mod(
         let file_id = src.file_id.original_file(sema.db);
         match src.value.name() {
             Some(name) => {
-                if let Some(file_range) =
-                    src.with_value(name.syntax()).original_file_range_opt(sema.db)
+                if let Some(file_range) = src
+                    .with_value(name.syntax())
+                    .original_file_range_opt(sema.db)
+                    .map(TupleExt::head)
                 {
                     source_change.insert_source_edit(
                         file_id,
-                        TextEdit::replace(file_range.range, new_name.to_string()),
+                        TextEdit::replace(file_range.range, new_name.to_owned()),
                     )
                 };
             }
@@ -308,7 +365,7 @@ pub fn source_edit_from_references(
     // macros can cause multiple refs to occur for the same text range, so keep track of what we have edited so far
     let mut edited_ranges = Vec::new();
     for &FileReference { range, ref name, .. } in references {
-        let name_range = name.syntax().text_range();
+        let name_range = name.text_range();
         if name_range.len() != range.len() {
             // This usage comes from a different token kind that was downmapped to a NameLike in a macro
             // Renaming this will most likely break things syntax-wise
@@ -318,17 +375,17 @@ pub fn source_edit_from_references(
             // if the ranges differ then the node is inside a macro call, we can't really attempt
             // to make special rewrites like shorthand syntax and such, so just rename the node in
             // the macro input
-            ast::NameLike::NameRef(name_ref) if name_range == range => {
+            FileReferenceNode::NameRef(name_ref) if name_range == range => {
                 source_edit_from_name_ref(&mut edit, name_ref, new_name, def)
             }
-            ast::NameLike::Name(name) if name_range == range => {
+            FileReferenceNode::Name(name) if name_range == range => {
                 source_edit_from_name(&mut edit, name, new_name)
             }
             _ => false,
         };
         if !has_emitted_edit && !edited_ranges.contains(&range.start()) {
             let (range, new_name) = match name {
-                ast::NameLike::Lifetime(_) => (
+                FileReferenceNode::Lifetime(_) => (
                     TextRange::new(range.start() + syntax::TextSize::from(1), range.end()),
                     new_name.strip_prefix('\'').unwrap_or(new_name).to_owned(),
                 ),
@@ -442,7 +499,7 @@ fn source_edit_from_name_ref(
                         let s = field_name.syntax().text_range().start();
                         let e = pat.syntax().text_range().start();
                         edit.delete(TextRange::new(s, e));
-                        edit.replace(name.syntax().text_range(), new_name.to_string());
+                        edit.replace(name.syntax().text_range(), new_name.to_owned());
                         return true;
                     }
                 }
@@ -462,8 +519,25 @@ fn source_edit_from_def(
     if let Definition::Local(local) = def {
         let mut file_id = None;
         for source in local.sources(sema.db) {
-            let source = source.source;
-            file_id = source.file_id.file_id();
+            let source = match source.source.clone().original_ast_node_rooted(sema.db) {
+                Some(source) => source,
+                None => match source
+                    .source
+                    .syntax()
+                    .original_file_range_opt(sema.db)
+                    .map(TupleExt::head)
+                {
+                    Some(FileRange { file_id: file_id2, range }) => {
+                        file_id = Some(file_id2);
+                        edit.replace(range, new_name.to_owned());
+                        continue;
+                    }
+                    None => {
+                        bail!("Can't rename local that is defined in a macro declaration")
+                    }
+                },
+            };
+            file_id = Some(source.file_id);
             if let Either::Left(pat) = source.value {
                 let name_range = pat.name().unwrap().syntax().text_range();
                 // special cases required for renaming fields/locals in Record patterns
@@ -485,20 +559,20 @@ fn source_edit_from_def(
                             // Foo { field: ref mut local @ local 2} -> Foo { field: ref mut new_name @ local2 }
                             // Foo { field: ref mut local } -> Foo { field: ref mut new_name }
                             //                      ^^^^^ replace this with `new_name`
-                            edit.replace(name_range, new_name.to_string());
+                            edit.replace(name_range, new_name.to_owned());
                         }
                     } else {
                         // Foo { ref mut field } -> Foo { field: ref mut new_name }
-                        //      ^ insert `field: `
+                        //   original_ast_node_rootedd: `
                         //               ^^^^^ replace this with `new_name`
                         edit.insert(
                             pat.syntax().text_range().start(),
                             format!("{}: ", pat_field.field_name().unwrap()),
                         );
-                        edit.replace(name_range, new_name.to_string());
+                        edit.replace(name_range, new_name.to_owned());
                     }
                 } else {
-                    edit.replace(name_range, new_name.to_string());
+                    edit.replace(name_range, new_name.to_owned());
                 }
             }
         }
@@ -513,6 +587,9 @@ fn source_edit_from_def(
             TextRange::new(range.start() + syntax::TextSize::from(1), range.end()),
             new_name.strip_prefix('\'').unwrap_or(new_name).to_owned(),
         ),
+        Definition::ExternCrateDecl(decl) if decl.alias(sema.db).is_none() => {
+            (TextRange::empty(range.end()), format!(" as {new_name}"))
+        }
         _ => (range, new_name.to_owned()),
     };
     edit.replace(range, new_name);

@@ -1,6 +1,7 @@
 use super::*;
-use crate::cmp::Ordering::{self, Equal, Greater, Less};
-use crate::intrinsics::{self, const_eval_select};
+use crate::cmp::Ordering::{Equal, Greater, Less};
+use crate::intrinsics::const_eval_select;
+use crate::mem::SizedTypeProperties;
 use crate::slice::{self, SliceIndex};
 
 impl<T: ?Sized> *mut T {
@@ -29,6 +30,7 @@ impl<T: ?Sized> *mut T {
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     #[rustc_const_unstable(feature = "const_ptr_is_null", issue = "74939")]
+    #[rustc_diagnostic_item = "ptr_is_null"]
     #[inline]
     pub const fn is_null(self) -> bool {
         #[inline]
@@ -46,13 +48,17 @@ impl<T: ?Sized> *mut T {
             }
         }
 
+        #[cfg_attr(not(bootstrap), allow(unused_unsafe))] // on bootstrap bump, remove unsafe block
         // SAFETY: The two versions are equivalent at runtime.
-        unsafe { const_eval_select((self as *mut u8,), const_impl, runtime_impl) }
+        unsafe {
+            const_eval_select((self as *mut u8,), const_impl, runtime_impl)
+        }
     }
 
     /// Casts to a pointer of another type.
     #[stable(feature = "ptr_cast", since = "1.38.0")]
     #[rustc_const_stable(feature = "const_ptr_cast", since = "1.38.0")]
+    #[rustc_diagnostic_item = "ptr_cast"]
     #[inline(always)]
     pub const fn cast<U>(self) -> *mut U {
         self as _
@@ -106,9 +112,10 @@ impl<T: ?Sized> *mut T {
     /// with [`cast_mut`] on `*const T` and may have documentation value if used instead of implicit
     /// coercion.
     ///
-    /// [`cast_mut`]: #method.cast_mut
+    /// [`cast_mut`]: pointer::cast_mut
     #[stable(feature = "ptr_const_cast", since = "1.65.0")]
     #[rustc_const_stable(feature = "ptr_const_cast", since = "1.65.0")]
+    #[rustc_diagnostic_item = "ptr_cast_const"]
     #[inline(always)]
     pub const fn cast_const(self) -> *const T {
         self as _
@@ -117,7 +124,7 @@ impl<T: ?Sized> *mut T {
     /// Casts a pointer to its raw bits.
     ///
     /// This is equivalent to `as usize`, but is more specific to enhance readability.
-    /// The inverse method is [`from_bits`](#method.from_bits-1).
+    /// The inverse method is [`from_bits`](pointer#method.from_bits-1).
     ///
     /// In particular, `*p as usize` and `p as usize` will both compile for
     /// pointers to numeric types but do very different things, so using this
@@ -138,8 +145,8 @@ impl<T: ?Sized> *mut T {
     /// ```
     #[unstable(feature = "ptr_to_from_bits", issue = "91126")]
     #[deprecated(
-        since = "1.67",
-        note = "replaced by the `exposed_addr` method, or update your code \
+        since = "1.67.0",
+        note = "replaced by the `expose_addr` method, or update your code \
             to follow the strict provenance rules using its APIs"
     )]
     #[inline(always)]
@@ -153,7 +160,7 @@ impl<T: ?Sized> *mut T {
     /// Creates a pointer from its raw bits.
     ///
     /// This is equivalent to `as *mut T`, but is more specific to enhance readability.
-    /// The inverse method is [`to_bits`](#method.to_bits-1).
+    /// The inverse method is [`to_bits`](pointer#method.to_bits-1).
     ///
     /// # Examples
     ///
@@ -167,7 +174,7 @@ impl<T: ?Sized> *mut T {
     /// ```
     #[unstable(feature = "ptr_to_from_bits", issue = "91126")]
     #[deprecated(
-        since = "1.67",
+        since = "1.67.0",
         note = "replaced by the `ptr::from_exposed_addr_mut` function, or \
             update your code to follow the strict provenance rules using its APIs"
     )]
@@ -184,15 +191,16 @@ impl<T: ?Sized> *mut T {
     ///
     /// This is similar to `self as usize`, which semantically discards *provenance* and
     /// *address-space* information. However, unlike `self as usize`, casting the returned address
-    /// back to a pointer yields [`invalid`][], which is undefined behavior to dereference. To
-    /// properly restore the lost information and obtain a dereferenceable pointer, use
-    /// [`with_addr`][pointer::with_addr] or [`map_addr`][pointer::map_addr].
+    /// back to a pointer yields yields a [pointer without provenance][without_provenance_mut], which is undefined
+    /// behavior to dereference. To properly restore the lost information and obtain a
+    /// dereferenceable pointer, use [`with_addr`][pointer::with_addr] or
+    /// [`map_addr`][pointer::map_addr].
     ///
     /// If using those APIs is not possible because there is no way to preserve a pointer with the
-    /// required provenance, use [`expose_addr`][pointer::expose_addr] and
-    /// [`from_exposed_addr_mut`][from_exposed_addr_mut] instead. However, note that this makes
-    /// your code less portable and less amenable to tools that check for compliance with the Rust
-    /// memory model.
+    /// required provenance, then Strict Provenance might not be for you. Use pointer-integer casts
+    /// or [`expose_addr`][pointer::expose_addr] and [`from_exposed_addr`][from_exposed_addr]
+    /// instead. However, note that this makes your code less portable and less amenable to tools
+    /// that check for compliance with the Rust memory model.
     ///
     /// On most platforms this will produce a value with the same bytes as the original
     /// pointer, because all the bytes are dedicated to describing the address.
@@ -222,7 +230,8 @@ impl<T: ?Sized> *mut T {
     /// later call [`from_exposed_addr_mut`][] to reconstitute the original pointer including its
     /// provenance. (Reconstructing address space information, if required, is your responsibility.)
     ///
-    /// Using this method means that code is *not* following Strict Provenance rules. Supporting
+    /// Using this method means that code is *not* following [Strict
+    /// Provenance][super#strict-provenance] rules. Supporting
     /// [`from_exposed_addr_mut`][] complicates specification and reasoning and may not be supported
     /// by tools that help you to stay conformant with the Rust memory model, so it is recommended
     /// to use [`addr`][pointer::addr] wherever possible.
@@ -233,13 +242,13 @@ impl<T: ?Sized> *mut T {
     /// side-effect which is required for [`from_exposed_addr_mut`][] to work is typically not
     /// available.
     ///
-    /// This API and its claimed semantics are part of the Strict Provenance experiment, see the
-    /// [module documentation][crate::ptr] for details.
+    /// It is unclear whether this method can be given a satisfying unambiguous specification. This
+    /// API and its claimed semantics are part of [Exposed Provenance][super#exposed-provenance].
     ///
     /// [`from_exposed_addr_mut`]: from_exposed_addr_mut
     #[must_use]
     #[inline(always)]
-    #[unstable(feature = "strict_provenance", issue = "95228")]
+    #[unstable(feature = "exposed_provenance", issue = "95228")]
     pub fn expose_addr(self) -> usize {
         // FIXME(strict_provenance_magic): I am magic and should be a compiler intrinsic.
         self.cast::<()>() as usize
@@ -255,7 +264,7 @@ impl<T: ?Sized> *mut T {
     /// This is equivalent to using [`wrapping_offset`][pointer::wrapping_offset] to offset
     /// `self` to the given address, and therefore has all the same capabilities and restrictions.
     ///
-    /// This API and its claimed semantics are part of the Strict Provenance experiment,
+    /// This API and its claimed semantics are an extension to the Strict Provenance experiment,
     /// see the [module documentation][crate::ptr] for details.
     #[must_use]
     #[inline]
@@ -270,7 +279,7 @@ impl<T: ?Sized> *mut T {
         let dest_addr = addr as isize;
         let offset = dest_addr.wrapping_sub(self_addr);
 
-        // This is the canonical desugarring of this operation
+        // This is the canonical desugaring of this operation
         self.wrapping_byte_offset(offset)
     }
 
@@ -287,7 +296,7 @@ impl<T: ?Sized> *mut T {
         self.with_addr(f(self.addr()))
     }
 
-    /// Decompose a (possibly wide) pointer into its address and metadata components.
+    /// Decompose a (possibly wide) pointer into its data pointer and metadata components.
     ///
     /// The pointer can be later reconstructed with [`from_raw_parts_mut`].
     #[unstable(feature = "ptr_metadata", issue = "81513")]
@@ -303,7 +312,7 @@ impl<T: ?Sized> *mut T {
     ///
     /// For the mutable counterpart see [`as_mut`].
     ///
-    /// [`as_uninit_ref`]: #method.as_uninit_ref-1
+    /// [`as_uninit_ref`]: pointer#method.as_uninit_ref-1
     /// [`as_mut`]: #method.as_mut
     ///
     /// # Safety
@@ -369,7 +378,7 @@ impl<T: ?Sized> *mut T {
     ///
     /// For the mutable counterpart see [`as_uninit_mut`].
     ///
-    /// [`as_ref`]: #method.as_ref-1
+    /// [`as_ref`]: pointer#method.as_ref-1
     /// [`as_uninit_mut`]: #method.as_uninit_mut
     ///
     /// # Safety
@@ -476,7 +485,7 @@ impl<T: ?Sized> *mut T {
         // SAFETY: the caller must uphold the safety contract for `offset`.
         // The obtained pointer is valid for writes since the caller must
         // guarantee that it points to the same allocated object as `self`.
-        unsafe { intrinsics::offset(self, count) as *mut T }
+        unsafe { intrinsics::offset(self, count) }
     }
 
     /// Calculates the offset from a pointer in bytes.
@@ -491,8 +500,9 @@ impl<T: ?Sized> *mut T {
     /// leaving the metadata untouched.
     #[must_use]
     #[inline(always)]
-    #[unstable(feature = "pointer_byte_offsets", issue = "96283")]
-    #[rustc_const_unstable(feature = "const_pointer_byte_offsets", issue = "96283")]
+    #[stable(feature = "pointer_byte_offsets", since = "1.75.0")]
+    #[rustc_const_stable(feature = "const_pointer_byte_offsets", since = "1.75.0")]
+    #[rustc_allow_const_fn_unstable(set_ptr_value)]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
     pub const unsafe fn byte_offset(self, count: isize) -> Self {
         // SAFETY: the caller must uphold the safety contract for `offset`.
@@ -570,8 +580,9 @@ impl<T: ?Sized> *mut T {
     /// leaving the metadata untouched.
     #[must_use]
     #[inline(always)]
-    #[unstable(feature = "pointer_byte_offsets", issue = "96283")]
-    #[rustc_const_unstable(feature = "const_pointer_byte_offsets", issue = "96283")]
+    #[stable(feature = "pointer_byte_offsets", since = "1.75.0")]
+    #[rustc_const_stable(feature = "const_pointer_byte_offsets", since = "1.75.0")]
+    #[rustc_allow_const_fn_unstable(set_ptr_value)]
     pub const fn wrapping_byte_offset(self, count: isize) -> Self {
         self.cast::<u8>().wrapping_offset(count).with_metadata_of(self)
     }
@@ -624,7 +635,7 @@ impl<T: ?Sized> *mut T {
     /// For the shared counterpart see [`as_ref`].
     ///
     /// [`as_uninit_mut`]: #method.as_uninit_mut
-    /// [`as_ref`]: #method.as_ref-1
+    /// [`as_ref`]: pointer#method.as_ref-1
     ///
     /// # Safety
     ///
@@ -689,7 +700,7 @@ impl<T: ?Sized> *mut T {
     /// For the shared counterpart see [`as_uninit_ref`].
     ///
     /// [`as_mut`]: #method.as_mut
-    /// [`as_uninit_ref`]: #method.as_uninit_ref-1
+    /// [`as_uninit_ref`]: pointer#method.as_uninit_ref-1
     ///
     /// # Safety
     ///
@@ -777,16 +788,25 @@ impl<T: ?Sized> *mut T {
     /// Calculates the distance between two pointers. The returned value is in
     /// units of T: the distance in bytes divided by `mem::size_of::<T>()`.
     ///
-    /// This function is the inverse of [`offset`].
+    /// This is equivalent to `(self as isize - origin as isize) / (mem::size_of::<T>() as isize)`,
+    /// except that it has a lot more opportunities for UB, in exchange for the compiler
+    /// better understanding what you are doing.
     ///
-    /// [`offset`]: #method.offset-1
+    /// The primary motivation of this method is for computing the `len` of an array/slice
+    /// of `T` that you are currently representing as a "start" and "end" pointer
+    /// (and "end" is "one past the end" of the array).
+    /// In that case, `end.offset_from(start)` gets you the length of the array.
+    ///
+    /// All of the following safety requirements are trivially satisfied for this usecase.
+    ///
+    /// [`offset`]: pointer#method.offset-1
     ///
     /// # Safety
     ///
     /// If any of the following conditions are violated, the result is Undefined
     /// Behavior:
     ///
-    /// * Both the starting and other pointer must be either in bounds or one
+    /// * Both `self` and `origin` must be either in bounds or one
     ///   byte past the end of the same [allocated object].
     ///
     /// * Both pointers must be *derived from* a pointer to the same object.
@@ -815,6 +835,14 @@ impl<T: ?Sized> *mut T {
     /// mapped files *may* be too large to handle with this function.
     /// (Note that [`offset`] and [`add`] also have a similar limitation and hence cannot be used on
     /// such large allocations either.)
+    ///
+    /// The requirement for pointers to be derived from the same allocated object is primarily
+    /// needed for `const`-compatibility: the distance between pointers into *different* allocated
+    /// objects is not known at compile-time. However, the requirement also exists at
+    /// runtime and may be exploited by optimizations. If you wish to compute the difference between
+    /// pointers that are not guaranteed to be from the same allocation, use `(self as isize -
+    /// origin as isize) / mem::size_of::<T>()`.
+    // FIXME: recommend `addr()` instead of `as usize` once that is stable.
     ///
     /// [`add`]: #method.add
     /// [allocated object]: crate::ptr#allocated-object
@@ -871,14 +899,15 @@ impl<T: ?Sized> *mut T {
     /// units of **bytes**.
     ///
     /// This is purely a convenience for casting to a `u8` pointer and
-    /// using [offset_from][pointer::offset_from] on it. See that method for
+    /// using [`offset_from`][pointer::offset_from] on it. See that method for
     /// documentation and safety requirements.
     ///
     /// For non-`Sized` pointees this operation considers only the data pointers,
     /// ignoring the metadata.
     #[inline(always)]
-    #[unstable(feature = "pointer_byte_offsets", issue = "96283")]
-    #[rustc_const_unstable(feature = "const_pointer_byte_offsets", issue = "96283")]
+    #[stable(feature = "pointer_byte_offsets", since = "1.75.0")]
+    #[rustc_const_stable(feature = "const_pointer_byte_offsets", since = "1.75.0")]
+    #[rustc_allow_const_fn_unstable(set_ptr_value)]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
     pub const unsafe fn byte_offset_from<U: ?Sized>(self, origin: *const U) -> isize {
         // SAFETY: the caller must uphold the safety contract for `offset_from`.
@@ -1017,7 +1046,7 @@ impl<T: ?Sized> *mut T {
         T: Sized,
     {
         // SAFETY: the caller must uphold the safety contract for `offset`.
-        unsafe { self.offset(count as isize) }
+        unsafe { intrinsics::offset(self, count) }
     }
 
     /// Calculates the offset from a pointer in bytes (convenience for `.byte_offset(count as isize)`).
@@ -1032,8 +1061,9 @@ impl<T: ?Sized> *mut T {
     /// leaving the metadata untouched.
     #[must_use]
     #[inline(always)]
-    #[unstable(feature = "pointer_byte_offsets", issue = "96283")]
-    #[rustc_const_unstable(feature = "const_pointer_byte_offsets", issue = "96283")]
+    #[stable(feature = "pointer_byte_offsets", since = "1.75.0")]
+    #[rustc_const_stable(feature = "const_pointer_byte_offsets", since = "1.75.0")]
+    #[rustc_allow_const_fn_unstable(set_ptr_value)]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
     pub const unsafe fn byte_add(self, count: usize) -> Self {
         // SAFETY: the caller must uphold the safety contract for `add`.
@@ -1093,14 +1123,23 @@ impl<T: ?Sized> *mut T {
     #[stable(feature = "pointer_methods", since = "1.26.0")]
     #[must_use = "returns a new pointer rather than modifying its argument"]
     #[rustc_const_stable(feature = "const_ptr_offset", since = "1.61.0")]
+    // We could always go back to wrapping if unchecked becomes unacceptable
+    #[rustc_allow_const_fn_unstable(const_int_unchecked_arith)]
     #[inline(always)]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
     pub const unsafe fn sub(self, count: usize) -> Self
     where
         T: Sized,
     {
-        // SAFETY: the caller must uphold the safety contract for `offset`.
-        unsafe { self.offset((count as isize).wrapping_neg()) }
+        if T::IS_ZST {
+            // Pointer arithmetic does nothing when the pointee is a ZST.
+            self
+        } else {
+            // SAFETY: the caller must uphold the safety contract for `offset`.
+            // Because the pointee is *not* a ZST, that means that `count` is
+            // at most `isize::MAX`, and thus the negation cannot overflow.
+            unsafe { self.offset(intrinsics::unchecked_sub(0, count as isize)) }
+        }
     }
 
     /// Calculates the offset from a pointer in bytes (convenience for
@@ -1116,8 +1155,9 @@ impl<T: ?Sized> *mut T {
     /// leaving the metadata untouched.
     #[must_use]
     #[inline(always)]
-    #[unstable(feature = "pointer_byte_offsets", issue = "96283")]
-    #[rustc_const_unstable(feature = "const_pointer_byte_offsets", issue = "96283")]
+    #[stable(feature = "pointer_byte_offsets", since = "1.75.0")]
+    #[rustc_const_stable(feature = "const_pointer_byte_offsets", since = "1.75.0")]
+    #[rustc_allow_const_fn_unstable(set_ptr_value)]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
     pub const unsafe fn byte_sub(self, count: usize) -> Self {
         // SAFETY: the caller must uphold the safety contract for `sub`.
@@ -1196,8 +1236,9 @@ impl<T: ?Sized> *mut T {
     /// leaving the metadata untouched.
     #[must_use]
     #[inline(always)]
-    #[unstable(feature = "pointer_byte_offsets", issue = "96283")]
-    #[rustc_const_unstable(feature = "const_pointer_byte_offsets", issue = "96283")]
+    #[stable(feature = "pointer_byte_offsets", since = "1.75.0")]
+    #[rustc_const_stable(feature = "const_pointer_byte_offsets", since = "1.75.0")]
+    #[rustc_allow_const_fn_unstable(set_ptr_value)]
     pub const fn wrapping_byte_add(self, count: usize) -> Self {
         self.cast::<u8>().wrapping_add(count).with_metadata_of(self)
     }
@@ -1274,8 +1315,9 @@ impl<T: ?Sized> *mut T {
     /// leaving the metadata untouched.
     #[must_use]
     #[inline(always)]
-    #[unstable(feature = "pointer_byte_offsets", issue = "96283")]
-    #[rustc_const_unstable(feature = "const_pointer_byte_offsets", issue = "96283")]
+    #[stable(feature = "pointer_byte_offsets", since = "1.75.0")]
+    #[rustc_const_stable(feature = "const_pointer_byte_offsets", since = "1.75.0")]
+    #[rustc_allow_const_fn_unstable(set_ptr_value)]
     pub const fn wrapping_byte_sub(self, count: usize) -> Self {
         self.cast::<u8>().wrapping_sub(count).with_metadata_of(self)
     }
@@ -1287,7 +1329,7 @@ impl<T: ?Sized> *mut T {
     ///
     /// [`ptr::read`]: crate::ptr::read()
     #[stable(feature = "pointer_methods", since = "1.26.0")]
-    #[rustc_const_unstable(feature = "const_ptr_read", issue = "80377")]
+    #[rustc_const_stable(feature = "const_ptr_read", since = "1.71.0")]
     #[inline(always)]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
     pub const unsafe fn read(self) -> T
@@ -1328,7 +1370,7 @@ impl<T: ?Sized> *mut T {
     ///
     /// [`ptr::read_unaligned`]: crate::ptr::read_unaligned()
     #[stable(feature = "pointer_methods", since = "1.26.0")]
-    #[rustc_const_unstable(feature = "const_ptr_read", issue = "80377")]
+    #[rustc_const_stable(feature = "const_ptr_read", since = "1.71.0")]
     #[inline(always)]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
     pub const unsafe fn read_unaligned(self) -> T
@@ -1347,7 +1389,7 @@ impl<T: ?Sized> *mut T {
     /// See [`ptr::copy`] for safety concerns and examples.
     ///
     /// [`ptr::copy`]: crate::ptr::copy()
-    #[rustc_const_stable(feature = "const_intrinsic_copy", since = "1.63.0")]
+    #[rustc_const_unstable(feature = "const_intrinsic_copy", issue = "80697")]
     #[stable(feature = "pointer_methods", since = "1.26.0")]
     #[inline(always)]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
@@ -1367,7 +1409,7 @@ impl<T: ?Sized> *mut T {
     /// See [`ptr::copy_nonoverlapping`] for safety concerns and examples.
     ///
     /// [`ptr::copy_nonoverlapping`]: crate::ptr::copy_nonoverlapping()
-    #[rustc_const_stable(feature = "const_intrinsic_copy", since = "1.63.0")]
+    #[rustc_const_unstable(feature = "const_intrinsic_copy", issue = "80697")]
     #[stable(feature = "pointer_methods", since = "1.26.0")]
     #[inline(always)]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
@@ -1387,7 +1429,7 @@ impl<T: ?Sized> *mut T {
     /// See [`ptr::copy`] for safety concerns and examples.
     ///
     /// [`ptr::copy`]: crate::ptr::copy()
-    #[rustc_const_stable(feature = "const_intrinsic_copy", since = "1.63.0")]
+    #[rustc_const_unstable(feature = "const_intrinsic_copy", issue = "80697")]
     #[stable(feature = "pointer_methods", since = "1.26.0")]
     #[inline(always)]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
@@ -1407,7 +1449,7 @@ impl<T: ?Sized> *mut T {
     /// See [`ptr::copy_nonoverlapping`] for safety concerns and examples.
     ///
     /// [`ptr::copy_nonoverlapping`]: crate::ptr::copy_nonoverlapping()
-    #[rustc_const_stable(feature = "const_intrinsic_copy", since = "1.63.0")]
+    #[rustc_const_unstable(feature = "const_intrinsic_copy", issue = "80697")]
     #[stable(feature = "pointer_methods", since = "1.26.0")]
     #[inline(always)]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
@@ -1547,9 +1589,7 @@ impl<T: ?Sized> *mut T {
     /// `align`.
     ///
     /// If it is not possible to align the pointer, the implementation returns
-    /// `usize::MAX`. It is permissible for the implementation to *always*
-    /// return `usize::MAX`. Only your algorithm's performance can depend
-    /// on getting a usable offset here, not its correctness.
+    /// `usize::MAX`.
     ///
     /// The offset is expressed in number of `T` elements, and not bytes. The value returned can be
     /// used with the `wrapping_add` method.
@@ -1557,6 +1597,15 @@ impl<T: ?Sized> *mut T {
     /// There are no guarantees whatsoever that offsetting the pointer will not overflow or go
     /// beyond the allocation that the pointer points into. It is up to the caller to ensure that
     /// the returned offset is correct in all terms other than alignment.
+    ///
+    /// When this is called during compile-time evaluation (which is unstable), the implementation
+    /// may return `usize::MAX` in cases where that can never happen at runtime. This is because the
+    /// actual alignment of pointers is not known yet during compile-time, so an offset with
+    /// guaranteed alignment can sometimes not be computed. For example, a buffer declared as `[u8;
+    /// N]` might be allocated at an odd or an even address, but at compile-time this is not yet
+    /// known, so the execution has to be correct for either choice. It is therefore impossible to
+    /// find an offset that is guaranteed to be 2-aligned. (This behavior is subject to change, as usual
+    /// for unstable APIs.)
     ///
     /// # Panics
     ///
@@ -1597,10 +1646,19 @@ impl<T: ?Sized> *mut T {
             panic!("align_offset: align is not a power-of-two");
         }
 
-        {
-            // SAFETY: `align` has been checked to be a power of 2 above
-            unsafe { align_offset(self, align) }
+        // SAFETY: `align` has been checked to be a power of 2 above
+        let ret = unsafe { align_offset(self, align) };
+
+        // Inform Miri that we want to consider the resulting pointer to be suitably aligned.
+        #[cfg(miri)]
+        if ret != usize::MAX {
+            intrinsics::miri_promise_symbolic_alignment(
+                self.wrapping_add(ret).cast_const().cast(),
+                align,
+            );
         }
+
+        ret
     }
 
     /// Returns whether the pointer is properly aligned for `T`.
@@ -1609,7 +1667,6 @@ impl<T: ?Sized> *mut T {
     ///
     /// ```
     /// #![feature(pointer_is_aligned)]
-    /// #![feature(pointer_byte_offsets)]
     ///
     /// // On some platforms, the alignment of i32 is less than 4.
     /// #[repr(align(4))]
@@ -1733,7 +1790,6 @@ impl<T: ?Sized> *mut T {
     ///
     /// ```
     /// #![feature(pointer_is_aligned)]
-    /// #![feature(pointer_byte_offsets)]
     ///
     /// // On some platforms, the alignment of i32 is less than 4.
     /// #[repr(align(4))]
@@ -1844,14 +1900,17 @@ impl<T: ?Sized> *mut T {
         #[inline]
         const fn const_impl(ptr: *mut (), align: usize) -> bool {
             // We can't use the address of `self` in a `const fn`, so we use `align_offset` instead.
-            // The cast to `()` is used to
-            //   1. deal with fat pointers; and
-            //   2. ensure that `align_offset` doesn't actually try to compute an offset.
             ptr.align_offset(align) == 0
         }
 
+        // The cast to `()` is used to
+        //   1. deal with fat pointers; and
+        //   2. ensure that `align_offset` (in `const_impl`) doesn't actually try to compute an offset.
+        #[cfg_attr(not(bootstrap), allow(unused_unsafe))] // on bootstrap bump, remove unsafe block
         // SAFETY: The two versions are equivalent at runtime.
-        unsafe { const_eval_select((self.cast::<()>(), align), const_impl, runtime_impl) }
+        unsafe {
+            const_eval_select((self.cast::<()>(), align), const_impl, runtime_impl)
+        }
     }
 }
 
@@ -1885,10 +1944,10 @@ impl<T> *mut [T] {
     ///
     /// ```
     /// #![feature(slice_ptr_len)]
+    /// use std::ptr;
     ///
-    /// let mut a = [1, 2, 3];
-    /// let ptr = &mut a as *mut [_];
-    /// assert!(!ptr.is_empty());
+    /// let slice: *mut [i8] = ptr::slice_from_raw_parts_mut(ptr::null_mut(), 3);
+    /// assert!(!slice.is_empty());
     /// ```
     #[inline(always)]
     #[unstable(feature = "slice_ptr_len", issue = "71146")]
@@ -2036,11 +2095,10 @@ impl<T> *mut [T] {
     /// }
     /// ```
     #[unstable(feature = "slice_ptr_get", issue = "74265")]
-    #[rustc_const_unstable(feature = "const_slice_index", issue = "none")]
     #[inline(always)]
-    pub const unsafe fn get_unchecked_mut<I>(self, index: I) -> *mut I::Output
+    pub unsafe fn get_unchecked_mut<I>(self, index: I) -> *mut I::Output
     where
-        I: ~const SliceIndex<[T]>,
+        I: SliceIndex<[T]>,
     {
         // SAFETY: the caller ensures that `self` is dereferenceable and `index` in-bounds.
         unsafe { index.get_unchecked_mut(self) }
@@ -2052,7 +2110,7 @@ impl<T> *mut [T] {
     ///
     /// For the mutable counterpart see [`as_uninit_slice_mut`].
     ///
-    /// [`as_ref`]: #method.as_ref-1
+    /// [`as_ref`]: pointer#method.as_ref-1
     /// [`as_uninit_slice_mut`]: #method.as_uninit_slice_mut
     ///
     /// # Safety
@@ -2151,10 +2209,54 @@ impl<T> *mut [T] {
     }
 }
 
+impl<T, const N: usize> *mut [T; N] {
+    /// Returns a raw pointer to the array's buffer.
+    ///
+    /// This is equivalent to casting `self` to `*mut T`, but more type-safe.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// #![feature(array_ptr_get)]
+    /// use std::ptr;
+    ///
+    /// let arr: *mut [i8; 3] = ptr::null_mut();
+    /// assert_eq!(arr.as_mut_ptr(), ptr::null_mut());
+    /// ```
+    #[inline]
+    #[unstable(feature = "array_ptr_get", issue = "119834")]
+    #[rustc_const_unstable(feature = "array_ptr_get", issue = "119834")]
+    pub const fn as_mut_ptr(self) -> *mut T {
+        self as *mut T
+    }
+
+    /// Returns a raw pointer to a mutable slice containing the entire array.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(array_ptr_get)]
+    ///
+    /// let mut arr = [1, 2, 5];
+    /// let ptr: *mut [i32; 3] = &mut arr;
+    /// unsafe {
+    ///     (&mut *ptr.as_mut_slice())[..2].copy_from_slice(&[3, 4]);
+    /// }
+    /// assert_eq!(arr, [3, 4, 5]);
+    /// ```
+    #[inline]
+    #[unstable(feature = "array_ptr_get", issue = "119834")]
+    #[rustc_const_unstable(feature = "array_ptr_get", issue = "119834")]
+    pub const fn as_mut_slice(self) -> *mut [T] {
+        self
+    }
+}
+
 // Equality for pointers
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<T: ?Sized> PartialEq for *mut T {
     #[inline(always)]
+    #[allow(ambiguous_wide_pointer_comparisons)]
     fn eq(&self, other: &*mut T) -> bool {
         *self == *other
     }
@@ -2166,6 +2268,7 @@ impl<T: ?Sized> Eq for *mut T {}
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<T: ?Sized> Ord for *mut T {
     #[inline]
+    #[allow(ambiguous_wide_pointer_comparisons)]
     fn cmp(&self, other: &*mut T) -> Ordering {
         if self < other {
             Less
@@ -2185,21 +2288,25 @@ impl<T: ?Sized> PartialOrd for *mut T {
     }
 
     #[inline(always)]
+    #[allow(ambiguous_wide_pointer_comparisons)]
     fn lt(&self, other: &*mut T) -> bool {
         *self < *other
     }
 
     #[inline(always)]
+    #[allow(ambiguous_wide_pointer_comparisons)]
     fn le(&self, other: &*mut T) -> bool {
         *self <= *other
     }
 
     #[inline(always)]
+    #[allow(ambiguous_wide_pointer_comparisons)]
     fn gt(&self, other: &*mut T) -> bool {
         *self > *other
     }
 
     #[inline(always)]
+    #[allow(ambiguous_wide_pointer_comparisons)]
     fn ge(&self, other: &*mut T) -> bool {
         *self >= *other
     }

@@ -1,11 +1,9 @@
 use std::collections::{hash_map::Entry, VecDeque};
-use std::num::NonZeroU32;
 use std::ops::Not;
 
-use log::trace;
-
 use rustc_data_structures::fx::FxHashMap;
-use rustc_index::vec::{Idx, IndexVec};
+use rustc_index::{Idx, IndexVec};
+use rustc_middle::ty::layout::TyAndLayout;
 
 use super::init_once::InitOnce;
 use super::vector_clock::VClock;
@@ -25,12 +23,12 @@ macro_rules! declare_id {
         /// 0 is used to indicate that the id was not yet assigned and,
         /// therefore, is not a valid identifier.
         #[derive(Clone, Copy, Debug, PartialOrd, Ord, PartialEq, Eq, Hash)]
-        pub struct $name(NonZeroU32);
+        pub struct $name(std::num::NonZero<u32>);
 
         impl SyncId for $name {
             // Panics if `id == 0`.
             fn from_u32(id: u32) -> Self {
-                Self(NonZeroU32::new(id).unwrap())
+                Self(std::num::NonZero::new(id).unwrap())
             }
             fn to_u32(&self) -> u32 {
                 self.0.get()
@@ -43,11 +41,11 @@ macro_rules! declare_id {
                 // therefore, need to shift by one when converting from an index
                 // into a vector.
                 let shifted_idx = u32::try_from(idx).unwrap().checked_add(1).unwrap();
-                $name(NonZeroU32::new(shifted_idx).unwrap())
+                $name(std::num::NonZero::new(shifted_idx).unwrap())
             }
             fn index(self) -> usize {
                 // See the comment in `Self::new`.
-                // (This cannot underflow because self is NonZeroU32.)
+                // (This cannot underflow because `self.0` is `NonZero<u32>`.)
                 usize::try_from(self.0.get() - 1).unwrap()
             }
         }
@@ -71,7 +69,7 @@ struct Mutex {
     lock_count: usize,
     /// The queue of threads waiting for this mutex.
     queue: VecDeque<ThreadId>,
-    /// Data race handle, this tracks the happens-before
+    /// Data race handle. This tracks the happens-before
     /// relationship between each mutex access. It is
     /// released to during unlock and acquired from during
     /// locking, and therefore stores the clock of the last
@@ -93,7 +91,7 @@ struct RwLock {
     writer_queue: VecDeque<ThreadId>,
     /// The queue of reader threads waiting for this lock.
     reader_queue: VecDeque<ThreadId>,
-    /// Data race handle for writers, tracks the happens-before
+    /// Data race handle for writers. Tracks the happens-before
     /// ordering between each write access to a rwlock and is updated
     /// after a sequence of concurrent readers to track the happens-
     /// before ordering between the set of previous readers and
@@ -102,7 +100,7 @@ struct RwLock {
     /// lock or the joined clock of the set of last threads to release
     /// shared reader locks.
     data_race: VClock,
-    /// Data race handle for readers, this is temporary storage
+    /// Data race handle for readers. This is temporary storage
     /// for the combined happens-before ordering for between all
     /// concurrent readers and the next writer, and the value
     /// is stored to the main data_race variable once all
@@ -111,6 +109,7 @@ struct RwLock {
     /// must load the clock of the last write and must not
     /// add happens-before orderings between shared reader
     /// locks.
+    /// This is only relevant when there is an active reader.
     data_race_reader: VClock,
 }
 
@@ -143,7 +142,7 @@ struct Condvar {
     waiters: VecDeque<CondvarWaiter>,
     /// Tracks the happens-before relationship
     /// between a cond-var signal and a cond-var
-    /// wait during a non-suprious signal event.
+    /// wait during a non-spurious signal event.
     /// Contains the clock of the last thread to
     /// perform a futex-signal.
     data_race: VClock,
@@ -180,10 +179,10 @@ pub(crate) struct SynchronizationState<'mir, 'tcx> {
     pub(super) init_onces: IndexVec<InitOnceId, InitOnce<'mir, 'tcx>>,
 }
 
-impl<'mir, 'tcx> VisitTags for SynchronizationState<'mir, 'tcx> {
-    fn visit_tags(&self, visit: &mut dyn FnMut(BorTag)) {
+impl<'mir, 'tcx> VisitProvenance for SynchronizationState<'mir, 'tcx> {
+    fn visit_provenance(&self, visit: &mut VisitWith<'_>) {
         for init_once in self.init_onces.iter() {
-            init_once.visit_tags(visit);
+            init_once.visit_provenance(visit);
         }
     }
 }
@@ -200,11 +199,12 @@ pub(super) trait EvalContextExtPriv<'mir, 'tcx: 'mir>:
         &mut self,
         next_id: Id,
         lock_op: &OpTy<'tcx, Provenance>,
+        lock_layout: TyAndLayout<'tcx>,
         offset: u64,
     ) -> InterpResult<'tcx, Option<Id>> {
         let this = self.eval_context_mut();
         let value_place =
-            this.deref_operand_and_offset(lock_op, offset, this.machine.layouts.u32)?;
+            this.deref_pointer_and_offset(lock_op, offset, lock_layout, this.machine.layouts.u32)?;
 
         // Since we are lazy, this update has to be atomic.
         let (old, success) = this
@@ -278,28 +278,37 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
     fn mutex_get_or_create_id(
         &mut self,
         lock_op: &OpTy<'tcx, Provenance>,
+        lock_layout: TyAndLayout<'tcx>,
         offset: u64,
     ) -> InterpResult<'tcx, MutexId> {
         let this = self.eval_context_mut();
-        this.mutex_get_or_create(|ecx, next_id| ecx.get_or_create_id(next_id, lock_op, offset))
+        this.mutex_get_or_create(|ecx, next_id| {
+            ecx.get_or_create_id(next_id, lock_op, lock_layout, offset)
+        })
     }
 
     fn rwlock_get_or_create_id(
         &mut self,
         lock_op: &OpTy<'tcx, Provenance>,
+        lock_layout: TyAndLayout<'tcx>,
         offset: u64,
     ) -> InterpResult<'tcx, RwLockId> {
         let this = self.eval_context_mut();
-        this.rwlock_get_or_create(|ecx, next_id| ecx.get_or_create_id(next_id, lock_op, offset))
+        this.rwlock_get_or_create(|ecx, next_id| {
+            ecx.get_or_create_id(next_id, lock_op, lock_layout, offset)
+        })
     }
 
     fn condvar_get_or_create_id(
         &mut self,
         lock_op: &OpTy<'tcx, Provenance>,
+        lock_layout: TyAndLayout<'tcx>,
         offset: u64,
     ) -> InterpResult<'tcx, CondvarId> {
         let this = self.eval_context_mut();
-        this.condvar_get_or_create(|ecx, next_id| ecx.get_or_create_id(next_id, lock_op, offset))
+        this.condvar_get_or_create(|ecx, next_id| {
+            ecx.get_or_create_id(next_id, lock_op, lock_layout, offset)
+        })
     }
 
     #[inline]
@@ -373,7 +382,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                 .expect("invariant violation: lock_count == 0 iff the thread is unlocked");
             if mutex.lock_count == 0 {
                 mutex.owner = None;
-                // The mutex is completely unlocked. Try transfering ownership
+                // The mutex is completely unlocked. Try transferring ownership
                 // to another thread.
                 if let Some(data_race) = &this.machine.data_race {
                     data_race.validate_lock_release(
@@ -476,6 +485,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
             Entry::Vacant(_) => return false, // we did not even own this lock
         }
         if let Some(data_race) = &this.machine.data_race {
+            // Add this to the shared-release clock of all concurrent readers.
             data_race.validate_lock_release_shared(
                 &mut rwlock.data_race_reader,
                 reader,
@@ -530,17 +540,10 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
             }
             rwlock.writer = None;
             trace!("rwlock_writer_unlock: {:?} unlocked by {:?}", id, expected_writer);
-            // Release memory to both reader and writer vector clocks
-            //  since this writer happens-before both the union of readers once they are finished
-            //  and the next writer
+            // Release memory to next lock holder.
             if let Some(data_race) = &this.machine.data_race {
                 data_race.validate_lock_release(
                     &mut rwlock.data_race,
-                    current_writer,
-                    current_span,
-                );
-                data_race.validate_lock_release(
-                    &mut rwlock.data_race_reader,
                     current_writer,
                     current_span,
                 );

@@ -1,5 +1,6 @@
-// run-pass
+//@ run-pass
 
+#![allow(dead_code)]
 #![feature(associated_type_bounds)]
 #![feature(type_alias_impl_trait)]
 
@@ -89,8 +90,8 @@ pub fn use_et4() {
 }
 
 fn main() {
-    let _ = use_et1();
-    let _ = use_et2();
-    let _ = use_et3();
-    let _ = use_et4();
+    use_et1();
+    use_et2();
+    use_et3();
+    use_et4();
 }

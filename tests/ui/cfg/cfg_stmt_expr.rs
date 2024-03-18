@@ -1,4 +1,4 @@
-// run-pass
+//@ run-pass
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]
@@ -81,7 +81,7 @@ fn main() {
     // check that lints work
 
     #[allow(non_snake_case)]
-    let FOOBAR = {
+    let FOOBAR: () = {
         fn SYLADEX() {}
     };
 

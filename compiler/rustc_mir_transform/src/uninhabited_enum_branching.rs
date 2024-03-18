@@ -2,8 +2,9 @@
 
 use crate::MirPass;
 use rustc_data_structures::fx::FxHashSet;
+use rustc_middle::mir::patch::MirPatch;
 use rustc_middle::mir::{
-    BasicBlockData, Body, Local, Operand, Rvalue, StatementKind, SwitchTargets, Terminator,
+    BasicBlock, BasicBlockData, BasicBlocks, Body, Local, Operand, Rvalue, StatementKind,
     TerminatorKind,
 };
 use rustc_middle::ty::layout::TyAndLayout;
@@ -30,18 +31,16 @@ fn get_switched_on_type<'tcx>(
     let terminator = block_data.terminator();
 
     // Only bother checking blocks which terminate by switching on a local.
-    if let Some(local) = get_discriminant_local(&terminator.kind) {
-        let stmt_before_term = (!block_data.statements.is_empty())
-            .then(|| &block_data.statements[block_data.statements.len() - 1].kind);
+    let local = get_discriminant_local(&terminator.kind)?;
 
-        if let Some(StatementKind::Assign(box (l, Rvalue::Discriminant(place)))) = stmt_before_term
-        {
-            if l.as_local() == Some(local) {
-                let ty = place.ty(body, tcx).ty;
-                if ty.is_enum() {
-                    return Some(ty);
-                }
-            }
+    let stmt_before_term = block_data.statements.last()?;
+
+    if let StatementKind::Assign(box (l, Rvalue::Discriminant(place))) = stmt_before_term.kind
+        && l.as_local() == Some(local)
+    {
+        let ty = place.ty(body, tcx).ty;
+        if ty.is_enum() {
+            return Some(ty);
         }
     }
 
@@ -72,28 +71,6 @@ fn variant_discriminants<'tcx>(
     }
 }
 
-/// Ensures that the `otherwise` branch leads to an unreachable bb, returning `None` if so and a new
-/// bb to use as the new target if not.
-fn ensure_otherwise_unreachable<'tcx>(
-    body: &Body<'tcx>,
-    targets: &SwitchTargets,
-) -> Option<BasicBlockData<'tcx>> {
-    let otherwise = targets.otherwise();
-    let bb = &body.basic_blocks[otherwise];
-    if bb.terminator().kind == TerminatorKind::Unreachable
-        && bb.statements.iter().all(|s| matches!(&s.kind, StatementKind::StorageDead(_)))
-    {
-        return None;
-    }
-
-    let mut new_block = BasicBlockData::new(Some(Terminator {
-        source_info: bb.terminator().source_info,
-        kind: TerminatorKind::Unreachable,
-    }));
-    new_block.is_cleanup = bb.is_cleanup;
-    Some(new_block)
-}
-
 impl<'tcx> MirPass<'tcx> for UninhabitedEnumBranching {
     fn is_enabled(&self, sess: &rustc_session::Session) -> bool {
         sess.mir_opt_level() > 0
@@ -102,48 +79,89 @@ impl<'tcx> MirPass<'tcx> for UninhabitedEnumBranching {
     fn run_pass(&self, tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
         trace!("UninhabitedEnumBranching starting for {:?}", body.source);
 
-        for bb in body.basic_blocks.indices() {
+        let mut unreachable_targets = Vec::new();
+        let mut patch = MirPatch::new(body);
+
+        for (bb, bb_data) in body.basic_blocks.iter_enumerated() {
             trace!("processing block {:?}", bb);
 
-            let Some(discriminant_ty) = get_switched_on_type(&body.basic_blocks[bb], tcx, body) else {
+            if bb_data.is_cleanup {
                 continue;
-            };
+            }
 
-            let layout = tcx.layout_of(tcx.param_env(body.source.def_id()).and(discriminant_ty));
+            let Some(discriminant_ty) = get_switched_on_type(bb_data, tcx, body) else { continue };
 
-            let allowed_variants = if let Ok(layout) = layout {
+            let layout = tcx.layout_of(
+                tcx.param_env_reveal_all_normalized(body.source.def_id()).and(discriminant_ty),
+            );
+
+            let mut allowed_variants = if let Ok(layout) = layout {
                 variant_discriminants(&layout, discriminant_ty, tcx)
+            } else if let Some(variant_range) = discriminant_ty.variant_range(tcx) {
+                variant_range
+                    .map(|variant| {
+                        discriminant_ty.discriminant_for_variant(tcx, variant).unwrap().val
+                    })
+                    .collect()
             } else {
                 continue;
             };
 
             trace!("allowed_variants = {:?}", allowed_variants);
 
-            if let TerminatorKind::SwitchInt { targets, .. } =
-                &mut body.basic_blocks_mut()[bb].terminator_mut().kind
-            {
-                let mut new_targets = SwitchTargets::new(
-                    targets.iter().filter(|(val, _)| allowed_variants.contains(val)),
-                    targets.otherwise(),
-                );
+            unreachable_targets.clear();
+            let TerminatorKind::SwitchInt { targets, discr } = &bb_data.terminator().kind else {
+                bug!()
+            };
 
-                if new_targets.iter().count() == allowed_variants.len() {
-                    if let Some(updated) = ensure_otherwise_unreachable(body, &new_targets) {
-                        let new_otherwise = body.basic_blocks_mut().push(updated);
-                        *new_targets.all_targets_mut().last_mut().unwrap() = new_otherwise;
-                    }
+            for (index, (val, _)) in targets.iter().enumerate() {
+                if !allowed_variants.remove(&val) {
+                    unreachable_targets.push(index);
                 }
-
-                if let TerminatorKind::SwitchInt { targets, .. } =
-                    &mut body.basic_blocks_mut()[bb].terminator_mut().kind
-                {
-                    *targets = new_targets;
-                } else {
-                    unreachable!()
-                }
-            } else {
-                unreachable!()
             }
+            let otherwise_is_empty_unreachable =
+                body.basic_blocks[targets.otherwise()].is_empty_unreachable();
+            // After resolving https://github.com/llvm/llvm-project/issues/78578,
+            // we can remove the limit on the number of successors.
+            fn check_successors(basic_blocks: &BasicBlocks<'_>, bb: BasicBlock) -> bool {
+                let mut successors = basic_blocks[bb].terminator().successors();
+                let Some(first_successor) = successors.next() else { return true };
+                if successors.next().is_some() {
+                    return true;
+                }
+                if let TerminatorKind::SwitchInt { .. } =
+                    &basic_blocks[first_successor].terminator().kind
+                {
+                    return false;
+                };
+                true
+            }
+            let otherwise_is_last_variant = !otherwise_is_empty_unreachable
+                && allowed_variants.len() == 1
+                && check_successors(&body.basic_blocks, targets.otherwise());
+            let replace_otherwise_to_unreachable = otherwise_is_last_variant
+                || !otherwise_is_empty_unreachable && allowed_variants.is_empty();
+
+            if unreachable_targets.is_empty() && !replace_otherwise_to_unreachable {
+                continue;
+            }
+
+            let unreachable_block = patch.unreachable_no_cleanup_block();
+            let mut targets = targets.clone();
+            if replace_otherwise_to_unreachable {
+                if otherwise_is_last_variant {
+                    #[allow(rustc::potential_query_instability)]
+                    let last_variant = *allowed_variants.iter().next().unwrap();
+                    targets.add_target(last_variant, targets.otherwise());
+                }
+                unreachable_targets.push(targets.iter().count());
+            }
+            for index in unreachable_targets.iter() {
+                targets.all_targets_mut()[*index] = unreachable_block;
+            }
+            patch.patch_terminator(bb, TerminatorKind::SwitchInt { targets, discr: discr.clone() });
         }
+
+        patch.apply(body);
     }
 }

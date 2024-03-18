@@ -1,8 +1,7 @@
 use core::cell::Cell;
 use core::cmp::Ordering;
 use core::mem::MaybeUninit;
-use core::num::NonZeroUsize;
-use core::result::Result::{Err, Ok};
+use core::num::NonZero;
 use core::slice;
 
 #[test]
@@ -148,7 +147,7 @@ fn test_iterator_advance_by() {
     }
 
     let mut iter = v.iter();
-    assert_eq!(iter.advance_by(v.len() + 1), Err(NonZeroUsize::new(1).unwrap()));
+    assert_eq!(iter.advance_by(v.len() + 1), Err(NonZero::new(1).unwrap()));
     assert_eq!(iter.as_slice(), &[]);
 
     let mut iter = v.iter();
@@ -170,7 +169,7 @@ fn test_iterator_advance_back_by() {
     }
 
     let mut iter = v.iter();
-    assert_eq!(iter.advance_back_by(v.len() + 1), Err(NonZeroUsize::new(1).unwrap()));
+    assert_eq!(iter.advance_back_by(v.len() + 1), Err(NonZero::new(1).unwrap()));
     assert_eq!(iter.as_slice(), &[]);
 
     let mut iter = v.iter();
@@ -2110,9 +2109,9 @@ fn test_align_to_zst() {
 #[test]
 fn test_align_to_non_trivial() {
     #[repr(align(8))]
-    struct U64(u64, u64);
+    struct U64(#[allow(dead_code)] u64, #[allow(dead_code)] u64);
     #[repr(align(8))]
-    struct U64U64U32(u64, u64, u32);
+    struct U64U64U32(#[allow(dead_code)] u64, #[allow(dead_code)] u64, #[allow(dead_code)] u32);
     let data = [
         U64(1, 2),
         U64(3, 4),
@@ -2197,7 +2196,7 @@ fn test_slice_partition_dedup_multiple_ident() {
 #[test]
 fn test_slice_partition_dedup_partialeq() {
     #[derive(Debug)]
-    struct Foo(i32, i32);
+    struct Foo(i32, #[allow(dead_code)] i32);
 
     impl PartialEq for Foo {
         fn eq(&self, other: &Foo) -> bool {
@@ -2278,11 +2277,39 @@ fn test_copy_within_panics_src_out_of_bounds() {
 fn test_is_sorted() {
     let empty: [i32; 0] = [];
 
+    // Tests on integers
     assert!([1, 2, 2, 9].is_sorted());
     assert!(![1, 3, 2].is_sorted());
     assert!([0].is_sorted());
+    assert!([0, 0].is_sorted());
     assert!(empty.is_sorted());
+
+    // Tests on floats
+    assert!([1.0f32, 2.0, 2.0, 9.0].is_sorted());
+    assert!(![1.0f32, 3.0f32, 2.0f32].is_sorted());
+    assert!([0.0f32].is_sorted());
+    assert!([0.0f32, 0.0f32].is_sorted());
+    // Test cases with NaNs
+    assert!([f32::NAN].is_sorted());
+    assert!(![f32::NAN, f32::NAN].is_sorted());
     assert!(![0.0, 1.0, f32::NAN].is_sorted());
+    // Tests from <https://github.com/rust-lang/rust/pull/55045#discussion_r229689884>
+    assert!(![f32::NAN, f32::NAN, f32::NAN].is_sorted());
+    assert!(![1.0, f32::NAN, 2.0].is_sorted());
+    assert!(![2.0, f32::NAN, 1.0].is_sorted());
+    assert!(![2.0, f32::NAN, 1.0, 7.0].is_sorted());
+    assert!(![2.0, f32::NAN, 1.0, 0.0].is_sorted());
+    assert!(![-f32::NAN, -1.0, 0.0, 1.0, f32::NAN].is_sorted());
+    assert!(![f32::NAN, -f32::NAN, -1.0, 0.0, 1.0].is_sorted());
+    assert!(![1.0, f32::NAN, -f32::NAN, -1.0, 0.0].is_sorted());
+    assert!(![0.0, 1.0, f32::NAN, -f32::NAN, -1.0].is_sorted());
+    assert!(![-1.0, 0.0, 1.0, f32::NAN, -f32::NAN].is_sorted());
+
+    // Tests for is_sorted_by
+    assert!(![6, 2, 8, 5, 1, -60, 1337].is_sorted());
+    assert!([6, 2, 8, 5, 1, -60, 1337].is_sorted_by(|_, _| true));
+
+    // Tests for is_sorted_by_key
     assert!([-2, -1, 0, 3].is_sorted());
     assert!(![-2i32, -1, 0, 3].is_sorted_by_key(|n| n.abs()));
     assert!(!["c", "bb", "aaa"].is_sorted());
@@ -2371,36 +2398,44 @@ mod swap_panics {
 }
 
 #[test]
-fn slice_split_array_mut() {
+fn slice_split_first_chunk_mut() {
     let v = &mut [1, 2, 3, 4, 5, 6][..];
 
     {
-        let (left, right) = v.split_array_mut::<0>();
+        let (left, right) = v.split_first_chunk_mut::<0>().unwrap();
         assert_eq!(left, &mut []);
         assert_eq!(right, [1, 2, 3, 4, 5, 6]);
     }
 
     {
-        let (left, right) = v.split_array_mut::<6>();
+        let (left, right) = v.split_first_chunk_mut::<6>().unwrap();
         assert_eq!(left, &mut [1, 2, 3, 4, 5, 6]);
         assert_eq!(right, []);
+    }
+
+    {
+        assert!(v.split_first_chunk_mut::<7>().is_none());
     }
 }
 
 #[test]
-fn slice_rsplit_array_mut() {
+fn slice_split_last_chunk_mut() {
     let v = &mut [1, 2, 3, 4, 5, 6][..];
 
     {
-        let (left, right) = v.rsplit_array_mut::<0>();
+        let (left, right) = v.split_last_chunk_mut::<0>().unwrap();
         assert_eq!(left, [1, 2, 3, 4, 5, 6]);
         assert_eq!(right, &mut []);
     }
 
     {
-        let (left, right) = v.rsplit_array_mut::<6>();
+        let (left, right) = v.split_last_chunk_mut::<6>().unwrap();
         assert_eq!(left, []);
         assert_eq!(right, &mut [1, 2, 3, 4, 5, 6]);
+    }
+
+    {
+        assert!(v.split_last_chunk_mut::<7>().is_none());
     }
 }
 
@@ -2416,36 +2451,24 @@ fn split_as_slice() {
     assert_eq!(split.as_slice(), &[]);
 }
 
-#[should_panic]
 #[test]
-fn slice_split_array_ref_out_of_bounds() {
-    let v = &[1, 2, 3, 4, 5, 6][..];
+fn slice_split_once() {
+    let v = &[1, 2, 3, 2, 4][..];
 
-    let _ = v.split_array_ref::<7>();
+    assert_eq!(v.split_once(|&x| x == 2), Some((&[1][..], &[3, 2, 4][..])));
+    assert_eq!(v.split_once(|&x| x == 1), Some((&[][..], &[2, 3, 2, 4][..])));
+    assert_eq!(v.split_once(|&x| x == 4), Some((&[1, 2, 3, 2][..], &[][..])));
+    assert_eq!(v.split_once(|&x| x == 0), None);
 }
 
-#[should_panic]
 #[test]
-fn slice_split_array_mut_out_of_bounds() {
-    let v = &mut [1, 2, 3, 4, 5, 6][..];
+fn slice_rsplit_once() {
+    let v = &[1, 2, 3, 2, 4][..];
 
-    let _ = v.split_array_mut::<7>();
-}
-
-#[should_panic]
-#[test]
-fn slice_rsplit_array_ref_out_of_bounds() {
-    let v = &[1, 2, 3, 4, 5, 6][..];
-
-    let _ = v.rsplit_array_ref::<7>();
-}
-
-#[should_panic]
-#[test]
-fn slice_rsplit_array_mut_out_of_bounds() {
-    let v = &mut [1, 2, 3, 4, 5, 6][..];
-
-    let _ = v.rsplit_array_mut::<7>();
+    assert_eq!(v.rsplit_once(|&x| x == 2), Some((&[1, 2, 3][..], &[4][..])));
+    assert_eq!(v.rsplit_once(|&x| x == 1), Some((&[][..], &[2, 3, 2, 4][..])));
+    assert_eq!(v.rsplit_once(|&x| x == 4), Some((&[1, 2, 3, 2][..], &[][..])));
+    assert_eq!(v.rsplit_once(|&x| x == 0), None);
 }
 
 macro_rules! take_tests {
