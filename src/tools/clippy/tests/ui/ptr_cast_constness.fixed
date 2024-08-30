@@ -1,7 +1,12 @@
 //@aux-build:proc_macros.rs
 
 #![warn(clippy::ptr_cast_constness)]
-#![allow(clippy::transmute_ptr_to_ref, clippy::unnecessary_cast, unused)]
+#![allow(
+    clippy::transmute_ptr_to_ref,
+    clippy::unnecessary_cast,
+    unused,
+    clippy::missing_transmute_annotations
+)]
 
 extern crate proc_macros;
 use proc_macros::{external, inline_macros};
@@ -39,6 +44,10 @@ fn main() {
 
     // Do not lint inside macros from external crates
     let _ = external!($ptr as *const u32);
+}
+
+fn lifetime_to_static(v: *mut &()) -> *const &'static () {
+    v as _
 }
 
 #[clippy::msrv = "1.64"]

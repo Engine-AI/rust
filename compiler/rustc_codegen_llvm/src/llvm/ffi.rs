@@ -1,18 +1,16 @@
 #![allow(non_camel_case_types)]
 #![allow(non_upper_case_globals)]
 
+use std::marker::PhantomData;
+
+use libc::{c_char, c_int, c_uint, c_ulonglong, c_void, size_t};
+
 use super::debuginfo::{
     DIArray, DIBasicType, DIBuilder, DICompositeType, DIDerivedType, DIDescriptor, DIEnumerator,
     DIFile, DIFlags, DIGlobalVariableExpression, DILexicalBlock, DILocation, DINameSpace,
     DISPFlags, DIScope, DISubprogram, DISubrange, DITemplateTypeParameter, DIType, DIVariable,
     DebugEmissionKind, DebugNameTableKind,
 };
-
-use libc::{c_char, c_int, c_uint, size_t};
-use libc::{c_ulonglong, c_void};
-
-use std::marker::PhantomData;
-
 use super::RustString;
 
 pub type Bool = c_uint;
@@ -200,6 +198,8 @@ pub enum AttributeKind {
     AllocAlign = 39,
     SanitizeSafeStack = 40,
     FnRetThunkExtern = 41,
+    Writable = 42,
+    DeadOnUnwind = 43,
 }
 
 /// LLVMIntPredicate
@@ -303,7 +303,6 @@ pub enum TypeKind {
     Pointer = 12,
     Vector = 13,
     Metadata = 14,
-    X86_MMX = 15,
     Token = 16,
     ScalableVector = 17,
     BFloat = 18,
@@ -328,7 +327,6 @@ impl TypeKind {
             TypeKind::Pointer => rustc_codegen_ssa::common::TypeKind::Pointer,
             TypeKind::Vector => rustc_codegen_ssa::common::TypeKind::Vector,
             TypeKind::Metadata => rustc_codegen_ssa::common::TypeKind::Metadata,
-            TypeKind::X86_MMX => rustc_codegen_ssa::common::TypeKind::X86_MMX,
             TypeKind::Token => rustc_codegen_ssa::common::TypeKind::Token,
             TypeKind::ScalableVector => rustc_codegen_ssa::common::TypeKind::ScalableVector,
             TypeKind::BFloat => rustc_codegen_ssa::common::TypeKind::BFloat,
@@ -428,6 +426,7 @@ pub enum MetadataType {
     MD_nontemporal = 9,
     MD_mem_parallel_loop_access = 10,
     MD_nonnull = 11,
+    MD_unpredictable = 15,
     MD_align = 17,
     MD_type = 19,
     MD_vcall_visibility = 28,
@@ -565,12 +564,12 @@ pub enum ArchiveKind {
 }
 
 // LLVMRustThinLTOData
-extern "C" {
+unsafe extern "C" {
     pub type ThinLTOData;
 }
 
 // LLVMRustThinLTOBuffer
-extern "C" {
+unsafe extern "C" {
     pub type ThinLTOBuffer;
 }
 
@@ -622,7 +621,7 @@ pub enum MemoryEffects {
     InaccessibleMemOnly,
 }
 
-extern "C" {
+unsafe extern "C" {
     type Opaque;
 }
 #[repr(C)]
@@ -632,54 +631,54 @@ struct InvariantOpaque<'a> {
 }
 
 // Opaque pointer types
-extern "C" {
+unsafe extern "C" {
     pub type Module;
 }
-extern "C" {
+unsafe extern "C" {
     pub type Context;
 }
-extern "C" {
+unsafe extern "C" {
     pub type Type;
 }
-extern "C" {
+unsafe extern "C" {
     pub type Value;
 }
-extern "C" {
+unsafe extern "C" {
     pub type ConstantInt;
 }
-extern "C" {
+unsafe extern "C" {
     pub type Attribute;
 }
-extern "C" {
+unsafe extern "C" {
     pub type Metadata;
 }
-extern "C" {
+unsafe extern "C" {
     pub type BasicBlock;
 }
 #[repr(C)]
 pub struct Builder<'a>(InvariantOpaque<'a>);
 #[repr(C)]
 pub struct PassManager<'a>(InvariantOpaque<'a>);
-extern "C" {
+unsafe extern "C" {
     pub type Pass;
 }
-extern "C" {
+unsafe extern "C" {
     pub type TargetMachine;
 }
-extern "C" {
+unsafe extern "C" {
     pub type Archive;
 }
 #[repr(C)]
 pub struct ArchiveIterator<'a>(InvariantOpaque<'a>);
 #[repr(C)]
 pub struct ArchiveChild<'a>(InvariantOpaque<'a>);
-extern "C" {
+unsafe extern "C" {
     pub type Twine;
 }
-extern "C" {
+unsafe extern "C" {
     pub type DiagnosticInfo;
 }
-extern "C" {
+unsafe extern "C" {
     pub type SMDiagnostic;
 }
 #[repr(C)]
@@ -689,7 +688,7 @@ pub struct OperandBundleDef<'a>(InvariantOpaque<'a>);
 #[repr(C)]
 pub struct Linker<'a>(InvariantOpaque<'a>);
 
-extern "C" {
+unsafe extern "C" {
     pub type DiagnosticHandler;
 }
 
@@ -697,8 +696,9 @@ pub type DiagnosticHandlerTy = unsafe extern "C" fn(&DiagnosticInfo, *mut c_void
 pub type InlineAsmDiagHandlerTy = unsafe extern "C" fn(&SMDiagnostic, *const c_void, c_uint);
 
 pub mod debuginfo {
-    use super::{InvariantOpaque, Metadata};
     use bitflags::bitflags;
+
+    use super::{InvariantOpaque, Metadata};
 
     #[repr(C)]
     pub struct DIBuilder<'a>(InvariantOpaque<'a>);
@@ -823,7 +823,7 @@ bitflags! {
     }
 }
 
-extern "C" {
+unsafe extern "C" {
     pub type ModuleBuffer;
 }
 
@@ -834,7 +834,7 @@ pub type SelfProfileAfterPassCallback = unsafe extern "C" fn(*mut c_void);
 pub type GetSymbolsCallback = unsafe extern "C" fn(*mut c_void, *const c_char) -> *mut c_void;
 pub type GetSymbolsErrorCallback = unsafe extern "C" fn(*const c_char) -> *mut c_void;
 
-extern "C" {
+unsafe extern "C" {
     // Create and destroy contexts.
     pub fn LLVMContextDispose(C: &'static mut Context);
     pub fn LLVMGetMDKindIDInContext(C: &Context, Name: *const c_char, SLen: c_uint) -> c_uint;
@@ -1518,7 +1518,7 @@ extern "C" {
 }
 
 #[link(name = "llvm-wrapper", kind = "static")]
-extern "C" {
+unsafe extern "C" {
     pub fn LLVMRustInstallErrorHandlers();
     pub fn LLVMRustDisableSystemDialogsOnCrash();
 
@@ -1575,6 +1575,12 @@ extern "C" {
     pub fn LLVMRustCreateAllocSizeAttr(C: &Context, size_arg: u32) -> &Attribute;
     pub fn LLVMRustCreateAllocKindAttr(C: &Context, size_arg: u64) -> &Attribute;
     pub fn LLVMRustCreateMemoryEffectsAttr(C: &Context, effects: MemoryEffects) -> &Attribute;
+    pub fn LLVMRustCreateRangeAttribute(
+        C: &Context,
+        num_bits: c_uint,
+        lower_words: *const u64,
+        upper_words: *const u64,
+    ) -> &Attribute;
 
     // Operations on functions
     pub fn LLVMRustGetOrInsertFunction<'a>(
@@ -1631,6 +1637,10 @@ extern "C" {
 
     // Miscellaneous instructions
     pub fn LLVMRustGetInstrProfIncrementIntrinsic(M: &Module) -> &Value;
+    pub fn LLVMRustGetInstrProfMCDCParametersIntrinsic(M: &Module) -> &Value;
+    pub fn LLVMRustGetInstrProfMCDCTVBitmapUpdateIntrinsic(M: &Module) -> &Value;
+    pub fn LLVMRustGetInstrProfMCDCCondBitmapIntrinsic(M: &Module) -> &Value;
+
     pub fn LLVMRustBuildCall<'a>(
         B: &Builder<'a>,
         Ty: &'a Type,
@@ -1801,12 +1811,21 @@ extern "C" {
     ///
     /// In order for Rust-C LTO to work, module flags must be compatible with Clang. What
     /// "compatible" means depends on the merge behaviors involved.
-    pub fn LLVMRustAddModuleFlag(
+    pub fn LLVMRustAddModuleFlagU32(
         M: &Module,
         merge_behavior: LLVMModFlagBehavior,
         name: *const c_char,
         value: u32,
     );
+
+    pub fn LLVMRustAddModuleFlagString(
+        M: &Module,
+        merge_behavior: LLVMModFlagBehavior,
+        name: *const c_char,
+        value: *const c_char,
+        value_len: size_t,
+    );
+
     pub fn LLVMRustHasModuleFlag(M: &Module, name: *const c_char, len: size_t) -> bool;
 
     pub fn LLVMRustDIBuilderCreate(M: &Module) -> &mut DIBuilder<'_>;
@@ -1841,6 +1860,8 @@ extern "C" {
         CSKind: ChecksumKind,
         Checksum: *const c_char,
         ChecksumLen: size_t,
+        Source: *const c_char,
+        SourceLen: size_t,
     ) -> &'a DIFile;
 
     pub fn LLVMRustDIBuilderCreateSubroutineType<'a>(
@@ -2042,7 +2063,7 @@ extern "C" {
         AddrOpsCount: c_uint,
         DL: &'a DILocation,
         InsertAtEnd: &'a BasicBlock,
-    ) -> &'a Value;
+    );
 
     pub fn LLVMRustDIBuilderCreateEnumerator<'a>(
         Builder: &DIBuilder<'a>,
@@ -2170,7 +2191,7 @@ extern "C" {
         UniqueSectionNames: bool,
         TrapUnreachable: bool,
         Singlethread: bool,
-        AsmComments: bool,
+        VerboseAsm: bool,
         EmitStackSizeSection: bool,
         RelaxELFRelocations: bool,
         UseInitArray: bool,
@@ -2204,6 +2225,7 @@ extern "C" {
         IsLinkerPluginLTO: bool,
         NoPrepopulatePasses: bool,
         VerifyIR: bool,
+        LintIR: bool,
         UseThinLTOBuffers: bool,
         MergeFunctions: bool,
         UnrollLoops: bool,
@@ -2294,6 +2316,7 @@ extern "C" {
         Members: *const &RustArchiveMember<'_>,
         WriteSymbtab: bool,
         Kind: ArchiveKind,
+        isEC: bool,
     ) -> LLVMRustResult;
     pub fn LLVMRustArchiveMemberNew<'a>(
         Filename: *const c_char,
@@ -2334,10 +2357,16 @@ extern "C" {
     #[allow(improper_ctypes)]
     pub fn LLVMRustModuleInstructionStats(M: &Module, Str: &RustString);
 
-    pub fn LLVMRustThinLTOBufferCreate(M: &Module, is_thin: bool) -> &'static mut ThinLTOBuffer;
+    pub fn LLVMRustThinLTOBufferCreate(
+        M: &Module,
+        is_thin: bool,
+        emit_summary: bool,
+    ) -> &'static mut ThinLTOBuffer;
     pub fn LLVMRustThinLTOBufferFree(M: &'static mut ThinLTOBuffer);
     pub fn LLVMRustThinLTOBufferPtr(M: &ThinLTOBuffer) -> *const c_char;
     pub fn LLVMRustThinLTOBufferLen(M: &ThinLTOBuffer) -> size_t;
+    pub fn LLVMRustThinLTOBufferThinLinkDataPtr(M: &ThinLTOBuffer) -> *const c_char;
+    pub fn LLVMRustThinLTOBufferThinLinkDataLen(M: &ThinLTOBuffer) -> size_t;
     pub fn LLVMRustCreateThinLTOData(
         Modules: *const ThinLTOModule,
         NumModules: c_uint,
@@ -2418,4 +2447,8 @@ extern "C" {
         callback: GetSymbolsCallback,
         error_callback: GetSymbolsErrorCallback,
     ) -> *mut c_void;
+
+    pub fn LLVMRustIs64BitSymbolicFile(buf_ptr: *const u8, buf_len: usize) -> bool;
+
+    pub fn LLVMRustIsECObject(buf_ptr: *const u8, buf_len: usize) -> bool;
 }

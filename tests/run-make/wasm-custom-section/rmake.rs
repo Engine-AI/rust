@@ -1,17 +1,14 @@
-extern crate run_make_support;
+//@ only-wasm32-wasip1
 
-use run_make_support::{out_dir, rustc, wasmparser};
 use std::collections::HashMap;
 
+use run_make_support::{rfs, rustc, wasmparser};
+
 fn main() {
-    if std::env::var("TARGET").unwrap() != "wasm32-wasip1" {
-        return;
-    }
+    rustc().input("foo.rs").target("wasm32-wasip1").run();
+    rustc().input("bar.rs").target("wasm32-wasip1").arg("-Clto").opt().run();
 
-    rustc().arg("foo.rs").arg("--target=wasm32-wasip1").run();
-    rustc().arg("bar.rs").arg("--target=wasm32-wasip1").arg("-Clto").arg("-O").run();
-
-    let file = std::fs::read(&out_dir().join("bar.wasm")).unwrap();
+    let file = rfs::read("bar.wasm");
 
     let mut custom = HashMap::new();
     for payload in wasmparser::Parser::new(0).parse_all(&file) {

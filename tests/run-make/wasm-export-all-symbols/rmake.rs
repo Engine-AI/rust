@@ -1,15 +1,12 @@
-extern crate run_make_support;
+//@ only-wasm32-wasip1
 
-use run_make_support::{out_dir, rustc, wasmparser};
 use std::collections::HashMap;
 use std::path::Path;
+
+use run_make_support::{rfs, rustc, wasmparser};
 use wasmparser::ExternalKind::*;
 
 fn main() {
-    if std::env::var("TARGET").unwrap() != "wasm32-wasip1" {
-        return;
-    }
-
     test(&[]);
     test(&["-O"]);
     test(&["-Clto"]);
@@ -17,16 +14,14 @@ fn main() {
 
 fn test(args: &[&str]) {
     eprintln!("running with {args:?}");
-    rustc().arg("bar.rs").arg("--target=wasm32-wasip1").args(args).run();
-    rustc().arg("foo.rs").arg("--target=wasm32-wasip1").args(args).run();
-    rustc().arg("main.rs").arg("--target=wasm32-wasip1").args(args).run();
 
+    rustc().input("bar.rs").target("wasm32-wasip1").args(args).run();
+    rustc().input("foo.rs").target("wasm32-wasip1").args(args).run();
+    rustc().input("main.rs").target("wasm32-wasip1").args(args).run();
+
+    verify_exports(Path::new("foo.wasm"), &[("foo", Func), ("FOO", Global), ("memory", Memory)]);
     verify_exports(
-        &out_dir().join("foo.wasm"),
-        &[("foo", Func), ("FOO", Global), ("memory", Memory)],
-    );
-    verify_exports(
-        &out_dir().join("main.wasm"),
+        Path::new("main.wasm"),
         &[
             ("foo", Func),
             ("FOO", Global),
@@ -39,7 +34,7 @@ fn test(args: &[&str]) {
 
 fn verify_exports(path: &Path, exports: &[(&str, wasmparser::ExternalKind)]) {
     println!("verify {path:?}");
-    let file = std::fs::read(path).unwrap();
+    let file = rfs::read(path);
     let mut wasm_exports = HashMap::new();
     for payload in wasmparser::Parser::new(0).parse_all(&file) {
         let payload = payload.unwrap();

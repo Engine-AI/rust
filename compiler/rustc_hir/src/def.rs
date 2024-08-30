@@ -1,18 +1,18 @@
-use crate::definitions::DefPathData;
-use crate::hir;
+use std::array::IntoIter;
+use std::fmt::Debug;
 
 use rustc_ast as ast;
 use rustc_ast::NodeId;
 use rustc_data_structures::stable_hasher::ToStableHashKey;
 use rustc_data_structures::unord::UnordMap;
-use rustc_macros::HashStable_Generic;
+use rustc_macros::{Decodable, Encodable, HashStable_Generic};
 use rustc_span::def_id::{DefId, LocalDefId};
 use rustc_span::hygiene::MacroKind;
 use rustc_span::symbol::kw;
 use rustc_span::Symbol;
 
-use std::array::IntoIter;
-use std::fmt::Debug;
+use crate::definitions::DefPathData;
+use crate::hir;
 
 /// Encodes if a `DefKind::Ctor` is the constructor of an enum variant or a struct.
 #[derive(Clone, Copy, PartialEq, Eq, Encodable, Decodable, Hash, Debug, HashStable_Generic)]
@@ -76,6 +76,8 @@ pub enum DefKind {
     /// Constant generic parameter: `struct Foo<const N: usize> { ... }`
     ConstParam,
     Static {
+        /// Whether it's a `unsafe static`, `safe static` (inside extern only) or just a `static`.
+        safety: hir::Safety,
         /// Whether it's a `static mut` or just a `static`.
         mutability: ast::Mutability,
         /// Whether it's an anonymous static generated for nested allocations.
@@ -113,6 +115,9 @@ pub enum DefKind {
     InlineConst,
     /// Opaque type, aka `impl Trait`.
     OpaqueTy,
+    /// A field in a struct, enum or union. e.g.
+    /// - `bar` in `struct Foo { bar: u8 }`
+    /// - `Foo::Bar::0` in `enum Foo { Bar(u8) }`
     Field,
     /// Lifetime parameter: the `'a` in `struct Foo<'a> { ... }`
     LifetimeParam,
@@ -128,6 +133,9 @@ pub enum DefKind {
     /// we treat them all the same, and code which needs to distinguish them can match
     /// or `hir::ClosureKind` or `type_of`.
     Closure,
+    /// The definition of a synthetic coroutine body created by the lowering of a
+    /// coroutine-closure, such as an async closure.
+    SyntheticCoroutineBody,
 }
 
 impl DefKind {
@@ -172,6 +180,7 @@ impl DefKind {
             DefKind::Closure => "closure",
             DefKind::ExternCrate => "extern crate",
             DefKind::GlobalAsm => "global assembly block",
+            DefKind::SyntheticCoroutineBody => "synthetic mir body",
         }
     }
 
@@ -204,7 +213,6 @@ impl DefKind {
             | DefKind::Enum
             | DefKind::Variant
             | DefKind::Trait
-            | DefKind::OpaqueTy
             | DefKind::TyAlias
             | DefKind::ForeignTy
             | DefKind::TraitAlias
@@ -231,7 +239,9 @@ impl DefKind {
             | DefKind::Use
             | DefKind::ForeignMod
             | DefKind::GlobalAsm
-            | DefKind::Impl { .. } => None,
+            | DefKind::Impl { .. }
+            | DefKind::OpaqueTy
+            | DefKind::SyntheticCoroutineBody => None,
         }
     }
 
@@ -271,6 +281,7 @@ impl DefKind {
             DefKind::GlobalAsm => DefPathData::GlobalAsm,
             DefKind::Impl { .. } => DefPathData::Impl,
             DefKind::Closure => DefPathData::Closure,
+            DefKind::SyntheticCoroutineBody => DefPathData::Closure,
         }
     }
 
@@ -286,7 +297,8 @@ impl DefKind {
             | DefKind::AssocFn
             | DefKind::Ctor(..)
             | DefKind::Closure
-            | DefKind::Static { .. } => true,
+            | DefKind::Static { .. }
+            | DefKind::SyntheticCoroutineBody => true,
             DefKind::Mod
             | DefKind::Struct
             | DefKind::Union
@@ -310,6 +322,41 @@ impl DefKind {
             | DefKind::LifetimeParam
             | DefKind::AnonConst
             | DefKind::InlineConst
+            | DefKind::GlobalAsm
+            | DefKind::ExternCrate => false,
+        }
+    }
+
+    /// Whether `query struct_target_features` should be used with this definition.
+    pub fn has_struct_target_features(self) -> bool {
+        match self {
+            DefKind::Struct | DefKind::Union | DefKind::Enum => true,
+            DefKind::Fn
+            | DefKind::AssocFn
+            | DefKind::Ctor(..)
+            | DefKind::Closure
+            | DefKind::Static { .. }
+            | DefKind::Mod
+            | DefKind::Variant
+            | DefKind::Trait
+            | DefKind::TyAlias
+            | DefKind::ForeignTy
+            | DefKind::TraitAlias
+            | DefKind::AssocTy
+            | DefKind::Const
+            | DefKind::AssocConst
+            | DefKind::Macro(..)
+            | DefKind::Use
+            | DefKind::ForeignMod
+            | DefKind::OpaqueTy
+            | DefKind::Impl { .. }
+            | DefKind::Field
+            | DefKind::TyParam
+            | DefKind::ConstParam
+            | DefKind::LifetimeParam
+            | DefKind::AnonConst
+            | DefKind::InlineConst
+            | DefKind::SyntheticCoroutineBody
             | DefKind::GlobalAsm
             | DefKind::ExternCrate => false,
         }
@@ -810,6 +857,8 @@ pub enum LifetimeRes {
         param: NodeId,
         /// Id of the introducing place. See `Param`.
         binder: NodeId,
+        /// Kind of elided lifetime
+        kind: hir::MissingLifetimeKind,
     },
     /// This variant is used for anonymous lifetimes that we did not resolve during
     /// late resolution. Those lifetimes will be inferred by typechecking.

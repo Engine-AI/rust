@@ -1,5 +1,4 @@
 use rustc_apfloat::ieee::Single;
-use rustc_middle::mir;
 use rustc_span::Symbol;
 use rustc_target::spec::abi::Abi;
 
@@ -8,19 +7,16 @@ use super::{
     FloatUnaryOp,
 };
 use crate::*;
-use shims::foreign_items::EmulateForeignItemResult;
 
-impl<'mir, 'tcx: 'mir> EvalContextExt<'mir, 'tcx> for crate::MiriInterpCx<'mir, 'tcx> {}
-pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
-    crate::MiriInterpCxExt<'mir, 'tcx>
-{
+impl<'tcx> EvalContextExt<'tcx> for crate::MiriInterpCx<'tcx> {}
+pub(super) trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
     fn emulate_x86_sse_intrinsic(
         &mut self,
         link_name: Symbol,
         abi: Abi,
-        args: &[OpTy<'tcx, Provenance>],
-        dest: &MPlaceTy<'tcx, Provenance>,
-    ) -> InterpResult<'tcx, EmulateForeignItemResult> {
+        args: &[OpTy<'tcx>],
+        dest: &MPlaceTy<'tcx>,
+    ) -> InterpResult<'tcx, EmulateItemResult> {
         let this = self.eval_context_mut();
         this.expect_target_feature_for_intrinsic(link_name, "sse")?;
         // Prefix should have already been checked.
@@ -32,18 +28,14 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
         // performed only on the first element, copying the remaining elements from the input
         // vector (for binary operations, from the left-hand side).
         match unprefixed_name {
-            // Used to implement _mm_{add,sub,mul,div,min,max}_ss functions.
+            // Used to implement _mm_{min,max}_ss functions.
             // Performs the operations on the first component of `left` and
             // `right` and copies the remaining components from `left`.
-            "add.ss" | "sub.ss" | "mul.ss" | "div.ss" | "min.ss" | "max.ss" => {
+            "min.ss" | "max.ss" => {
                 let [left, right] =
                     this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
 
                 let which = match unprefixed_name {
-                    "add.ss" => FloatBinOp::Arith(mir::BinOp::Add),
-                    "sub.ss" => FloatBinOp::Arith(mir::BinOp::Sub),
-                    "mul.ss" => FloatBinOp::Arith(mir::BinOp::Mul),
-                    "div.ss" => FloatBinOp::Arith(mir::BinOp::Div),
                     "min.ss" => FloatBinOp::Min,
                     "max.ss" => FloatBinOp::Max,
                     _ => unreachable!(),
@@ -68,14 +60,13 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
 
                 bin_op_simd_float_all::<Single>(this, which, left, right, dest)?;
             }
-            // Used to implement _mm_{sqrt,rcp,rsqrt}_ss functions.
+            // Used to implement _mm_{rcp,rsqrt}_ss functions.
             // Performs the operations on the first component of `op` and
             // copies the remaining components from `op`.
-            "sqrt.ss" | "rcp.ss" | "rsqrt.ss" => {
+            "rcp.ss" | "rsqrt.ss" => {
                 let [op] = this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
 
                 let which = match unprefixed_name {
-                    "sqrt.ss" => FloatUnaryOp::Sqrt,
                     "rcp.ss" => FloatUnaryOp::Rcp,
                     "rsqrt.ss" => FloatUnaryOp::Rsqrt,
                     _ => unreachable!(),
@@ -85,11 +76,10 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
             }
             // Used to implement _mm_{sqrt,rcp,rsqrt}_ps functions.
             // Performs the operations on all components of `op`.
-            "sqrt.ps" | "rcp.ps" | "rsqrt.ps" => {
+            "rcp.ps" | "rsqrt.ps" => {
                 let [op] = this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
 
                 let which = match unprefixed_name {
-                    "sqrt.ps" => FloatUnaryOp::Sqrt,
                     "rcp.ps" => FloatUnaryOp::Rcp,
                     "rsqrt.ps" => FloatUnaryOp::Rsqrt,
                     _ => unreachable!(),
@@ -182,7 +172,7 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
                 };
 
                 let res = this.float_to_int_checked(&op, dest.layout, rnd)?.unwrap_or_else(|| {
-                    // Fallback to minimum acording to SSE semantics.
+                    // Fallback to minimum according to SSE semantics.
                     ImmTy::from_int(dest.layout.size.signed_int_min(), dest.layout)
                 });
 
@@ -211,8 +201,8 @@ pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
                     this.copy_op(&this.project_index(&left, i)?, &this.project_index(&dest, i)?)?;
                 }
             }
-            _ => return Ok(EmulateForeignItemResult::NotSupported),
+            _ => return Ok(EmulateItemResult::NotSupported),
         }
-        Ok(EmulateForeignItemResult::NeedsJumping)
+        Ok(EmulateItemResult::NeedsReturn)
     }
 }

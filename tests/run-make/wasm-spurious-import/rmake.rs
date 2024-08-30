@@ -1,24 +1,20 @@
-extern crate run_make_support;
+//@ only-wasm32-wasip1
 
-use run_make_support::{out_dir, rustc, wasmparser};
 use std::collections::HashMap;
-use wasmparser::TypeRef::Func;
+
+use run_make_support::{rfs, rustc, wasmparser};
 
 fn main() {
-    if std::env::var("TARGET").unwrap() != "wasm32-wasip1" {
-        return;
-    }
-
     rustc()
-        .arg("main.rs")
-        .arg("--target=wasm32-wasip1")
-        .arg("-Coverflow-checks=yes")
+        .input("main.rs")
+        .target("wasm32-wasip1")
+        .arg("-Coverflow-checks")
         .arg("-Cpanic=abort")
         .arg("-Clto")
         .arg("-Copt-level=z")
         .run();
 
-    let file = std::fs::read(&out_dir().join("main.wasm")).unwrap();
+    let file = rfs::read("main.wasm");
 
     let mut imports = HashMap::new();
     for payload in wasmparser::Parser::new(0).parse_all(&file) {

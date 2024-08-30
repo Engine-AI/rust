@@ -1,7 +1,8 @@
 //! Implementation of "closure return type" inlay hints.
 //!
 //! Tests live in [`bind_pat`][super::bind_pat] module.
-use ide_db::{base_db::FileId, famous_defs::FamousDefs};
+use ide_db::famous_defs::FamousDefs;
+use span::EditionedFileId;
 use stdx::TupleExt;
 use syntax::ast::{self, AstNode};
 use text_edit::{TextRange, TextSize};
@@ -12,7 +13,7 @@ pub(super) fn hints(
     acc: &mut Vec<InlayHint>,
     FamousDefs(sema, _): &FamousDefs<'_, '_>,
     config: &InlayHintsConfig,
-    _file_id: FileId,
+    _file_id: EditionedFileId,
     closure: ast::ClosureExpr,
 ) -> Option<()> {
     if !config.closure_capture_hints {
@@ -32,7 +33,6 @@ pub(super) fn hints(
             let range = closure.syntax().first_token()?.prev_token()?.text_range();
             let range = TextRange::new(range.end() - TextSize::from(1), range.end());
             acc.push(InlayHint {
-                needs_resolve: false,
                 range,
                 kind: InlayKind::ClosureCapture,
                 label: InlayHintLabel::from("move"),
@@ -45,7 +45,6 @@ pub(super) fn hints(
         }
     };
     acc.push(InlayHint {
-        needs_resolve: false,
         range: move_kw_range,
         kind: InlayKind::ClosureCapture,
         label: InlayHintLabel::from("("),
@@ -75,11 +74,10 @@ pub(super) fn hints(
             ),
             None,
             source.name().and_then(|name| {
-                name.syntax().original_file_range_opt(sema.db).map(TupleExt::head)
+                name.syntax().original_file_range_opt(sema.db).map(TupleExt::head).map(Into::into)
             }),
         );
         acc.push(InlayHint {
-            needs_resolve: label.needs_resolve(),
             range: move_kw_range,
             kind: InlayKind::ClosureCapture,
             label,
@@ -91,7 +89,6 @@ pub(super) fn hints(
 
         if idx != last {
             acc.push(InlayHint {
-                needs_resolve: false,
                 range: move_kw_range,
                 kind: InlayKind::ClosureCapture,
                 label: InlayHintLabel::from(", "),
@@ -103,7 +100,6 @@ pub(super) fn hints(
         }
     }
     acc.push(InlayHint {
-        needs_resolve: false,
         range: move_kw_range,
         kind: InlayKind::ClosureCapture,
         label: InlayHintLabel::from(")"),

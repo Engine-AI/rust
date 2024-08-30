@@ -31,13 +31,14 @@ use crate::sys::sync as sys;
 /// <details><summary>Potential deadlock example</summary>
 ///
 /// ```text
-/// // Thread 1             |  // Thread 2
-/// let _rg = lock.read();  |
-///                         |  // will block
-///                         |  let _wg = lock.write();
-/// // may deadlock         |
-/// let _rg = lock.read();  |
+/// // Thread 1              |  // Thread 2
+/// let _rg1 = lock.read();  |
+///                          |  // will block
+///                          |  let _wg = lock.write();
+/// // may deadlock          |
+/// let _rg2 = lock.read();  |
 /// ```
+///
 /// </details>
 ///
 /// The type parameter `T` represents the data that this lock protects. It is
@@ -439,7 +440,7 @@ impl<T: ?Sized> RwLock<T> {
         self.poison.get()
     }
 
-    /// Clear the poisoned state from a lock
+    /// Clear the poisoned state from a lock.
     ///
     /// If the lock is poisoned, it will remain poisoned until this function is called. This allows
     /// recovering from a poisoned state and marking that it has recovered. For example, if the
@@ -572,19 +573,19 @@ impl<T> From<T> for RwLock<T> {
 }
 
 impl<'rwlock, T: ?Sized> RwLockReadGuard<'rwlock, T> {
-    /// Create a new instance of `RwLockReadGuard<T>` from a `RwLock<T>`.
+    /// Creates a new instance of `RwLockReadGuard<T>` from a `RwLock<T>`.
     // SAFETY: if and only if `lock.inner.read()` (or `lock.inner.try_read()`) has been
     // successfully called from the same thread before instantiating this object.
     unsafe fn new(lock: &'rwlock RwLock<T>) -> LockResult<RwLockReadGuard<'rwlock, T>> {
         poison::map_result(lock.poison.borrow(), |()| RwLockReadGuard {
-            data: NonNull::new_unchecked(lock.data.get()),
+            data: unsafe { NonNull::new_unchecked(lock.data.get()) },
             inner_lock: &lock.inner,
         })
     }
 }
 
 impl<'rwlock, T: ?Sized> RwLockWriteGuard<'rwlock, T> {
-    /// Create a new instance of `RwLockWriteGuard<T>` from a `RwLock<T>`.
+    /// Creates a new instance of `RwLockWriteGuard<T>` from a `RwLock<T>`.
     // SAFETY: if and only if `lock.inner.write()` (or `lock.inner.try_write()`) has been
     // successfully called from the same thread before instantiating this object.
     unsafe fn new(lock: &'rwlock RwLock<T>) -> LockResult<RwLockWriteGuard<'rwlock, T>> {

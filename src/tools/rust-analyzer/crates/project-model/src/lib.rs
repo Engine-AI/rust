@@ -15,13 +15,11 @@
 //!   procedural macros).
 //! * Lowering of concrete model to a [`base_db::CrateGraph`]
 
-#![warn(rust_2018_idioms, unused_lifetimes)]
-
-mod build_scripts;
+mod build_dependencies;
 mod cargo_workspace;
-mod cfg_flag;
+mod env;
 mod manifest_path;
-mod project_json;
+pub mod project_json;
 mod rustc_cfg;
 mod sysroot;
 pub mod target_data_layout;
@@ -38,11 +36,11 @@ use std::{
 };
 
 use anyhow::{bail, format_err, Context};
-use paths::{AbsPath, AbsPathBuf};
+use paths::{AbsPath, AbsPathBuf, Utf8PathBuf};
 use rustc_hash::FxHashSet;
 
 pub use crate::{
-    build_scripts::WorkspaceBuildScripts,
+    build_dependencies::WorkspaceBuildScripts,
     cargo_workspace::{
         CargoConfig, CargoFeatures, CargoWorkspace, Package, PackageData, PackageDependency,
         RustLibSource, Target, TargetData, TargetKind,
@@ -50,13 +48,15 @@ pub use crate::{
     manifest_path::ManifestPath,
     project_json::{ProjectJson, ProjectJsonData},
     sysroot::Sysroot,
-    workspace::{CfgOverrides, PackageRoot, ProjectWorkspace},
+    workspace::{FileLoader, PackageRoot, ProjectWorkspace, ProjectWorkspaceKind},
 };
+pub use cargo_metadata::Metadata;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub enum ProjectManifest {
     ProjectJson(ManifestPath),
     CargoToml(ManifestPath),
+    CargoScript(ManifestPath),
 }
 
 impl ProjectManifest {
@@ -66,10 +66,16 @@ impl ProjectManifest {
         if path.file_name().unwrap_or_default() == "rust-project.json" {
             return Ok(ProjectManifest::ProjectJson(path));
         }
+        if path.file_name().unwrap_or_default() == ".rust-project.json" {
+            return Ok(ProjectManifest::ProjectJson(path));
+        }
         if path.file_name().unwrap_or_default() == "Cargo.toml" {
             return Ok(ProjectManifest::CargoToml(path));
         }
-        bail!("project root must point to Cargo.toml or rust-project.json: {path}");
+        if path.extension().unwrap_or_default() == "rs" {
+            return Ok(ProjectManifest::CargoScript(path));
+        }
+        bail!("project root must point to a Cargo.toml, rust-project.json or <script>.rs file: {path}");
     }
 
     pub fn discover_single(path: &AbsPath) -> anyhow::Result<ProjectManifest> {
@@ -87,6 +93,9 @@ impl ProjectManifest {
 
     pub fn discover(path: &AbsPath) -> io::Result<Vec<ProjectManifest>> {
         if let Some(project_json) = find_in_parent_dirs(path, "rust-project.json") {
+            return Ok(vec![ProjectManifest::ProjectJson(project_json)]);
+        }
+        if let Some(project_json) = find_in_parent_dirs(path, ".rust-project.json") {
             return Ok(vec![ProjectManifest::ProjectJson(project_json)]);
         }
         return find_cargo_toml(path)
@@ -127,7 +136,10 @@ impl ProjectManifest {
                 .filter_map(Result::ok)
                 .map(|it| it.path().join("Cargo.toml"))
                 .filter(|it| it.exists())
-                .map(AbsPathBuf::assert)
+                .map(Utf8PathBuf::from_path_buf)
+                .filter_map(Result::ok)
+                .map(AbsPathBuf::try_from)
+                .filter_map(Result::ok)
                 .filter_map(|it| it.try_into().ok())
                 .collect()
         }
@@ -144,15 +156,19 @@ impl ProjectManifest {
         res.sort();
         res
     }
+
+    pub fn manifest_path(&self) -> &ManifestPath {
+        match self {
+            ProjectManifest::ProjectJson(it)
+            | ProjectManifest::CargoToml(it)
+            | ProjectManifest::CargoScript(it) => it,
+        }
+    }
 }
 
 impl fmt::Display for ProjectManifest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ProjectManifest::ProjectJson(it) | ProjectManifest::CargoToml(it) => {
-                fmt::Display::fmt(&it, f)
-            }
-        }
+        fmt::Display::fmt(self.manifest_path(), f)
     }
 }
 
@@ -182,4 +198,43 @@ pub enum InvocationLocation {
     Root(AbsPathBuf),
     #[default]
     Workspace,
+}
+
+/// A set of cfg-overrides per crate.
+#[derive(Default, Debug, Clone, Eq, PartialEq)]
+pub struct CfgOverrides {
+    /// A global set of overrides matching all crates.
+    pub global: cfg::CfgDiff,
+    /// A set of overrides matching specific crates.
+    pub selective: rustc_hash::FxHashMap<String, cfg::CfgDiff>,
+}
+
+impl CfgOverrides {
+    pub fn len(&self) -> usize {
+        self.global.len() + self.selective.values().map(|it| it.len()).sum::<usize>()
+    }
+
+    pub fn apply(&self, cfg_options: &mut cfg::CfgOptions, name: &str) {
+        if !self.global.is_empty() {
+            cfg_options.apply_diff(self.global.clone());
+        };
+        if let Some(diff) = self.selective.get(name) {
+            cfg_options.apply_diff(diff.clone());
+        };
+    }
+}
+
+fn parse_cfg(s: &str) -> Result<cfg::CfgAtom, String> {
+    let res = match s.split_once('=') {
+        Some((key, value)) => {
+            if !(value.starts_with('"') && value.ends_with('"')) {
+                return Err(format!("Invalid cfg ({s:?}), value should be in quotes"));
+            }
+            let key = intern::Symbol::intern(key);
+            let value = intern::Symbol::intern(&value[1..value.len() - 1]);
+            cfg::CfgAtom::KeyValue { key, value }
+        }
+        None => cfg::CfgAtom::Flag(intern::Symbol::intern(s)),
+    };
+    Ok(res)
 }

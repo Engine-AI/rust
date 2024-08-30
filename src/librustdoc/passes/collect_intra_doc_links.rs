@@ -2,22 +2,25 @@
 //!
 //! [RFC 1946]: https://github.com/rust-lang/rfcs/blob/master/text/1946-intra-rustdoc-links.md
 
+use std::borrow::Cow;
+use std::fmt::Display;
+use std::mem;
+use std::ops::Range;
+
 use pulldown_cmark::LinkType;
 use rustc_ast::util::comments::may_have_doc_links;
-use rustc_data_structures::{
-    fx::{FxHashMap, FxHashSet},
-    intern::Interned,
-};
+use rustc_data_structures::fx::{FxHashMap, FxHashSet};
+use rustc_data_structures::intern::Interned;
 use rustc_errors::{Applicability, Diag, DiagMessage};
 use rustc_hir::def::Namespace::*;
 use rustc_hir::def::{DefKind, Namespace, PerNS};
 use rustc_hir::def_id::{DefId, CRATE_DEF_ID};
-use rustc_hir::Mutability;
+use rustc_hir::{Mutability, Safety};
 use rustc_middle::ty::{Ty, TyCtxt};
 use rustc_middle::{bug, span_bug, ty};
-use rustc_resolve::rustdoc::{has_primitive_or_keyword_docs, prepare_to_doc_link_resolution};
 use rustc_resolve::rustdoc::{
-    source_span_for_markdown_range, strip_generics_from_path, MalformedGenerics,
+    has_primitive_or_keyword_docs, prepare_to_doc_link_resolution, source_span_for_markdown_range,
+    strip_generics_from_path, MalformedGenerics,
 };
 use rustc_session::lint::Lint;
 use rustc_span::hygiene::MacroKind;
@@ -25,13 +28,8 @@ use rustc_span::symbol::{sym, Ident, Symbol};
 use rustc_span::BytePos;
 use smallvec::{smallvec, SmallVec};
 
-use std::borrow::Cow;
-use std::fmt::Display;
-use std::mem;
-use std::ops::Range;
-
-use crate::clean::{self, utils::find_nearest_parent_module};
-use crate::clean::{Crate, Item, ItemLink, PrimitiveType};
+use crate::clean::utils::find_nearest_parent_module;
+use crate::clean::{self, Crate, Item, ItemLink, PrimitiveType};
 use crate::core::DocContext;
 use crate::html::markdown::{markdown_links, MarkdownLink, MarkdownLinkRange};
 use crate::lint::{BROKEN_INTRA_DOC_LINKS, PRIVATE_INTRA_DOC_LINKS};
@@ -55,7 +53,7 @@ fn filter_assoc_items_by_name_and_namespace<'a>(
     assoc_items_of: DefId,
     ident: Ident,
     ns: Namespace,
-) -> impl Iterator<Item = &ty::AssocItem> + 'a {
+) -> impl Iterator<Item = &'a ty::AssocItem> + 'a {
     tcx.associated_items(assoc_items_of).filter_by_name_unhygienic(ident.name).filter(move |item| {
         item.kind.namespace() == ns && tcx.hygienic_eq(ident, item.ident(tcx), assoc_items_of)
     })
@@ -491,12 +489,13 @@ impl<'a, 'tcx> LinkCollector<'a, 'tcx> {
             ty::Str => Res::Primitive(Str),
             ty::Tuple(tys) if tys.is_empty() => Res::Primitive(Unit),
             ty::Tuple(_) => Res::Primitive(Tuple),
+            ty::Pat(..) => Res::Primitive(Pat),
             ty::Array(..) => Res::Primitive(Array),
             ty::Slice(_) => Res::Primitive(Slice),
-            ty::RawPtr(_) => Res::Primitive(RawPointer),
+            ty::RawPtr(_, _) => Res::Primitive(RawPointer),
             ty::Ref(..) => Res::Primitive(Reference),
             ty::FnDef(..) => panic!("type alias to a function definition"),
-            ty::FnPtr(_) => Res::Primitive(Fn),
+            ty::FnPtr(..) => Res::Primitive(Fn),
             ty::Never => Res::Primitive(Never),
             ty::Adt(ty::AdtDef(Interned(&ty::AdtDefData { did, .. }, _)), _) | ty::Foreign(did) => {
                 Res::from_def_id(self.cx.tcx, did)
@@ -536,8 +535,10 @@ impl<'a, 'tcx> LinkCollector<'a, 'tcx> {
             I64 => tcx.types.i64,
             I128 => tcx.types.i128,
             Isize => tcx.types.isize,
+            F16 => tcx.types.f16,
             F32 => tcx.types.f32,
             F64 => tcx.types.f64,
+            F128 => tcx.types.f128,
             U8 => tcx.types.u8,
             U16 => tcx.types.u16,
             U32 => tcx.types.u32,
@@ -1417,7 +1418,7 @@ impl LinkCollector<'_, '_> {
         //
         // Otherwise, check if 2 links are same, if so, skip the resolve process.
         //
-        // Notice that this algorithm is passive, might possibly miss actual redudant cases.
+        // Notice that this algorithm is passive, might possibly miss actual redundant cases.
         let explicit_link = explicit_link.to_string();
         let display_text = ori_link.display_text.as_ref().unwrap();
 
@@ -1504,6 +1505,15 @@ impl Disambiguator {
     fn from_str(link: &str) -> Result<Option<(Self, &str, &str)>, (String, Range<usize>)> {
         use Disambiguator::{Kind, Namespace as NS, Primitive};
 
+        let suffixes = [
+            // If you update this list, please also update the relevant rustdoc book section!
+            ("!()", DefKind::Macro(MacroKind::Bang)),
+            ("!{}", DefKind::Macro(MacroKind::Bang)),
+            ("![]", DefKind::Macro(MacroKind::Bang)),
+            ("()", DefKind::Fn),
+            ("!", DefKind::Macro(MacroKind::Bang)),
+        ];
+
         if let Some(idx) = link.find('@') {
             let (prefix, rest) = link.split_at(idx);
             let d = match prefix {
@@ -1514,7 +1524,11 @@ impl Disambiguator {
                 "union" => Kind(DefKind::Union),
                 "module" | "mod" => Kind(DefKind::Mod),
                 "const" | "constant" => Kind(DefKind::Const),
-                "static" => Kind(DefKind::Static { mutability: Mutability::Not, nested: false }),
+                "static" => Kind(DefKind::Static {
+                    mutability: Mutability::Not,
+                    nested: false,
+                    safety: Safety::Safe,
+                }),
                 "function" | "fn" | "method" => Kind(DefKind::Fn),
                 "derive" => Kind(DefKind::Macro(MacroKind::Derive)),
                 "type" => NS(Namespace::TypeNS),
@@ -1523,16 +1537,23 @@ impl Disambiguator {
                 "prim" | "primitive" => Primitive,
                 _ => return Err((format!("unknown disambiguator `{prefix}`"), 0..idx)),
             };
+
+            for (suffix, kind) in suffixes {
+                if let Some(path_str) = rest.strip_suffix(suffix) {
+                    if d.ns() != Kind(kind).ns() {
+                        return Err((
+                            format!("unmatched disambiguator `{prefix}` and suffix `{suffix}`"),
+                            0..idx,
+                        ));
+                    } else if path_str.len() > 1 {
+                        // path_str != "@"
+                        return Ok(Some((d, &path_str[1..], &rest[1..])));
+                    }
+                }
+            }
+
             Ok(Some((d, &rest[1..], &rest[1..])))
         } else {
-            let suffixes = [
-                // If you update this list, please also update the relevant rustdoc book section!
-                ("!()", DefKind::Macro(MacroKind::Bang)),
-                ("!{}", DefKind::Macro(MacroKind::Bang)),
-                ("![]", DefKind::Macro(MacroKind::Bang)),
-                ("()", DefKind::Fn),
-                ("!", DefKind::Macro(MacroKind::Bang)),
-            ];
             for (suffix, kind) in suffixes {
                 if let Some(path_str) = link.strip_suffix(suffix) {
                     // Avoid turning `!` or `()` into an empty string
@@ -1686,7 +1707,9 @@ fn report_diagnostic(
 
     let sp = item.attr_span(tcx);
 
-    tcx.node_span_lint(lint, hir_id, sp, msg, |lint| {
+    tcx.node_span_lint(lint, hir_id, sp, |lint| {
+        lint.primary_message(msg);
+
         let (span, link_range) = match link_range {
             MarkdownLinkRange::Destination(md_range) => {
                 let mut md_range = md_range.clone();
@@ -1927,7 +1950,9 @@ fn resolution_failure(
                             | TraitAlias
                             | TyParam
                             | Static { .. } => "associated item",
-                            Impl { .. } | GlobalAsm => unreachable!("not a path"),
+                            Impl { .. } | GlobalAsm | SyntheticCoroutineBody => {
+                                unreachable!("not a path")
+                            }
                         }
                     } else {
                         "associated item"
@@ -2196,8 +2221,10 @@ fn resolve_primitive(path_str: &str, ns: Namespace) -> Option<Res> {
         "u32" => U32,
         "u64" => U64,
         "u128" => U128,
+        "f16" => F16,
         "f32" => F32,
         "f64" => F64,
+        "f128" => F128,
         "char" => Char,
         "bool" | "true" | "false" => Bool,
         "str" | "&str" => Str,

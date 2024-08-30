@@ -5,7 +5,7 @@ use clippy_utils::visitors::contains_break_or_continue;
 use rustc_ast::util::parser::PREC_PREFIX;
 use rustc_ast::Mutability;
 use rustc_errors::Applicability;
-use rustc_hir::{is_range_literal, BorrowKind, Expr, ExprKind, Pat};
+use rustc_hir::{is_range_literal, BorrowKind, Expr, ExprKind, Pat, PatKind};
 use rustc_lint::LateContext;
 use rustc_span::edition::Edition;
 use rustc_span::sym;
@@ -42,7 +42,7 @@ pub(super) fn check<'tcx>(
             },
             [],
             _,
-        ) if method.ident.name == rustc_span::sym::iter => (arg, "&"),
+        ) if method.ident.name == sym::iter => (arg, "&"),
         ExprKind::MethodCall(
             method,
             Expr {
@@ -60,7 +60,7 @@ pub(super) fn check<'tcx>(
             },
             [],
             _,
-        ) if method.ident.name == rustc_span::sym::into_iter => (arg, ""),
+        ) if method.ident.name == sym::into_iter => (arg, ""),
         // Only check for arrays edition 2021 or later, as this case will trigger a compiler error otherwise.
         ExprKind::Array([arg]) if cx.tcx.sess.edition() >= Edition::Edition2021 => (arg, ""),
         _ => return,
@@ -70,7 +70,10 @@ pub(super) fn check<'tcx>(
         && !contains_break_or_continue(body)
     {
         let mut applicability = Applicability::MachineApplicable;
-        let pat_snip = snippet_with_applicability(cx, pat.span, "..", &mut applicability);
+        let mut pat_snip = snippet_with_applicability(cx, pat.span, "..", &mut applicability);
+        if matches!(pat.kind, PatKind::Or(..)) {
+            pat_snip = format!("({pat_snip})").into();
+        }
         let mut arg_snip = snippet_with_applicability(cx, arg_expression.span, "..", &mut applicability);
         let mut block_str = snippet_with_applicability(cx, block.span, "..", &mut applicability).into_owned();
         block_str.remove(0);
@@ -95,7 +98,7 @@ pub(super) fn check<'tcx>(
                 cx,
                 SINGLE_ELEMENT_LOOP,
                 arg.span,
-                format!("this loops only once with `{pat_snip}` being `{range_expr}`").as_str(),
+                format!("this loops only once with `{pat_snip}` being `{range_expr}`"),
                 "did you mean to iterate over the range instead?",
                 sugg.to_string(),
                 Applicability::Unspecified,

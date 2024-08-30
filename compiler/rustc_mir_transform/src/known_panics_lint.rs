@@ -6,13 +6,16 @@
 
 use std::fmt::Debug;
 
+use rustc_const_eval::const_eval::DummyMachine;
 use rustc_const_eval::interpret::{
     format_interp_error, ImmTy, InterpCx, InterpResult, Projectable, Scalar,
 };
 use rustc_data_structures::fx::FxHashSet;
 use rustc_hir::def::DefKind;
 use rustc_hir::HirId;
-use rustc_index::{bit_set::BitSet, Idx, IndexVec};
+use rustc_index::bit_set::BitSet;
+use rustc_index::IndexVec;
+use rustc_middle::bug;
 use rustc_middle::mir::visit::{MutatingUseContext, NonMutatingUseContext, PlaceContext, Visitor};
 use rustc_middle::mir::*;
 use rustc_middle::ty::layout::{LayoutError, LayoutOf, LayoutOfHelpers, TyAndLayout};
@@ -20,7 +23,6 @@ use rustc_middle::ty::{self, ConstInt, ParamEnv, ScalarInt, Ty, TyCtxt, TypeVisi
 use rustc_span::Span;
 use rustc_target::abi::{Abi, FieldIdx, HasDataLayout, Size, TargetDataLayout, VariantIdx};
 
-use crate::dataflow_const_prop::DummyMachine;
 use crate::errors::{AssertLint, AssertLintKind};
 use crate::MirLint;
 
@@ -63,7 +65,7 @@ impl<'tcx> MirLint<'tcx> for KnownPanicsLint {
 /// Visits MIR nodes, performs const propagation
 /// and runs lint checks as it goes
 struct ConstPropagator<'mir, 'tcx> {
-    ecx: InterpCx<'mir, 'tcx, DummyMachine>,
+    ecx: InterpCx<'tcx, DummyMachine>,
     tcx: TyCtxt<'tcx>,
     param_env: ParamEnv<'tcx>,
     worklist: Vec<BasicBlock>,
@@ -101,8 +103,12 @@ impl<'tcx> Value<'tcx> {
                 }
                 (PlaceElem::Index(idx), Value::Aggregate { fields, .. }) => {
                     let idx = prop.get_const(idx.into())?.immediate()?;
-                    let idx = prop.ecx.read_target_usize(idx).ok()?;
-                    fields.get(FieldIdx::from_u32(idx.try_into().ok()?)).unwrap_or(&Value::Uninit)
+                    let idx = prop.ecx.read_target_usize(idx).ok()?.try_into().ok()?;
+                    if idx <= FieldIdx::MAX_AS_U32 {
+                        fields.get(FieldIdx::from_u32(idx)).unwrap_or(&Value::Uninit)
+                    } else {
+                        return None;
+                    }
                 }
                 (
                     PlaceElem::ConstantIndex { offset, min_length: _, from_end: false },
@@ -124,10 +130,8 @@ impl<'tcx> Value<'tcx> {
                     fields.ensure_contains_elem(*idx, || Value::Uninit)
                 }
                 (PlaceElem::Field(..), val @ Value::Uninit) => {
-                    *val = Value::Aggregate {
-                        variant: VariantIdx::new(0),
-                        fields: Default::default(),
-                    };
+                    *val =
+                        Value::Aggregate { variant: VariantIdx::ZERO, fields: Default::default() };
                     val.project_mut(&[*proj])?
                 }
                 _ => return None,
@@ -261,7 +265,7 @@ impl<'mir, 'tcx> ConstPropagator<'mir, 'tcx> {
         // manually normalized.
         let val = self.tcx.try_normalize_erasing_regions(self.param_env, c.const_).ok()?;
 
-        self.use_ecx(|this| this.ecx.eval_mir_constant(&val, Some(c.span), None))?
+        self.use_ecx(|this| this.ecx.eval_mir_constant(&val, c.span, None))?
             .as_mplace_or_imm()
             .right()
     }
@@ -305,20 +309,25 @@ impl<'mir, 'tcx> ConstPropagator<'mir, 'tcx> {
 
     fn check_unary_op(&mut self, op: UnOp, arg: &Operand<'tcx>, location: Location) -> Option<()> {
         let arg = self.eval_operand(arg)?;
-        if let (val, true) = self.use_ecx(|this| {
-            let val = this.ecx.read_immediate(&arg)?;
-            let (_res, overflow) = this.ecx.overflowing_unary_op(op, &val)?;
-            Ok((val, overflow))
-        })? {
-            // `AssertKind` only has an `OverflowNeg` variant, so make sure that is
-            // appropriate to use.
-            assert_eq!(op, UnOp::Neg, "Neg is the only UnOp that can overflow");
-            self.report_assert_as_lint(
-                location,
-                AssertLintKind::ArithmeticOverflow,
-                AssertKind::OverflowNeg(val.to_const_int()),
-            );
-            return None;
+        // The only operator that can overflow is `Neg`.
+        if op == UnOp::Neg && arg.layout.ty.is_integral() {
+            // Compute this as `0 - arg` so we can use `SubWithOverflow` to check for overflow.
+            let (arg, overflow) = self.use_ecx(|this| {
+                let arg = this.ecx.read_immediate(&arg)?;
+                let (_res, overflow) = this
+                    .ecx
+                    .binary_op(BinOp::SubWithOverflow, &ImmTy::from_int(0, arg.layout), &arg)?
+                    .to_scalar_pair();
+                Ok((arg, overflow.to_bool()?))
+            })?;
+            if overflow {
+                self.report_assert_as_lint(
+                    location,
+                    AssertLintKind::ArithmeticOverflow,
+                    AssertKind::OverflowNeg(arg.to_const_int()),
+                );
+                return None;
+            }
         }
 
         Some(())
@@ -348,15 +357,12 @@ impl<'mir, 'tcx> ConstPropagator<'mir, 'tcx> {
                 debug!("check_binary_op: reporting assert for {:?}", location);
                 let panic = AssertKind::Overflow(
                     op,
-                    match l {
-                        Some(l) => l.to_const_int(),
-                        // Invent a dummy value, the diagnostic ignores it anyway
-                        None => ConstInt::new(
-                            ScalarInt::try_from_uint(1_u8, left_size).unwrap(),
-                            left_ty.is_signed(),
-                            left_ty.is_ptr_sized_integral(),
-                        ),
-                    },
+                    // Invent a dummy value, the diagnostic ignores it anyway
+                    ConstInt::new(
+                        ScalarInt::try_from_uint(1_u8, left_size).unwrap(),
+                        left_ty.is_signed(),
+                        left_ty.is_ptr_sized_integral(),
+                    ),
                     r.to_const_int(),
                 );
                 self.report_assert_as_lint(location, AssertLintKind::ArithmeticOverflow, panic);
@@ -364,11 +370,20 @@ impl<'mir, 'tcx> ConstPropagator<'mir, 'tcx> {
             }
         }
 
-        if let (Some(l), Some(r)) = (l, r) {
-            // The remaining operators are handled through `overflowing_binary_op`.
+        // Div/Rem are handled via the assertions they trigger.
+        // But for Add/Sub/Mul, those assertions only exist in debug builds, and we want to
+        // lint in release builds as well, so we check on the operation instead.
+        // So normalize to the "overflowing" operator, and then ensure that it
+        // actually is an overflowing operator.
+        let op = op.wrapping_to_overflowing().unwrap_or(op);
+        // The remaining operators are handled through `wrapping_to_overflowing`.
+        if let (Some(l), Some(r)) = (l, r)
+            && l.layout.ty.is_integral()
+            && op.is_overflowing()
+        {
             if self.use_ecx(|this| {
-                let (_res, overflow) = this.ecx.overflowing_binary_op(op, &l, &r)?;
-                Ok(overflow)
+                let (_res, overflow) = this.ecx.binary_op(op, &l, &r)?.to_scalar_pair();
+                overflow.to_bool()
             })? {
                 self.report_assert_as_lint(
                     location,
@@ -402,19 +417,10 @@ impl<'mir, 'tcx> ConstPropagator<'mir, 'tcx> {
                 trace!("checking BinaryOp(op = {:?}, left = {:?}, right = {:?})", op, left, right);
                 self.check_binary_op(*op, left, right, location)?;
             }
-            Rvalue::CheckedBinaryOp(op, box (left, right)) => {
-                trace!(
-                    "checking CheckedBinaryOp(op = {:?}, left = {:?}, right = {:?})",
-                    op,
-                    left,
-                    right
-                );
-                self.check_binary_op(*op, left, right, location)?;
-            }
 
             // Do not try creating references (#67862)
-            Rvalue::AddressOf(_, place) | Rvalue::Ref(_, _, place) => {
-                trace!("skipping AddressOf | Ref for {:?}", place);
+            Rvalue::RawPtr(_, place) | Rvalue::Ref(_, _, place) => {
+                trace!("skipping RawPtr | Ref for {:?}", place);
 
                 // This may be creating mutable references or immutable references to cells.
                 // If that happens, the pointed to value could be mutated via that reference.
@@ -556,24 +562,16 @@ impl<'mir, 'tcx> ConstPropagator<'mir, 'tcx> {
                 let right = self.eval_operand(right)?;
                 let right = self.use_ecx(|this| this.ecx.read_immediate(&right))?;
 
-                let val =
-                    self.use_ecx(|this| this.ecx.wrapping_binary_op(bin_op, &left, &right))?;
-                val.into()
-            }
-
-            CheckedBinaryOp(bin_op, box (ref left, ref right)) => {
-                let left = self.eval_operand(left)?;
-                let left = self.use_ecx(|this| this.ecx.read_immediate(&left))?;
-
-                let right = self.eval_operand(right)?;
-                let right = self.use_ecx(|this| this.ecx.read_immediate(&right))?;
-
-                let (val, overflowed) =
-                    self.use_ecx(|this| this.ecx.overflowing_binary_op(bin_op, &left, &right))?;
-                let overflowed = ImmTy::from_bool(overflowed, self.tcx);
-                Value::Aggregate {
-                    variant: VariantIdx::new(0),
-                    fields: [Value::from(val), overflowed.into()].into_iter().collect(),
+                let val = self.use_ecx(|this| this.ecx.binary_op(bin_op, &left, &right))?;
+                if matches!(val.layout.abi, Abi::ScalarPair(..)) {
+                    // FIXME `Value` should properly support pairs in `Immediate`... but currently it does not.
+                    let (val, overflow) = val.to_pair(&self.ecx);
+                    Value::Aggregate {
+                        variant: VariantIdx::ZERO,
+                        fields: [val.into(), overflow.into()].into_iter().collect(),
+                    }
+                } else {
+                    val.into()
                 }
             }
 
@@ -581,36 +579,25 @@ impl<'mir, 'tcx> ConstPropagator<'mir, 'tcx> {
                 let operand = self.eval_operand(operand)?;
                 let val = self.use_ecx(|this| this.ecx.read_immediate(&operand))?;
 
-                let val = self.use_ecx(|this| this.ecx.wrapping_unary_op(un_op, &val))?;
+                let val = self.use_ecx(|this| this.ecx.unary_op(un_op, &val))?;
                 val.into()
             }
 
-            Aggregate(ref kind, ref fields) => {
-                // Do not const prop union fields as they can be
-                // made to produce values that don't match their
-                // underlying layout's type (see ICE #121534).
-                // If the last element of the `Adt` tuple
-                // is `Some` it indicates the ADT is a union
-                if let AggregateKind::Adt(_, _, _, _, Some(_)) = **kind {
-                    return None;
-                };
-                Value::Aggregate {
-                    fields: fields
-                        .iter()
-                        .map(|field| {
-                            self.eval_operand(field).map_or(Value::Uninit, Value::Immediate)
-                        })
-                        .collect(),
-                    variant: match **kind {
-                        AggregateKind::Adt(_, variant, _, _, _) => variant,
-                        AggregateKind::Array(_)
-                        | AggregateKind::Tuple
-                        | AggregateKind::Closure(_, _)
-                        | AggregateKind::Coroutine(_, _)
-                        | AggregateKind::CoroutineClosure(_, _) => VariantIdx::new(0),
-                    },
-                }
-            }
+            Aggregate(ref kind, ref fields) => Value::Aggregate {
+                fields: fields
+                    .iter()
+                    .map(|field| self.eval_operand(field).map_or(Value::Uninit, Value::Immediate))
+                    .collect(),
+                variant: match **kind {
+                    AggregateKind::Adt(_, variant, _, _, _) => variant,
+                    AggregateKind::Array(_)
+                    | AggregateKind::Tuple
+                    | AggregateKind::RawPtr(_, _)
+                    | AggregateKind::Closure(_, _)
+                    | AggregateKind::Coroutine(_, _)
+                    | AggregateKind::CoroutineClosure(_, _) => VariantIdx::ZERO,
+                },
+            },
 
             Repeat(ref op, n) => {
                 trace!(?op, ?n);
@@ -629,17 +616,18 @@ impl<'mir, 'tcx> ConstPropagator<'mir, 'tcx> {
                 ImmTy::from_scalar(Scalar::from_target_usize(len, self), layout).into()
             }
 
-            Ref(..) | AddressOf(..) => return None,
+            Ref(..) | RawPtr(..) => return None,
 
             NullaryOp(ref null_op, ty) => {
                 let op_layout = self.use_ecx(|this| this.ecx.layout_of(ty))?;
                 let val = match null_op {
                     NullOp::SizeOf => op_layout.size.bytes(),
                     NullOp::AlignOf => op_layout.align.abi.bytes(),
-                    NullOp::OffsetOf(fields) => {
-                        op_layout.offset_of_subfield(self, fields.iter()).bytes()
-                    }
-                    NullOp::UbCheck(_) => return None,
+                    NullOp::OffsetOf(fields) => self
+                        .tcx
+                        .offset_of_subfield(self.param_env, op_layout, fields.iter())
+                        .bytes(),
+                    NullOp::UbChecks => return None,
                 };
                 ImmTy::from_scalar(Scalar::from_target_usize(val, self), layout).into()
             }
@@ -719,9 +707,9 @@ impl<'tcx> Visitor<'tcx> for ConstPropagator<'_, 'tcx> {
         self.super_operand(operand, location);
     }
 
-    fn visit_constant(&mut self, constant: &ConstOperand<'tcx>, location: Location) {
-        trace!("visit_constant: {:?}", constant);
-        self.super_constant(constant, location);
+    fn visit_const_operand(&mut self, constant: &ConstOperand<'tcx>, location: Location) {
+        trace!("visit_const_operand: {:?}", constant);
+        self.super_const_operand(constant, location);
         self.eval_constant(constant);
     }
 
@@ -797,8 +785,7 @@ impl<'tcx> Visitor<'tcx> for ConstPropagator<'_, 'tcx> {
             TerminatorKind::SwitchInt { ref discr, ref targets } => {
                 if let Some(ref value) = self.eval_operand(discr)
                     && let Some(value_const) = self.use_ecx(|this| this.ecx.read_scalar(value))
-                    && let Ok(constant) = value_const.try_to_int()
-                    && let Ok(constant) = constant.to_bits(constant.size())
+                    && let Ok(constant) = value_const.to_bits(value_const.size())
                 {
                     // We managed to evaluate the discriminant, so we know we only need to visit
                     // one target.
@@ -813,6 +800,7 @@ impl<'tcx> Visitor<'tcx> for ConstPropagator<'_, 'tcx> {
             | TerminatorKind::UnwindResume
             | TerminatorKind::UnwindTerminate(_)
             | TerminatorKind::Return
+            | TerminatorKind::TailCall { .. }
             | TerminatorKind::Unreachable
             | TerminatorKind::Drop { .. }
             | TerminatorKind::Yield { .. }
@@ -897,13 +885,20 @@ impl CanConstProp {
         };
         for (local, val) in cpv.can_const_prop.iter_enumerated_mut() {
             let ty = body.local_decls[local].ty;
-            match tcx.layout_of(param_env.and(ty)) {
-                Ok(layout) if layout.size < Size::from_bytes(MAX_ALLOC_LIMIT) => {}
-                // Either the layout fails to compute, then we can't use this local anyway
-                // or the local is too large, then we don't want to.
-                _ => {
-                    *val = ConstPropMode::NoPropagation;
-                    continue;
+            if ty.is_union() {
+                // Unions are incompatible with the current implementation of
+                // const prop because Rust has no concept of an active
+                // variant of a union
+                *val = ConstPropMode::NoPropagation;
+            } else {
+                match tcx.layout_of(param_env.and(ty)) {
+                    Ok(layout) if layout.size < Size::from_bytes(MAX_ALLOC_LIMIT) => {}
+                    // Either the layout fails to compute, then we can't use this local anyway
+                    // or the local is too large, then we don't want to.
+                    _ => {
+                        *val = ConstPropMode::NoPropagation;
+                        continue;
+                    }
                 }
             }
         }
@@ -974,9 +969,9 @@ impl<'tcx> Visitor<'tcx> for CanConstProp {
             // mutation.
             | NonMutatingUse(NonMutatingUseContext::SharedBorrow)
             | NonMutatingUse(NonMutatingUseContext::FakeBorrow)
-            | NonMutatingUse(NonMutatingUseContext::AddressOf)
+            | NonMutatingUse(NonMutatingUseContext::RawBorrow)
             | MutatingUse(MutatingUseContext::Borrow)
-            | MutatingUse(MutatingUseContext::AddressOf) => {
+            | MutatingUse(MutatingUseContext::RawBorrow) => {
                 trace!("local {:?} can't be propagated because it's used: {:?}", local, context);
                 self.can_const_prop[local] = ConstPropMode::NoPropagation;
             }

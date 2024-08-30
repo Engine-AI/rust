@@ -1,34 +1,32 @@
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
-use std::fmt;
-use std::path::PathBuf;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::{fmt, io};
 
 use rustc_data_structures::fx::FxHashMap;
+use rustc_errors::DiagCtxtHandle;
 use rustc_session::config::{
-    self, parse_crate_types_from_list, parse_externs, parse_target_triple, CrateType,
+    self, get_cmd_lint_options, nightly_options, parse_crate_types_from_list, parse_externs,
+    parse_target_triple, CodegenOptions, CrateType, ErrorOutputType, Externs, Input,
+    JsonUnusedExterns, UnstableOptions,
 };
-use rustc_session::config::{get_cmd_lint_options, nightly_options};
-use rustc_session::config::{
-    CodegenOptions, ErrorOutputType, Externs, JsonUnusedExterns, UnstableOptions,
-};
-use rustc_session::getopts;
 use rustc_session::lint::Level;
 use rustc_session::search_paths::SearchPath;
-use rustc_session::EarlyDiagCtxt;
+use rustc_session::{getopts, EarlyDiagCtxt};
 use rustc_span::edition::Edition;
+use rustc_span::FileName;
 use rustc_target::spec::TargetTriple;
 
 use crate::core::new_dcx;
 use crate::externalfiles::ExternalHtml;
-use crate::html;
 use crate::html::markdown::IdMap;
 use crate::html::render::StylePath;
 use crate::html::static_files;
-use crate::opts;
 use crate::passes::{self, Condition};
 use crate::scrape_examples::{AllCallLocations, ScrapeExamplesOptions};
-use crate::theme;
+use crate::{html, opts, theme};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub(crate) enum OutputFormat {
@@ -60,7 +58,7 @@ impl TryFrom<&str> for OutputFormat {
 pub(crate) struct Options {
     // Basic options / Options passed directly to rustc
     /// The crate root or Markdown file to load.
-    pub(crate) input: PathBuf,
+    pub(crate) input: Input,
     /// The name of the crate being documented.
     pub(crate) crate_name: Option<String>,
     /// Whether or not this is a bin crate
@@ -125,6 +123,8 @@ pub(crate) struct Options {
     pub(crate) enable_per_target_ignores: bool,
     /// Do not run doctests, compile them if should_test is active.
     pub(crate) no_run: bool,
+    /// What sources are being mapped.
+    pub(crate) remap_path_prefix: Vec<(PathBuf, PathBuf)>,
 
     /// The path to a rustc-like binary to build tests with. If not set, we
     /// default to loading from `$sysroot/bin/rustc`.
@@ -179,7 +179,7 @@ impl fmt::Debug for Options {
         }
 
         f.debug_struct("Options")
-            .field("input", &self.input)
+            .field("input", &self.input.source_name())
             .field("crate_name", &self.crate_name)
             .field("bin_crate", &self.bin_crate)
             .field("proc_macro_crate", &self.proc_macro_crate)
@@ -208,6 +208,7 @@ impl fmt::Debug for Options {
             .field("run_check", &self.run_check)
             .field("no_run", &self.no_run)
             .field("test_builder_wrappers", &self.test_builder_wrappers)
+            .field("remap-file-prefix", &self.remap_path_prefix)
             .field("nocapture", &self.nocapture)
             .field("scrape_examples_options", &self.scrape_examples_options)
             .field("unstable_features", &self.unstable_features)
@@ -285,8 +286,9 @@ pub(crate) struct RenderOptions {
     pub(crate) no_emit_shared: bool,
     /// If `true`, HTML source code pages won't be generated.
     pub(crate) html_no_source: bool,
-    /// Whether `-Zforce-unstable-if-unmarked` unstable option is set
-    pub(crate) force_unstable_if_unmarked: bool,
+    /// This field is only used for the JSON output. If it's set to true, no file will be created
+    /// and content will be displayed in stdout directly.
+    pub(crate) output_to_stdout: bool,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -322,6 +324,23 @@ impl RenderOptions {
     }
 }
 
+/// Create the input (string or file path)
+///
+/// Warning: Return an unrecoverable error in case of error!
+fn make_input(early_dcx: &EarlyDiagCtxt, input: &str) -> Input {
+    if input == "-" {
+        let mut src = String::new();
+        if io::stdin().read_to_string(&mut src).is_err() {
+            // Immediately stop compilation if there was an issue reading
+            // the input (for example if the input stream is not UTF-8).
+            early_dcx.early_fatal("couldn't read from stdin, as it did not contain valid UTF-8");
+        }
+        Input::Str { name: FileName::anon_source_code(&src), input: src }
+    } else {
+        Input::File(PathBuf::from(input))
+    }
+}
+
 impl Options {
     /// Parses the given command-line for options. If an error message or other early-return has
     /// been printed, returns `Err` with the exit code.
@@ -341,24 +360,32 @@ impl Options {
             return None;
         }
 
-        if rustc_driver::describe_flag_categories(early_dcx, &matches) {
+        if rustc_driver::describe_flag_categories(early_dcx, matches) {
             return None;
         }
 
         let color = config::parse_color(early_dcx, matches);
-        let config::JsonConfig { json_rendered, json_unused_externs, .. } =
+        let config::JsonConfig { json_rendered, json_unused_externs, json_color, .. } =
             config::parse_json(early_dcx, matches);
-        let error_format = config::parse_error_format(early_dcx, matches, color, json_rendered);
+        let error_format =
+            config::parse_error_format(early_dcx, matches, color, json_color, json_rendered);
         let diagnostic_width = matches.opt_get("diagnostic-width").unwrap_or_default();
 
         let codegen_options = CodegenOptions::build(early_dcx, matches);
         let unstable_opts = UnstableOptions::build(early_dcx, matches);
-        let force_unstable_if_unmarked = unstable_opts.force_unstable_if_unmarked;
+
+        let remap_path_prefix = match parse_remap_path_prefix(matches) {
+            Ok(prefix_mappings) => prefix_mappings,
+            Err(err) => {
+                early_dcx.early_fatal(err);
+            }
+        };
 
         let dcx = new_dcx(error_format, None, diagnostic_width, &unstable_opts);
+        let dcx = dcx.handle();
 
         // check for deprecated options
-        check_deprecated_options(matches, &dcx);
+        check_deprecated_options(matches, dcx);
 
         if matches.opt_strs("passes") == ["list"] {
             println!("Available passes for running rustdoc:");
@@ -431,7 +458,7 @@ impl Options {
             println!("rustdoc: [check-theme] Starting tests! (Ignoring all other arguments)");
             for theme_file in to_check.iter() {
                 print!(" - Checking \"{theme_file}\"...");
-                let (success, differences) = theme::test_theme_against(theme_file, &paths, &dcx);
+                let (success, differences) = theme::test_theme_against(theme_file, &paths, dcx);
                 if !differences.is_empty() || !success {
                     println!(" FAILED");
                     errors += 1;
@@ -450,18 +477,17 @@ impl Options {
 
         let (lint_opts, describe_lints, lint_cap) = get_cmd_lint_options(early_dcx, matches);
 
-        let input = PathBuf::from(if describe_lints {
+        let input = if describe_lints {
             "" // dummy, this won't be used
-        } else if matches.free.is_empty() {
-            dcx.fatal("missing file operand");
-        } else if matches.free.len() > 1 {
-            dcx.fatal("too many file operands");
         } else {
-            &matches.free[0]
-        });
+            match matches.free.as_slice() {
+                [] => dcx.fatal("missing file operand"),
+                [input] => input,
+                _ => dcx.fatal("too many file operands"),
+            }
+        };
+        let input = make_input(early_dcx, input);
 
-        let libs =
-            matches.opt_strs("L").iter().map(|s| SearchPath::from_cli_opt(early_dcx, s)).collect();
         let externs = parse_externs(early_dcx, matches, &unstable_opts);
         let extern_html_root_urls = match parse_extern_html_roots(matches) {
             Ok(ex) => ex,
@@ -525,16 +551,17 @@ impl Options {
             dcx.fatal("the `--test` flag must be passed to enable `--no-run`");
         }
 
+        let mut output_to_stdout = false;
         let test_builder_wrappers =
             matches.opt_strs("test-builder-wrapper").iter().map(PathBuf::from).collect();
-        let out_dir = matches.opt_str("out-dir").map(|s| PathBuf::from(&s));
-        let output = matches.opt_str("output").map(|s| PathBuf::from(&s));
-        let output = match (out_dir, output) {
+        let output = match (matches.opt_str("out-dir"), matches.opt_str("output")) {
             (Some(_), Some(_)) => {
                 dcx.fatal("cannot use both 'out-dir' and 'output' at once");
             }
-            (Some(out_dir), None) => out_dir,
-            (None, Some(output)) => output,
+            (Some(out_dir), None) | (None, Some(out_dir)) => {
+                output_to_stdout = out_dir == "-";
+                PathBuf::from(out_dir)
+            }
             (None, None) => PathBuf::from("doc"),
         };
 
@@ -577,7 +604,7 @@ impl Options {
                         .with_help("arguments to --theme must have a .css extension")
                         .emit();
                 }
-                let (success, ret) = theme::test_theme_against(&theme_file, &paths, &dcx);
+                let (success, ret) = theme::test_theme_against(&theme_file, &paths, dcx);
                 if !success {
                     dcx.fatal(format!("error loading theme file: \"{theme_s}\""));
                 } else if !ret.is_empty() {
@@ -604,7 +631,7 @@ impl Options {
             &matches.opt_strs("markdown-before-content"),
             &matches.opt_strs("markdown-after-content"),
             nightly_options::match_is_nightly_build(matches),
-            &dcx,
+            dcx,
             &mut id_map,
             edition,
             &None,
@@ -625,6 +652,29 @@ impl Options {
         }
 
         let target = parse_target_triple(early_dcx, matches);
+        let maybe_sysroot = matches.opt_str("sysroot").map(PathBuf::from);
+
+        let sysroot = match &maybe_sysroot {
+            Some(s) => s.clone(),
+            None => {
+                rustc_session::filesearch::get_or_default_sysroot().expect("Failed finding sysroot")
+            }
+        };
+
+        let libs = matches
+            .opt_strs("L")
+            .iter()
+            .map(|s| {
+                SearchPath::from_cli_opt(
+                    &sysroot,
+                    &target,
+                    early_dcx,
+                    s,
+                    #[allow(rustc::bad_opt_access)] // we have no `Session` here
+                    unstable_opts.unstable_options,
+                )
+            })
+            .collect();
 
         let show_coverage = matches.opt_present("show-coverage");
 
@@ -653,7 +703,6 @@ impl Options {
         let bin_crate = crate_types.contains(&CrateType::Executable);
         let proc_macro_crate = crate_types.contains(&CrateType::ProcMacro);
         let playground_url = matches.opt_str("playground-url");
-        let maybe_sysroot = matches.opt_str("sysroot").map(PathBuf::from);
         let module_sorting = if matches.opt_present("sort-modules-by-appearance") {
             ModuleSorting::DeclarationOrder
         } else {
@@ -688,14 +737,16 @@ impl Options {
         let html_no_source = matches.opt_present("html-no-source");
 
         if generate_link_to_definition && (show_coverage || output_format != OutputFormat::Html) {
-            dcx.fatal(
-                "--generate-link-to-definition option can only be used with HTML output format",
-            );
+            dcx.struct_warn(
+                "`--generate-link-to-definition` option can only be used with HTML output format",
+            )
+            .with_note("`--generate-link-to-definition` option will be ignored")
+            .emit();
         }
 
-        let scrape_examples_options = ScrapeExamplesOptions::new(matches, &dcx);
+        let scrape_examples_options = ScrapeExamplesOptions::new(matches, dcx);
         let with_examples = matches.opt_strs("with-examples");
-        let call_locations = crate::scrape_examples::load_call_locations(with_examples, &dcx);
+        let call_locations = crate::scrape_examples::load_call_locations(with_examples, dcx);
 
         let unstable_features =
             rustc_feature::UnstableFeatures::from_environment(crate_name.as_deref());
@@ -734,6 +785,7 @@ impl Options {
             run_check,
             no_run,
             test_builder_wrappers,
+            remap_path_prefix,
             nocapture,
             crate_name,
             output_format,
@@ -770,19 +822,36 @@ impl Options {
             call_locations,
             no_emit_shared: false,
             html_no_source,
-            force_unstable_if_unmarked,
+            output_to_stdout,
         };
         Some((options, render_options))
     }
 
     /// Returns `true` if the file given as `self.input` is a Markdown file.
-    pub(crate) fn markdown_input(&self) -> bool {
-        self.input.extension().is_some_and(|e| e == "md" || e == "markdown")
+    pub(crate) fn markdown_input(&self) -> Option<&Path> {
+        self.input
+            .opt_path()
+            .filter(|p| matches!(p.extension(), Some(e) if e == "md" || e == "markdown"))
     }
 }
 
+fn parse_remap_path_prefix(
+    matches: &getopts::Matches,
+) -> Result<Vec<(PathBuf, PathBuf)>, &'static str> {
+    matches
+        .opt_strs("remap-path-prefix")
+        .into_iter()
+        .map(|remap| {
+            remap
+                .rsplit_once('=')
+                .ok_or("--remap-path-prefix must contain '=' between FROM and TO")
+                .map(|(from, to)| (PathBuf::from(from), PathBuf::from(to)))
+        })
+        .collect()
+}
+
 /// Prints deprecation warnings for deprecated options
-fn check_deprecated_options(matches: &getopts::Matches, dcx: &rustc_errors::DiagCtxt) {
+fn check_deprecated_options(matches: &getopts::Matches, dcx: DiagCtxtHandle<'_>) {
     let deprecated_flags = [];
 
     for &flag in deprecated_flags.iter() {

@@ -8,7 +8,7 @@
 //! in this crate.
 
 // For proving that RootDatabase is RefUnwindSafe.
-#![warn(rust_2018_idioms, unused_lifetimes)]
+
 #![cfg_attr(feature = "in-rust-tree", feature(rustc_private))]
 #![recursion_limit = "128"]
 
@@ -43,7 +43,6 @@ mod parent_module;
 mod references;
 mod rename;
 mod runnables;
-mod shuffle_crate_graph;
 mod signature_help;
 mod ssr;
 mod static_index;
@@ -58,18 +57,19 @@ mod view_item_tree;
 mod view_memory_layout;
 mod view_mir;
 
-use std::ffi::OsStr;
+use std::panic::UnwindSafe;
 
 use cfg::CfgOptions;
 use fetch_crates::CrateInfo;
-use hir::ChangeWithProcMacros;
+use hir::{sym, ChangeWithProcMacros};
 use ide_db::{
     base_db::{
         salsa::{self, ParallelDatabase},
-        CrateOrigin, Env, FileLoader, FileSet, SourceDatabase, VfsPath,
+        CrateOrigin, Env, FileLoader, FileSet, SourceDatabase, SourceRootDatabase, VfsPath,
     },
     prime_caches, symbol_index, FxHashMap, FxIndexSet, LineIndexDatabase,
 };
+use span::EditionedFileId;
 use syntax::SourceFile;
 use triomphe::Arc;
 use view_memory_layout::{view_memory_layout, RecursiveMemoryLayout};
@@ -89,8 +89,8 @@ pub use crate::{
     },
     inlay_hints::{
         AdjustmentHints, AdjustmentHintsMode, ClosureReturnTypeHints, DiscriminantHints,
-        InlayFieldsToResolve, InlayHint, InlayHintLabel, InlayHintLabelPart, InlayHintPosition,
-        InlayHintsConfig, InlayKind, InlayTooltip, LifetimeElisionHints, RangeLimit,
+        GenericParameterHints, InlayFieldsToResolve, InlayHint, InlayHintLabel, InlayHintLabelPart,
+        InlayHintPosition, InlayHintsConfig, InlayKind, InlayTooltip, LifetimeElisionHints,
     },
     join_lines::JoinLinesConfig,
     markup::Markup,
@@ -120,10 +120,7 @@ pub use ide_completion::{
     Snippet, SnippetScope,
 };
 pub use ide_db::{
-    base_db::{
-        Cancelled, CrateGraph, CrateId, Edition, FileChange, FileId, FilePosition, FileRange,
-        SourceRoot, SourceRootId,
-    },
+    base_db::{Cancelled, CrateGraph, CrateId, FileChange, SourceRoot, SourceRootId},
     documentation::Documentation,
     label::Label,
     line_index::{LineCol, LineIndex},
@@ -131,12 +128,13 @@ pub use ide_db::{
     search::{ReferenceCategory, SearchScope},
     source_change::{FileSystemEdit, SnippetEdit, SourceChange},
     symbol_index::Query,
-    RootDatabase, SymbolKind,
+    FileId, FilePosition, FileRange, RootDatabase, SymbolKind,
 };
 pub use ide_diagnostics::{
     Diagnostic, DiagnosticCode, DiagnosticsConfig, ExprFillDefaultMode, Severity,
 };
 pub use ide_ssr::SsrError;
+pub use span::Edition;
 pub use syntax::{TextRange, TextSize};
 pub use text_edit::{Indel, TextEdit};
 
@@ -162,7 +160,7 @@ pub struct AnalysisHost {
 }
 
 impl AnalysisHost {
-    pub fn new(lru_capacity: Option<usize>) -> AnalysisHost {
+    pub fn new(lru_capacity: Option<u16>) -> AnalysisHost {
         AnalysisHost { db: RootDatabase::new(lru_capacity) }
     }
 
@@ -170,11 +168,11 @@ impl AnalysisHost {
         AnalysisHost { db }
     }
 
-    pub fn update_lru_capacity(&mut self, lru_capacity: Option<usize>) {
+    pub fn update_lru_capacity(&mut self, lru_capacity: Option<u16>) {
         self.db.update_base_query_lru_capacities(lru_capacity);
     }
 
-    pub fn update_lru_capacities(&mut self, lru_capacities: &FxHashMap<Box<str>, usize>) {
+    pub fn update_lru_capacities(&mut self, lru_capacities: &FxHashMap<Box<str>, u16>) {
         self.db.update_lru_capacities(lru_capacities);
     }
 
@@ -202,10 +200,6 @@ impl AnalysisHost {
     }
     pub fn raw_database_mut(&mut self) -> &mut RootDatabase {
         &mut self.db
-    }
-
-    pub fn shuffle_crate_graph(&mut self) {
-        shuffle_crate_graph::shuffle_crate_graph(&mut self.db);
     }
 }
 
@@ -247,13 +241,13 @@ impl Analysis {
         // FIXME: cfg options
         // Default to enable test for single file.
         let mut cfg_options = CfgOptions::default();
-        cfg_options.insert_atom("test".into());
+        cfg_options.insert_atom(sym::test.clone());
         crate_graph.add_crate_root(
             file_id,
             Edition::CURRENT,
             None,
             None,
-            cfg_options.clone(),
+            Arc::new(cfg_options),
             None,
             Env::default(),
             false,
@@ -272,7 +266,18 @@ impl Analysis {
         self.with_db(|db| status::status(db, file_id))
     }
 
-    pub fn parallel_prime_caches<F>(&self, num_worker_threads: u8, cb: F) -> Cancellable<()>
+    pub fn source_root_id(&self, file_id: FileId) -> Cancellable<SourceRootId> {
+        self.with_db(|db| db.file_source_root(file_id))
+    }
+
+    pub fn is_local_source_root(&self, source_root_id: SourceRootId) -> Cancellable<bool> {
+        self.with_db(|db| {
+            let sr = db.source_root(source_root_id);
+            !sr.is_library
+        })
+    }
+
+    pub fn parallel_prime_caches<F>(&self, num_worker_threads: usize, cb: F) -> Cancellable<()>
     where
         F: Fn(ParallelPrimeCachesProgress) + Sync + std::panic::UnwindSafe,
     {
@@ -281,17 +286,17 @@ impl Analysis {
 
     /// Gets the text of the source file.
     pub fn file_text(&self, file_id: FileId) -> Cancellable<Arc<str>> {
-        self.with_db(|db| db.file_text(file_id))
+        self.with_db(|db| SourceDatabase::file_text(db, file_id))
     }
 
     /// Gets the syntax tree of the file.
     pub fn parse(&self, file_id: FileId) -> Cancellable<SourceFile> {
-        self.with_db(|db| db.parse(file_id).tree())
+        // FIXME editiojn
+        self.with_db(|db| db.parse(EditionedFileId::current_edition(file_id)).tree())
     }
 
     /// Returns true if this file belongs to an immutable library.
     pub fn is_library_file(&self, file_id: FileId) -> Cancellable<bool> {
-        use ide_db::base_db::SourceDatabaseExt;
         self.with_db(|db| db.source_root(db.file_source_root(file_id)).is_library)
     }
 
@@ -310,7 +315,7 @@ impl Analysis {
     /// supported).
     pub fn matching_brace(&self, position: FilePosition) -> Cancellable<Option<TextSize>> {
         self.with_db(|db| {
-            let parse = db.parse(position.file_id);
+            let parse = db.parse(EditionedFileId::current_edition(position.file_id));
             let file = parse.tree();
             matching_brace::matching_brace(&file, position.offset)
         })
@@ -354,6 +359,10 @@ impl Analysis {
         self.with_db(|db| test_explorer::discover_tests_in_crate(db, crate_id))
     }
 
+    pub fn discover_tests_in_file(&self, file_id: FileId) -> Cancellable<Vec<TestItem>> {
+        self.with_db(|db| test_explorer::discover_tests_in_file(db, file_id))
+    }
+
     /// Renders the crate graph to GraphViz "dot" syntax.
     pub fn view_crate_graph(&self, full: bool) -> Cancellable<Result<String, String>> {
         self.with_db(|db| view_crate_graph::view_crate_graph(db, full))
@@ -371,7 +380,7 @@ impl Analysis {
     /// stuff like trailing commas.
     pub fn join_lines(&self, config: &JoinLinesConfig, frange: FileRange) -> Cancellable<TextEdit> {
         self.with_db(|db| {
-            let parse = db.parse(frange.file_id);
+            let parse = db.parse(EditionedFileId::current_edition(frange.file_id));
             join_lines::join_lines(config, &parse.tree(), frange.range)
         })
     }
@@ -407,7 +416,12 @@ impl Analysis {
     /// Returns a tree representation of symbols in the file. Useful to draw a
     /// file outline.
     pub fn file_structure(&self, file_id: FileId) -> Cancellable<Vec<StructureNode>> {
-        self.with_db(|db| file_structure::file_structure(&db.parse(file_id).tree()))
+        // FIXME: Edition
+        self.with_db(|db| {
+            file_structure::file_structure(
+                &db.parse(EditionedFileId::current_edition(file_id)).tree(),
+            )
+        })
     }
 
     /// Returns a list of the places in the file where type hints can be displayed.
@@ -415,14 +429,30 @@ impl Analysis {
         &self,
         config: &InlayHintsConfig,
         file_id: FileId,
-        range: Option<RangeLimit>,
+        range: Option<TextRange>,
     ) -> Cancellable<Vec<InlayHint>> {
         self.with_db(|db| inlay_hints::inlay_hints(db, file_id, range, config))
+    }
+    pub fn inlay_hints_resolve(
+        &self,
+        config: &InlayHintsConfig,
+        file_id: FileId,
+        position: TextSize,
+        hash: u64,
+        hasher: impl Fn(&InlayHint) -> u64 + Send + UnwindSafe,
+    ) -> Cancellable<Option<InlayHint>> {
+        self.with_db(|db| {
+            inlay_hints::inlay_hints_resolve(db, file_id, position, hash, config, hasher)
+        })
     }
 
     /// Returns the set of folding ranges.
     pub fn folding_ranges(&self, file_id: FileId) -> Cancellable<Vec<Fold>> {
-        self.with_db(|db| folding_ranges::folding_ranges(&db.parse(file_id).tree()))
+        self.with_db(|db| {
+            folding_ranges::folding_ranges(
+                &db.parse(EditionedFileId::current_edition(file_id)).tree(),
+            )
+        })
     }
 
     /// Fuzzy searches for a symbol.
@@ -502,8 +532,8 @@ impl Analysis {
     pub fn external_docs(
         &self,
         position: FilePosition,
-        target_dir: Option<&OsStr>,
-        sysroot: Option<&OsStr>,
+        target_dir: Option<&str>,
+        sysroot: Option<&str>,
     ) -> Cancellable<doc_links::DocumentationLinks> {
         self.with_db(|db| {
             doc_links::external_docs(db, position, target_dir, sysroot).unwrap_or_default()
@@ -642,14 +672,33 @@ impl Analysis {
             .unwrap_or_default())
     }
 
-    /// Computes the set of diagnostics for the given file.
-    pub fn diagnostics(
+    /// Computes the set of parser level diagnostics for the given file.
+    pub fn syntax_diagnostics(
+        &self,
+        config: &DiagnosticsConfig,
+        file_id: FileId,
+    ) -> Cancellable<Vec<Diagnostic>> {
+        self.with_db(|db| ide_diagnostics::syntax_diagnostics(db, config, file_id))
+    }
+
+    /// Computes the set of semantic diagnostics for the given file.
+    pub fn semantic_diagnostics(
         &self,
         config: &DiagnosticsConfig,
         resolve: AssistResolveStrategy,
         file_id: FileId,
     ) -> Cancellable<Vec<Diagnostic>> {
-        self.with_db(|db| ide_diagnostics::diagnostics(db, config, &resolve, file_id))
+        self.with_db(|db| ide_diagnostics::semantic_diagnostics(db, config, &resolve, file_id))
+    }
+
+    /// Computes the set of both syntax and semantic diagnostics for the given file.
+    pub fn full_diagnostics(
+        &self,
+        config: &DiagnosticsConfig,
+        resolve: AssistResolveStrategy,
+        file_id: FileId,
+    ) -> Cancellable<Vec<Diagnostic>> {
+        self.with_db(|db| ide_diagnostics::full_diagnostics(db, config, &resolve, file_id))
     }
 
     /// Convenience function to return assists + quick fixes for diagnostics
@@ -667,7 +716,7 @@ impl Analysis {
 
         self.with_db(|db| {
             let diagnostic_assists = if diagnostics_config.enabled && include_fixes {
-                ide_diagnostics::diagnostics(db, diagnostics_config, &resolve, frange.file_id)
+                ide_diagnostics::full_diagnostics(db, diagnostics_config, &resolve, frange.file_id)
                     .into_iter()
                     .flat_map(|it| it.fixes.unwrap_or_default())
                     .filter(|it| it.target.intersect(frange.range).is_some())
@@ -724,7 +773,7 @@ impl Analysis {
                 ide_ssr::MatchFinder::in_context(db, resolve_context, selections)?;
             match_finder.add_rule(rule)?;
             let edits = if parse_only { Default::default() } else { match_finder.edits() };
-            Ok(SourceChange::from(edits))
+            Ok(SourceChange::from_iter(edits))
         })
     }
 

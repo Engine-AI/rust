@@ -3,14 +3,14 @@ use clippy_config::msrvs::{self, Msrv};
 use clippy_utils::diagnostics::span_lint_and_sugg;
 use clippy_utils::source::snippet_with_applicability;
 use clippy_utils::ty::{
-    implements_trait, implements_trait_with_env, is_copy, make_normalized_projection,
+    implements_trait, implements_trait_with_env, is_copy, is_type_lang_item, make_normalized_projection,
     make_normalized_projection_with_regions, normalize_with_regions,
 };
 use rustc_errors::Applicability;
 use rustc_hir::{Expr, Mutability};
 use rustc_lint::LateContext;
 use rustc_middle::ty::adjustment::{Adjust, Adjustment, AutoBorrow, AutoBorrowMutability};
-use rustc_middle::ty::{self, EarlyBinder, Ty, TypeAndMut};
+use rustc_middle::ty::{self, EarlyBinder, Ty};
 use rustc_span::sym;
 
 pub(super) fn check(
@@ -20,9 +20,10 @@ pub(super) fn check(
     msrv: &Msrv,
     enforce_iter_loop_reborrow: bool,
 ) {
-    let Some((adjust, ty)) = is_ref_iterable(cx, self_arg, call_expr, enforce_iter_loop_reborrow) else {
+    let Some((adjust, ty)) = is_ref_iterable(cx, self_arg, call_expr, enforce_iter_loop_reborrow, msrv) else {
         return;
     };
+
     if let ty::Array(_, count) = *ty.peel_refs().kind() {
         if !ty.is_ref() {
             if !msrv.meets(msrvs::ARRAY_INTO_ITERATOR) {
@@ -109,6 +110,7 @@ fn is_ref_iterable<'tcx>(
     self_arg: &Expr<'_>,
     call_expr: &Expr<'_>,
     enforce_iter_loop_reborrow: bool,
+    msrv: &Msrv,
 ) -> Option<(AdjustKind, Ty<'tcx>)> {
     let typeck = cx.typeck_results();
     if let Some(trait_id) = cx.tcx.get_diagnostic_item(sym::IntoIterator)
@@ -127,6 +129,12 @@ fn is_ref_iterable<'tcx>(
         let adjustments = typeck.expr_adjustments(self_arg);
         let self_ty = typeck.expr_ty(self_arg);
         let self_is_copy = is_copy(cx, self_ty);
+
+        if !msrv.meets(msrvs::BOX_INTO_ITER)
+            && is_type_lang_item(cx, self_ty.peel_refs(), rustc_hir::LangItem::OwnedBox)
+        {
+            return None;
+        }
 
         if adjustments.is_empty() && self_is_copy {
             // Exact type match, already checked earlier
@@ -160,7 +168,7 @@ fn is_ref_iterable<'tcx>(
                 let self_ty = if mutbl.is_mut() {
                     self_ty
                 } else {
-                    Ty::new_ref(cx.tcx, region, TypeAndMut { ty, mutbl })
+                    Ty::new_ref(cx.tcx, region, ty, mutbl)
                 };
                 if implements_trait(cx, self_ty, trait_id, &[])
                     && let Some(ty) =
@@ -175,7 +183,7 @@ fn is_ref_iterable<'tcx>(
             && !self_ty.is_ref()
         {
             // Attempt to borrow
-            let self_ty = Ty::new_ref(cx.tcx, cx.tcx.lifetimes.re_erased, TypeAndMut { ty: self_ty, mutbl });
+            let self_ty = Ty::new_ref(cx.tcx, cx.tcx.lifetimes.re_erased, self_ty, mutbl);
             if implements_trait(cx, self_ty, trait_id, &[])
                 && let Some(ty) = make_normalized_projection(cx.tcx, cx.param_env, trait_id, sym!(IntoIter), [self_ty])
                 && ty == res_ty

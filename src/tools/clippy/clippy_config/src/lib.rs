@@ -1,6 +1,11 @@
-#![feature(rustc_private, let_chains)]
-#![cfg_attr(feature = "deny-warnings", deny(warnings))]
-#![warn(rust_2018_idioms, unused_lifetimes)]
+#![feature(rustc_private, array_windows, let_chains)]
+#![warn(
+    trivial_casts,
+    trivial_numeric_casts,
+    rust_2018_idioms,
+    unused_lifetimes,
+    unused_qualifications
+)]
 #![allow(
     clippy::must_use_candidate,
     clippy::missing_panics_doc,
@@ -9,7 +14,7 @@
 )]
 
 extern crate rustc_ast;
-extern crate rustc_data_structures;
+extern crate rustc_attr;
 #[allow(unused_extern_crates)]
 extern crate rustc_driver;
 extern crate rustc_errors;

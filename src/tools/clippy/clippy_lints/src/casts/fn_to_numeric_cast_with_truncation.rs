@@ -14,7 +14,7 @@ pub(super) fn check(cx: &LateContext<'_>, expr: &Expr<'_>, cast_expr: &Expr<'_>,
         _ => return,
     }
     match cast_from.kind() {
-        ty::FnDef(..) | ty::FnPtr(_) => {
+        ty::FnDef(..) | ty::FnPtr(..) => {
             let mut applicability = Applicability::MaybeIncorrect;
             let from_snippet = snippet_with_applicability(cx, cast_expr.span, "x", &mut applicability);
 
@@ -24,7 +24,7 @@ pub(super) fn check(cx: &LateContext<'_>, expr: &Expr<'_>, cast_expr: &Expr<'_>,
                     cx,
                     FN_TO_NUMERIC_CAST_WITH_TRUNCATION,
                     expr.span,
-                    &format!("casting function pointer `{from_snippet}` to `{cast_to}`, which truncates the value"),
+                    format!("casting function pointer `{from_snippet}` to `{cast_to}`, which truncates the value"),
                     "try",
                     format!("{from_snippet} as usize"),
                     applicability,

@@ -1,4 +1,5 @@
 use clippy_config::msrvs::{self, Msrv};
+use clippy_config::Conf;
 use clippy_utils::diagnostics::span_lint_and_then;
 use clippy_utils::mir::{enclosing_mir, expr_local, local_assignments, used_exactly_once, PossibleBorrowerMap};
 use clippy_utils::source::snippet_with_context;
@@ -13,7 +14,7 @@ use rustc_infer::infer::TyCtxtInferExt;
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_middle::mir::{Rvalue, StatementKind};
 use rustc_middle::ty::{
-    self, ClauseKind, EarlyBinder, FnSig, GenericArg, GenericArgKind, List, ParamTy, ProjectionPredicate, Ty,
+    self, ClauseKind, EarlyBinder, FnSig, GenericArg, GenericArgKind, ParamTy, ProjectionPredicate, Ty,
 };
 use rustc_session::impl_lint_pass;
 use rustc_span::symbol::sym;
@@ -23,7 +24,7 @@ use std::collections::VecDeque;
 
 declare_clippy_lint! {
     /// ### What it does
-    /// Checks for borrow operations (`&`) that used as a generic argument to a
+    /// Checks for borrow operations (`&`) that are used as a generic argument to a
     /// function when the borrowed value could be used.
     ///
     /// ### Why is this bad?
@@ -68,11 +69,10 @@ pub struct NeedlessBorrowsForGenericArgs<'tcx> {
 impl_lint_pass!(NeedlessBorrowsForGenericArgs<'_> => [NEEDLESS_BORROWS_FOR_GENERIC_ARGS]);
 
 impl NeedlessBorrowsForGenericArgs<'_> {
-    #[must_use]
-    pub fn new(msrv: Msrv) -> Self {
+    pub fn new(conf: &'static Conf) -> Self {
         Self {
             possible_borrowers: Vec::new(),
-            msrv,
+            msrv: conf.msrv.clone(),
         }
     }
 }
@@ -81,11 +81,13 @@ impl<'tcx> LateLintPass<'tcx> for NeedlessBorrowsForGenericArgs<'tcx> {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>) {
         if matches!(expr.kind, ExprKind::AddrOf(..))
             && !expr.span.from_expansion()
-            && let Some(use_cx) = expr_use_ctxt(cx, expr)
+            && let use_cx = expr_use_ctxt(cx, expr)
+            && use_cx.same_ctxt
             && !use_cx.is_ty_unified
-            && let Some(DefinedTy::Mir(ty)) = use_cx.node.defined_ty(cx)
+            && let use_node = use_cx.use_node(cx)
+            && let Some(DefinedTy::Mir(ty)) = use_node.defined_ty(cx)
             && let ty::Param(ty) = *ty.value.skip_binder().kind()
-            && let Some((hir_id, fn_id, i)) = match use_cx.node {
+            && let Some((hir_id, fn_id, i)) = match use_node {
                 ExprUseNode::MethodArg(_, _, 0) => None,
                 ExprUseNode::MethodArg(hir_id, None, i) => cx
                     .typeck_results()
@@ -131,7 +133,7 @@ impl<'tcx> LateLintPass<'tcx> for NeedlessBorrowsForGenericArgs<'tcx> {
         }
     }
 
-    fn check_body_post(&mut self, cx: &LateContext<'tcx>, body: &'tcx Body<'_>) {
+    fn check_body_post(&mut self, cx: &LateContext<'tcx>, body: &Body<'_>) {
         if self.possible_borrowers.last().map_or(false, |&(local_def_id, _)| {
             local_def_id == cx.tcx.hir().body_owner_def_id(body.id())
         }) {
@@ -155,13 +157,16 @@ fn path_has_args(p: &QPath<'_>) -> bool {
 /// The following constraints will be checked:
 /// * The borrowed expression meets all the generic type's constraints.
 /// * The generic type appears only once in the functions signature.
-/// * The borrowed value will not be moved if it is used later in the function.
+/// * The borrowed value is:
+///   - `Copy` itself, or
+///   - the only use of a mutable reference, or
+///   - not a variable (created by a function call)
 #[expect(clippy::too_many_arguments)]
 fn needless_borrow_count<'tcx>(
     cx: &LateContext<'tcx>,
     possible_borrowers: &mut Vec<(LocalDefId, PossibleBorrowerMap<'tcx, 'tcx>)>,
     fn_id: DefId,
-    callee_args: &'tcx List<GenericArg<'tcx>>,
+    callee_args: ty::GenericArgsRef<'tcx>,
     arg_index: usize,
     param_ty: ParamTy,
     mut expr: &Expr<'tcx>,
@@ -234,9 +239,9 @@ fn needless_borrow_count<'tcx>(
 
         let referent_ty = cx.typeck_results().expr_ty(referent);
 
-        if !is_copy(cx, referent_ty)
-            && (referent_ty.has_significant_drop(cx.tcx, cx.param_env)
-                || !referent_used_exactly_once(cx, possible_borrowers, reference))
+        if !(is_copy(cx, referent_ty)
+            || referent_ty.is_ref() && referent_used_exactly_once(cx, possible_borrowers, reference)
+            || matches!(referent.kind, ExprKind::Call(..) | ExprKind::MethodCall(..)))
         {
             return false;
         }
@@ -271,7 +276,7 @@ fn needless_borrow_count<'tcx>(
                 return false;
             }
 
-            let predicate = EarlyBinder::bind(predicate).instantiate(cx.tcx, &args_with_referent_ty);
+            let predicate = EarlyBinder::bind(predicate).instantiate(cx.tcx, &args_with_referent_ty[..]);
             let obligation = Obligation::new(cx.tcx, ObligationCause::dummy(), cx.param_env, predicate);
             let infcx = cx.tcx.infer_ctxt().build();
             infcx.predicate_must_hold_modulo_regions(&obligation)
@@ -315,16 +320,16 @@ fn is_mixed_projection_predicate<'tcx>(
 ) -> bool {
     let generics = cx.tcx.generics_of(callee_def_id);
     // The predicate requires the projected type to equal a type parameter from the parent context.
-    if let Some(term_ty) = projection_predicate.term.ty()
+    if let Some(term_ty) = projection_predicate.term.as_type()
         && let ty::Param(term_param_ty) = term_ty.kind()
         && (term_param_ty.index as usize) < generics.parent_count
     {
         // The inner-most self type is a type parameter from the current function.
-        let mut projection_ty = projection_predicate.projection_ty;
+        let mut projection_term = projection_predicate.projection_term;
         loop {
-            match projection_ty.self_ty().kind() {
+            match *projection_term.self_ty().kind() {
                 ty::Alias(ty::Projection, inner_projection_ty) => {
-                    projection_ty = *inner_projection_ty;
+                    projection_term = inner_projection_ty.into();
                 },
                 ty::Param(param_ty) => {
                     return (param_ty.index as usize) >= generics.parent_count;
@@ -381,7 +386,7 @@ fn replace_types<'tcx>(
     fn_sig: FnSig<'tcx>,
     arg_index: usize,
     projection_predicates: &[ProjectionPredicate<'tcx>],
-    args: &mut [ty::GenericArg<'tcx>],
+    args: &mut [GenericArg<'tcx>],
 ) -> bool {
     let mut replaced = BitSet::new_empty(args.len());
 
@@ -399,22 +404,23 @@ fn replace_types<'tcx>(
             return false;
         }
 
-        args[param_ty.index as usize] = ty::GenericArg::from(new_ty);
+        args[param_ty.index as usize] = GenericArg::from(new_ty);
 
         // The `replaced.insert(...)` check provides some protection against infinite loops.
         if replaced.insert(param_ty.index) {
             for projection_predicate in projection_predicates {
-                if projection_predicate.projection_ty.self_ty() == param_ty.to_ty(cx.tcx)
-                    && let Some(term_ty) = projection_predicate.term.ty()
+                if projection_predicate.projection_term.self_ty() == param_ty.to_ty(cx.tcx)
+                    && let Some(term_ty) = projection_predicate.term.as_type()
                     && let ty::Param(term_param_ty) = term_ty.kind()
                 {
-                    let projection = cx.tcx.mk_ty_from_kind(ty::Alias(
-                        ty::Projection,
-                        projection_predicate.projection_ty.with_self_ty(cx.tcx, new_ty),
-                    ));
+                    let projection = projection_predicate
+                        .projection_term
+                        .with_self_ty(cx.tcx, new_ty)
+                        .expect_ty(cx.tcx)
+                        .to_ty(cx.tcx);
 
                     if let Ok(projected_ty) = cx.tcx.try_normalize_erasing_regions(cx.param_env, projection)
-                        && args[term_param_ty.index as usize] != ty::GenericArg::from(projected_ty)
+                        && args[term_param_ty.index as usize] != GenericArg::from(projected_ty)
                     {
                         deque.push_back((*term_param_ty, projected_ty));
                     }

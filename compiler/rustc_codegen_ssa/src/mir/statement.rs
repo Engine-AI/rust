@@ -1,9 +1,9 @@
-use rustc_middle::mir;
-use rustc_middle::mir::NonDivergingIntrinsic;
+use rustc_middle::mir::{self, NonDivergingIntrinsic};
+use rustc_middle::span_bug;
 use rustc_session::config::OptLevel;
+use tracing::instrument;
 
-use super::FunctionCx;
-use super::LocalRef;
+use super::{FunctionCx, LocalRef};
 use crate::traits::*;
 
 impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
@@ -64,8 +64,8 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                     cg_indirect_place.storage_dead(bx);
                 }
             }
-            mir::StatementKind::Coverage(box ref coverage) => {
-                self.codegen_coverage(bx, coverage, statement.source_info.scope);
+            mir::StatementKind::Coverage(ref kind) => {
+                self.codegen_coverage(bx, kind, statement.source_info.scope);
             }
             mir::StatementKind::Intrinsic(box NonDivergingIntrinsic::Assume(ref op)) => {
                 if !matches!(bx.tcx().sess.opts.optimize, OptLevel::No | OptLevel::Less) {

@@ -1,5 +1,3 @@
-//! lint on missing cargo common metadata
-
 use cargo_metadata::Metadata;
 use clippy_utils::diagnostics::span_lint;
 use rustc_lint::LateContext;
@@ -41,7 +39,7 @@ pub(super) fn check(cx: &LateContext<'_>, metadata: &Metadata, ignore_publish: b
 
 fn missing_warning(cx: &LateContext<'_>, package: &cargo_metadata::Package, field: &str) {
     let message = format!("package `{}` is missing `{field}` metadata", package.name);
-    span_lint(cx, CARGO_COMMON_METADATA, DUMMY_SP, &message);
+    span_lint(cx, CARGO_COMMON_METADATA, DUMMY_SP, message);
 }
 
 fn is_empty_str<T: AsRef<std::ffi::OsStr>>(value: &Option<T>) -> bool {

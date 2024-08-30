@@ -1,11 +1,12 @@
-use crate::ty;
 use rustc_data_structures::sorted_map::SortedIndexMultiMap;
 use rustc_hir as hir;
 use rustc_hir::def::{DefKind, Namespace};
 use rustc_hir::def_id::DefId;
+use rustc_macros::{Decodable, Encodable, HashStable};
 use rustc_span::symbol::{Ident, Symbol};
 
 use super::{TyCtxt, Visibility};
+use crate::ty;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, HashStable, Hash, Encodable, Decodable)]
 pub enum AssocItemContainer {
@@ -33,6 +34,8 @@ pub struct AssocItem {
     /// return-position `impl Trait` in trait desugaring. The `ImplTraitInTraitData`
     /// provides additional information about its source.
     pub opt_rpitit_info: Option<ty::ImplTraitInTraitData>,
+
+    pub is_effects_desugaring: bool,
 }
 
 impl AssocItem {
@@ -92,6 +95,15 @@ impl AssocItem {
                     tcx.type_of(self.def_id).instantiate_identity()
                 )
             }
+        }
+    }
+
+    pub fn descr(&self) -> &'static str {
+        match self.kind {
+            ty::AssocKind::Const => "const",
+            ty::AssocKind::Fn if self.fn_has_self_parameter => "method",
+            ty::AssocKind::Fn => "associated function",
+            ty::AssocKind::Type => "type",
         }
     }
 

@@ -24,7 +24,7 @@ pub(crate) fn goto_implementation(
     FilePosition { file_id, offset }: FilePosition,
 ) -> Option<RangeInfo<Vec<NavigationTarget>>> {
     let sema = Semantics::new(db);
-    let source_file = sema.parse(file_id);
+    let source_file = sema.parse_guess_edition(file_id);
     let syntax = source_file.syntax().clone();
 
     let original_token = pick_best_token(syntax.token_at_offset(offset), |kind| match kind {
@@ -117,7 +117,7 @@ fn impls_for_trait_item(
 
 #[cfg(test)]
 mod tests {
-    use ide_db::base_db::FileRange;
+    use ide_db::FileRange;
     use itertools::Itertools;
 
     use crate::fixture;
@@ -336,6 +336,77 @@ struct S;
 impl Tr for S {
     const C: usize = 4;
         //^
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn goto_adt_implementation_inside_block() {
+        check(
+            r#"
+//- minicore: copy, derive
+trait Bar {}
+
+fn test() {
+    #[derive(Copy)]
+  //^^^^^^^^^^^^^^^
+    struct Foo$0;
+
+    impl Foo {}
+       //^^^
+
+    trait Baz {}
+
+    impl Bar for Foo {}
+               //^^^
+
+    impl Baz for Foo {}
+               //^^^
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn goto_trait_implementation_inside_block() {
+        check(
+            r#"
+struct Bar;
+
+fn test() {
+    trait Foo$0 {}
+
+    struct Baz;
+
+    impl Foo for Bar {}
+               //^^^
+
+    impl Foo for Baz {}
+               //^^^
+}
+"#,
+        );
+        check(
+            r#"
+struct Bar;
+
+fn test() {
+    trait Foo {
+        fn foo$0() {}
+    }
+
+    struct Baz;
+
+    impl Foo for Bar {
+        fn foo() {}
+         //^^^
+    }
+
+    impl Foo for Baz {
+        fn foo() {}
+         //^^^
+    }
 }
 "#,
         );

@@ -329,6 +329,30 @@ function preLoadCss(cssUrl) {
             search.innerHTML = "<h3 class=\"search-loading\">" + searchState.loadingText + "</h3>";
             searchState.showResults(search);
         },
+        descShards: new Map(),
+        loadDesc: async function({descShard, descIndex}) {
+            if (descShard.promise === null) {
+                descShard.promise = new Promise((resolve, reject) => {
+                    // The `resolve` callback is stored in the `descShard`
+                    // object, which is itself stored in `this.descShards` map.
+                    // It is called in `loadedDescShard` by the
+                    // search.desc script.
+                    descShard.resolve = resolve;
+                    const ds = descShard;
+                    const fname = `${ds.crate}-desc-${ds.shard}-`;
+                    const url = resourcePath(
+                        `search.desc/${descShard.crate}/${fname}`,
+                        ".js",
+                    );
+                    loadScript(url, reject);
+                });
+            }
+            const list = await descShard.promise;
+            return list[descIndex];
+        },
+        loadedDescShard: function(crate, shard, data) {
+            this.descShards.get(crate)[shard].resolve(data.split("\n"));
+        },
     };
 
     const toggleAllDocsId = "toggle-all-docs";
@@ -366,13 +390,18 @@ function preLoadCss(cssUrl) {
             if (splitAt !== -1) {
                 const implId = savedHash.slice(0, splitAt);
                 const assocId = savedHash.slice(splitAt + 1);
-                const implElem = document.getElementById(implId);
-                if (implElem && implElem.parentElement.tagName === "SUMMARY" &&
-                    implElem.parentElement.parentElement.tagName === "DETAILS") {
-                    onEachLazy(implElem.parentElement.parentElement.querySelectorAll(
+                const implElems = document.querySelectorAll(
+                    `details > summary > section[id^="${implId}"]`,
+                );
+                onEachLazy(implElems, implElem => {
+                    const numbered = /^(.+?)-([0-9]+)$/.exec(implElem.id);
+                    if (implElem.id !== implId && (!numbered || numbered[1] !== implId)) {
+                        return false;
+                    }
+                    return onEachLazy(implElem.parentElement.parentElement.querySelectorAll(
                         `[id^="${assocId}"]`),
                         item => {
-                            const numbered = /([^-]+)-([0-9]+)/.exec(item.id);
+                            const numbered = /^(.+?)-([0-9]+)$/.exec(item.id);
                             if (item.id === assocId || (numbered && numbered[1] === assocId)) {
                                 openParentDetails(item);
                                 item.scrollIntoView();
@@ -380,10 +409,11 @@ function preLoadCss(cssUrl) {
                                 setTimeout(() => {
                                     window.location.replace("#" + item.id);
                                 }, 0);
+                                return true;
                             }
-                        }
+                        },
                     );
-                }
+                });
             }
         }
     }
@@ -438,6 +468,7 @@ function preLoadCss(cssUrl) {
 
             case "s":
             case "S":
+            case "/":
                 ev.preventDefault();
                 searchState.focus();
                 break;
@@ -504,11 +535,13 @@ function preLoadCss(cssUrl) {
                 }
                 const link = document.createElement("a");
                 link.href = path;
-                if (path === current_page) {
-                    link.className = "current";
-                }
                 link.textContent = name;
                 const li = document.createElement("li");
+                // Don't "optimize" this to just use `path`.
+                // We want the browser to normalize this into an absolute URL.
+                if (link.href === current_page) {
+                    li.classList.add("current");
+                }
                 li.appendChild(link);
                 ul.appendChild(li);
             }
@@ -541,7 +574,6 @@ function preLoadCss(cssUrl) {
             //block("associatedconstant", "associated-consts", "Associated Constants");
             block("foreigntype", "foreign-types", "Foreign Types");
             block("keyword", "keywords", "Keywords");
-            block("opaque", "opaque-types", "Opaque Types");
             block("attr", "attributes", "Attribute Macros");
             block("derive", "derives", "Derive Macros");
             block("traitalias", "trait-aliases", "Trait Aliases");
@@ -585,7 +617,7 @@ function preLoadCss(cssUrl) {
         const script = document
             .querySelector("script[data-ignore-extern-crates]");
         const ignoreExternCrates = new Set(
-            (script ? script.getAttribute("data-ignore-extern-crates") : "").split(",")
+            (script ? script.getAttribute("data-ignore-extern-crates") : "").split(","),
         );
         for (const lib of libs) {
             if (lib === window.currentCrate || ignoreExternCrates.has(lib)) {
@@ -1088,8 +1120,7 @@ function preLoadCss(cssUrl) {
         wrapper.style.left = 0;
         wrapper.style.right = "auto";
         wrapper.style.visibility = "hidden";
-        const body = document.getElementsByTagName("body")[0];
-        body.appendChild(wrapper);
+        document.body.appendChild(wrapper);
         const wrapperPos = wrapper.getBoundingClientRect();
         // offset so that the arrow points at the center of the "(i)"
         const finalPos = pos.left + window.scrollX - wrapperPos.width + 24;
@@ -1098,7 +1129,7 @@ function preLoadCss(cssUrl) {
         } else {
             wrapper.style.setProperty(
                 "--popover-arrow-offset",
-                (wrapperPos.right - pos.right + 4) + "px"
+                (wrapperPos.right - pos.right + 4) + "px",
             );
         }
         wrapper.style.visibility = "";
@@ -1208,8 +1239,7 @@ function preLoadCss(cssUrl) {
                 }
                 window.CURRENT_TOOLTIP_ELEMENT.TOOLTIP_BASE.TOOLTIP_FORCE_VISIBLE = false;
             }
-            const body = document.getElementsByTagName("body")[0];
-            body.removeChild(window.CURRENT_TOOLTIP_ELEMENT);
+            document.body.removeChild(window.CURRENT_TOOLTIP_ELEMENT);
             clearTooltipHoverTimeout(window.CURRENT_TOOLTIP_ELEMENT);
             window.CURRENT_TOOLTIP_ELEMENT = null;
         }
@@ -1310,7 +1340,7 @@ function preLoadCss(cssUrl) {
 
         const shortcuts = [
             ["?", "Show this help dialog"],
-            ["S", "Focus the search field"],
+            ["S / /", "Focus the search field"],
             ["↑", "Move up in search results"],
             ["↓", "Move down in search results"],
             ["← / →", "Switch result tab (when results focused)"],
@@ -1680,7 +1710,7 @@ href="https://doc.rust-lang.org/${channel}/rustdoc/read-documentation/search.htm
                 pendingSidebarResizingFrame = false;
                 document.documentElement.style.setProperty(
                     "--resizing-sidebar-width",
-                    desiredSidebarSize + "px"
+                    desiredSidebarSize + "px",
                 );
             }, 100);
         }
@@ -1744,9 +1774,37 @@ href="https://doc.rust-lang.org/${channel}/rustdoc/read-documentation/search.htm
 }());
 
 // This section handles the copy button that appears next to the path breadcrumbs
+// and the copy buttons on the code examples.
 (function() {
-    let reset_button_timeout = null;
+    // Common functions to copy buttons.
+    function copyContentToClipboard(content) {
+        const el = document.createElement("textarea");
+        el.value = content;
+        el.setAttribute("readonly", "");
+        // To not make it appear on the screen.
+        el.style.position = "absolute";
+        el.style.left = "-9999px";
 
+        document.body.appendChild(el);
+        el.select();
+        document.execCommand("copy");
+        document.body.removeChild(el);
+    }
+
+    function copyButtonAnimation(button) {
+        button.classList.add("clicked");
+
+        if (button.reset_button_timeout !== undefined) {
+            window.clearTimeout(button.reset_button_timeout);
+        }
+
+        button.reset_button_timeout = window.setTimeout(() => {
+            button.reset_button_timeout = undefined;
+            button.classList.remove("clicked");
+        }, 1000);
+    }
+
+    // Copy button that appears next to the path breadcrumbs.
     const but = document.getElementById("copy-path");
     if (!but) {
         return;
@@ -1761,45 +1819,74 @@ href="https://doc.rust-lang.org/${channel}/rustdoc/read-documentation/search.htm
             }
         });
 
-        const el = document.createElement("textarea");
-        el.value = path.join("::");
-        el.setAttribute("readonly", "");
-        // To not make it appear on the screen.
-        el.style.position = "absolute";
-        el.style.left = "-9999px";
-
-        document.body.appendChild(el);
-        el.select();
-        document.execCommand("copy");
-        document.body.removeChild(el);
-
-        // There is always one children, but multiple childNodes.
-        but.children[0].style.display = "none";
-
-        let tmp;
-        if (but.childNodes.length < 2) {
-            tmp = document.createTextNode("✓");
-            but.appendChild(tmp);
-        } else {
-            onEachLazy(but.childNodes, e => {
-                if (e.nodeType === Node.TEXT_NODE) {
-                    tmp = e;
-                    return true;
-                }
-            });
-            tmp.textContent = "✓";
-        }
-
-        if (reset_button_timeout !== null) {
-            window.clearTimeout(reset_button_timeout);
-        }
-
-        function reset_button() {
-            tmp.textContent = "";
-            reset_button_timeout = null;
-            but.children[0].style.display = "";
-        }
-
-        reset_button_timeout = window.setTimeout(reset_button, 1000);
+        copyContentToClipboard(path.join("::"));
+        copyButtonAnimation(but);
     };
+
+    // Copy buttons on code examples.
+    function copyCode(codeElem) {
+        if (!codeElem) {
+            // Should never happen, but the world is a dark and dangerous place.
+            return;
+        }
+        copyContentToClipboard(codeElem.textContent);
+    }
+
+    function getExampleWrap(event) {
+        let elem = event.target;
+        while (!hasClass(elem, "example-wrap")) {
+            if (elem === document.body ||
+                elem.tagName === "A" ||
+                elem.tagName === "BUTTON" ||
+                hasClass(elem, "docblock")
+            ) {
+                return null;
+            }
+            elem = elem.parentElement;
+        }
+        return elem;
+    }
+
+    function addCopyButton(event) {
+        const elem = getExampleWrap(event);
+        if (elem === null) {
+            return;
+        }
+        // Since the button will be added, no need to keep this listener around.
+        elem.removeEventListener("mouseover", addCopyButton);
+
+        const parent = document.createElement("div");
+        parent.className = "button-holder";
+        const runButton = elem.querySelector(".test-arrow");
+        if (runButton !== null) {
+            // If there is a run button, we move it into the same div.
+            parent.appendChild(runButton);
+        }
+        elem.appendChild(parent);
+        const copyButton = document.createElement("button");
+        copyButton.className = "copy-button";
+        copyButton.title = "Copy code to clipboard";
+        copyButton.addEventListener("click", () => {
+            copyCode(elem.querySelector("pre > code"));
+            copyButtonAnimation(copyButton);
+        });
+        parent.appendChild(copyButton);
+    }
+
+    function showHideCodeExampleButtons(event) {
+        const elem = getExampleWrap(event);
+        if (elem === null) {
+            return;
+        }
+        const buttons = elem.querySelector(".button-holder");
+        if (buttons === null) {
+            return;
+        }
+        buttons.classList.toggle("keep-visible");
+    }
+
+    onEachLazy(document.querySelectorAll(".docblock .example-wrap"), elem => {
+        elem.addEventListener("mouseover", addCopyButton);
+        elem.addEventListener("click", showHideCodeExampleButtons);
+    });
 }());

@@ -1,7 +1,8 @@
 use super::utils::{extract_clippy_lint, is_lint_level, is_word};
 use super::{Attribute, USELESS_ATTRIBUTE};
 use clippy_utils::diagnostics::span_lint_and_then;
-use clippy_utils::source::{first_line_of_span, snippet_opt};
+use clippy_utils::source::{first_line_of_span, SpanRangeExt};
+use rustc_ast::NestedMetaItem;
 use rustc_errors::Applicability;
 use rustc_hir::{Item, ItemKind};
 use rustc_lint::{LateContext, LintContext};
@@ -20,24 +21,38 @@ pub(super) fn check(cx: &LateContext<'_>, item: &Item<'_>, attrs: &[Attribute]) 
                 for lint in lint_list {
                     match item.kind {
                         ItemKind::Use(..) => {
-                            if is_word(lint, sym::unused_imports)
-                                || is_word(lint, sym::deprecated)
-                                || is_word(lint, sym!(unreachable_pub))
-                                || is_word(lint, sym!(unused))
-                                || is_word(lint, sym!(unused_import_braces))
-                                || extract_clippy_lint(lint).map_or(false, |s| {
-                                    matches!(
-                                        s.as_str(),
-                                        "wildcard_imports"
-                                            | "enum_glob_use"
-                                            | "redundant_pub_crate"
-                                            | "macro_use_imports"
-                                            | "unsafe_removed_from_name"
-                                            | "module_name_repetitions"
-                                            | "single_component_path_imports"
-                                    )
-                                })
+                            if let NestedMetaItem::MetaItem(meta_item) = lint
+                                && meta_item.is_word()
+                                && let Some(ident) = meta_item.ident()
+                                && matches!(
+                                    ident.name.as_str(),
+                                    "ambiguous_glob_reexports"
+                                        | "dead_code"
+                                        | "deprecated"
+                                        | "hidden_glob_reexports"
+                                        | "unreachable_pub"
+                                        | "unused"
+                                        | "unused_braces"
+                                        | "unused_import_braces"
+                                        | "unused_imports"
+                                )
                             {
+                                return;
+                            }
+
+                            if extract_clippy_lint(lint).is_some_and(|symbol| {
+                                matches!(
+                                    symbol.as_str(),
+                                    "wildcard_imports"
+                                        | "enum_glob_use"
+                                        | "redundant_pub_crate"
+                                        | "macro_use_imports"
+                                        | "unsafe_removed_from_name"
+                                        | "module_name_repetitions"
+                                        | "single_component_path_imports"
+                                        | "disallowed_types"
+                                )
+                            }) {
                                 return;
                             }
                         },
@@ -54,14 +69,14 @@ pub(super) fn check(cx: &LateContext<'_>, item: &Item<'_>, attrs: &[Attribute]) 
                 }
                 let line_span = first_line_of_span(cx, attr.span);
 
-                if let Some(mut sugg) = snippet_opt(cx, line_span) {
-                    if sugg.contains("#[") {
+                if let Some(src) = line_span.get_source_text(cx) {
+                    if src.contains("#[") {
+                        #[expect(clippy::collapsible_span_lint_calls)]
                         span_lint_and_then(cx, USELESS_ATTRIBUTE, line_span, "useless lint attribute", |diag| {
-                            sugg = sugg.replacen("#[", "#![", 1);
                             diag.span_suggestion(
                                 line_span,
                                 "if you just forgot a `!`, use",
-                                sugg,
+                                src.replacen("#[", "#![", 1),
                                 Applicability::MaybeIncorrect,
                             );
                         });

@@ -3,7 +3,6 @@ import argparse
 import contextlib
 import datetime
 import hashlib
-import json
 import os
 import re
 import shutil
@@ -52,7 +51,7 @@ def get(base, url, path, checksums, verbose=False):
 
     try:
         if url not in checksums:
-            raise RuntimeError(("src/stage0.json doesn't contain a checksum for {}. "
+            raise RuntimeError(("src/stage0 doesn't contain a checksum for {}. "
                                 "Pre-built artifacts might not be available for this "
                                 "target at this time, see https://doc.rust-lang.org/nightly"
                                 "/rustc/platform-support.html for more information.")
@@ -80,6 +79,11 @@ def get(base, url, path, checksums, verbose=False):
                 eprint("removing", temp_path)
             os.unlink(temp_path)
 
+def curl_version():
+    m = re.match(bytes("^curl ([0-9]+)\\.([0-9]+)", "utf8"), require(["curl", "-V"]))
+    if m is None:
+        return (0, 0)
+    return (int(m[1]), int(m[2]))
 
 def download(path, url, probably_big, verbose):
     for _ in range(4):
@@ -108,11 +112,15 @@ def _download(path, url, probably_big, verbose, exception):
         # If curl is not present on Win32, we should not sys.exit
         #   but raise `CalledProcessError` or `OSError` instead
         require(["curl", "--version"], exception=platform_is_win32())
-        run(["curl", option,
+        extra_flags = []
+        if curl_version() > (7, 70):
+            extra_flags = [ "--retry-all-errors" ]
+        run(["curl", option] + extra_flags + [
             "-L", # Follow redirect.
             "-y", "30", "-Y", "10",    # timeout if speed is < 10 bytes/sec for > 30 seconds
             "--connect-timeout", "30",  # timeout if cannot connect within 30 seconds
             "-o", path,
+            "--continue-at", "-",
             "--retry", "3", "-SRf", url],
             verbose=verbose,
             exception=True, # Will raise RuntimeError on failure
@@ -421,9 +429,9 @@ def output(filepath):
 
 
 class Stage0Toolchain:
-    def __init__(self, stage0_payload):
-        self.date = stage0_payload["date"]
-        self.version = stage0_payload["version"]
+    def __init__(self, date, version):
+        self.date = date
+        self.version = version
 
     def channel(self):
         return self.version + "-" + self.date
@@ -439,7 +447,7 @@ class DownloadInfo:
         bin_root,
         tarball_path,
         tarball_suffix,
-        checksums_sha256,
+        stage0_data,
         pattern,
         verbose,
     ):
@@ -448,7 +456,7 @@ class DownloadInfo:
         self.bin_root = bin_root
         self.tarball_path = tarball_path
         self.tarball_suffix = tarball_suffix
-        self.checksums_sha256 = checksums_sha256
+        self.stage0_data = stage0_data
         self.pattern = pattern
         self.verbose = verbose
 
@@ -458,7 +466,7 @@ def download_component(download_info):
             download_info.base_download_url,
             download_info.download_path,
             download_info.tarball_path,
-            download_info.checksums_sha256,
+            download_info.stage0_data,
             verbose=download_info.verbose,
         )
 
@@ -510,11 +518,12 @@ class RustBuild(object):
         build_dir = args.build_dir or self.get_toml('build-dir', 'build') or 'build'
         self.build_dir = os.path.abspath(build_dir)
 
-        with open(os.path.join(self.rust_root, "src", "stage0.json")) as f:
-            data = json.load(f)
-        self.checksums_sha256 = data["checksums_sha256"]
-        self.stage0_compiler = Stage0Toolchain(data["compiler"])
-        self.download_url = os.getenv("RUSTUP_DIST_SERVER") or data["config"]["dist_server"]
+        self.stage0_data = parse_stage0_file(os.path.join(self.rust_root, "src", "stage0"))
+        self.stage0_compiler = Stage0Toolchain(
+            self.stage0_data["compiler_date"],
+            self.stage0_data["compiler_version"]
+        )
+        self.download_url = os.getenv("RUSTUP_DIST_SERVER") or self.stage0_data["dist_server"]
 
         self.build = args.build or self.build_triple()
 
@@ -533,9 +542,13 @@ class RustBuild(object):
         bin_root = self.bin_root()
 
         key = self.stage0_compiler.date
-        if self.rustc().startswith(bin_root) and \
-                (not os.path.exists(self.rustc()) or
-                 self.program_out_of_date(self.rustc_stamp(), key)):
+        is_outdated = self.program_out_of_date(self.rustc_stamp(), key)
+        need_rustc = self.rustc().startswith(bin_root) and (not os.path.exists(self.rustc()) \
+            or is_outdated)
+        need_cargo = self.cargo().startswith(bin_root) and (not os.path.exists(self.cargo()) \
+            or is_outdated)
+
+        if need_rustc or need_cargo:
             if os.path.exists(bin_root):
                 # HACK: On Windows, we can't delete rust-analyzer-proc-macro-server while it's
                 # running. Kill it.
@@ -556,7 +569,6 @@ class RustBuild(object):
                     run_powershell([script])
                 shutil.rmtree(bin_root)
 
-            key = self.stage0_compiler.date
             cache_dst = (self.get_toml('bootstrap-cache-path', 'build') or
                 os.path.join(self.build_dir, "cache"))
 
@@ -568,11 +580,16 @@ class RustBuild(object):
 
             toolchain_suffix = "{}-{}{}".format(rustc_channel, self.build, tarball_suffix)
 
-            tarballs_to_download = [
-                ("rust-std-{}".format(toolchain_suffix), "rust-std-{}".format(self.build)),
-                ("rustc-{}".format(toolchain_suffix), "rustc"),
-                ("cargo-{}".format(toolchain_suffix), "cargo"),
-            ]
+            tarballs_to_download = []
+
+            if need_rustc:
+                tarballs_to_download.append(
+                    ("rust-std-{}".format(toolchain_suffix), "rust-std-{}".format(self.build))
+                )
+                tarballs_to_download.append(("rustc-{}".format(toolchain_suffix), "rustc"))
+
+            if need_cargo:
+                tarballs_to_download.append(("cargo-{}".format(toolchain_suffix), "cargo"))
 
             tarballs_download_info = [
                 DownloadInfo(
@@ -581,7 +598,7 @@ class RustBuild(object):
                     bin_root=self.bin_root(),
                     tarball_path=os.path.join(rustc_cache, filename),
                     tarball_suffix=tarball_suffix,
-                    checksums_sha256=self.checksums_sha256,
+                    stage0_data=self.stage0_data,
                     pattern=pattern,
                     verbose=self.verbose,
                 )
@@ -599,6 +616,12 @@ class RustBuild(object):
                 print('Choosing a pool size of', pool_size, 'for the unpacking of the tarballs')
             p = Pool(pool_size)
             try:
+                # FIXME: A cheap workaround for https://github.com/rust-lang/rust/issues/125578,
+                # remove this once the issue is closed.
+                bootstrap_out = self.bootstrap_out()
+                if os.path.exists(bootstrap_out):
+                    shutil.rmtree(bootstrap_out)
+
                 p.map(unpack_component, tarballs_download_info)
             finally:
                 p.close()
@@ -611,9 +634,18 @@ class RustBuild(object):
                 self.fix_bin_or_dylib("{}/bin/rustdoc".format(bin_root))
                 self.fix_bin_or_dylib("{}/libexec/rust-analyzer-proc-macro-srv".format(bin_root))
                 lib_dir = "{}/lib".format(bin_root)
+                rustlib_bin_dir = "{}/rustlib/{}/bin".format(lib_dir, self.build)
+                self.fix_bin_or_dylib("{}/rust-lld".format(rustlib_bin_dir))
+                self.fix_bin_or_dylib("{}/gcc-ld/ld.lld".format(rustlib_bin_dir))
                 for lib in os.listdir(lib_dir):
-                    if lib.endswith(".so"):
-                        self.fix_bin_or_dylib(os.path.join(lib_dir, lib))
+                    # .so is not necessarily the suffix, there can be version numbers afterwards.
+                    if ".so" in lib:
+                        elf_path = os.path.join(lib_dir, lib)
+                        with open(elf_path, "rb") as f:
+                            magic = f.read(4)
+                            # Patchelf will skip non-ELF files, but issue a warning.
+                            if magic == b"\x7fELF":
+                                self.fix_bin_or_dylib(elf_path)
 
             with output(self.rustc_stamp()) as rust_stamp:
                 rust_stamp.write(key)
@@ -719,13 +751,10 @@ class RustBuild(object):
 
         patchelf = "{}/bin/patchelf".format(nix_deps_dir)
         rpath_entries = [
-            # Relative default, all binary and dynamic libraries we ship
-            # appear to have this (even when `../lib` is redundant).
-            "$ORIGIN/../lib",
             os.path.join(os.path.realpath(nix_deps_dir), "lib")
         ]
-        patchelf_args = ["--set-rpath", ":".join(rpath_entries)]
-        if not fname.endswith(".so"):
+        patchelf_args = ["--add-rpath", ":".join(rpath_entries)]
+        if ".so" not in fname:
             # Finally, set the correct .interp for binaries
             with open("{}/nix-support/dynamic-linker".format(nix_deps_dir)) as dynamic_linker:
                 patchelf_args += ["--set-interpreter", dynamic_linker.read().rstrip()]
@@ -858,6 +887,16 @@ class RustBuild(object):
             return line[start + 1:end]
         return None
 
+    def bootstrap_out(self):
+        """Return the path of the bootstrap build artifacts
+
+        >>> rb = RustBuild()
+        >>> rb.build_dir = "build"
+        >>> rb.bootstrap_binary() == os.path.join("build", "bootstrap")
+        True
+        """
+        return os.path.join(self.build_dir, "bootstrap")
+
     def bootstrap_binary(self):
         """Return the path of the bootstrap binary
 
@@ -867,7 +906,7 @@ class RustBuild(object):
         ... "debug", "bootstrap")
         True
         """
-        return os.path.join(self.build_dir, "bootstrap", "debug", "bootstrap")
+        return os.path.join(self.bootstrap_out(), "debug", "bootstrap")
 
     def build_bootstrap(self):
         """Build bootstrap"""
@@ -1016,7 +1055,7 @@ class RustBuild(object):
 
     def check_vendored_status(self):
         """Check that vendoring is configured properly"""
-        # keep this consistent with the equivalent check in rustbuild:
+        # keep this consistent with the equivalent check in bootstrap:
         # https://github.com/rust-lang/rust/blob/a8a33cf27166d3eabaffc58ed3799e054af3b0c6/src/bootstrap/lib.rs#L399-L405
         if 'SUDO_USER' in os.environ and not self.use_vendored_sources:
             if os.getuid() == 0:
@@ -1029,13 +1068,8 @@ class RustBuild(object):
         if self.use_vendored_sources:
             vendor_dir = os.path.join(self.rust_root, 'vendor')
             if not os.path.exists(vendor_dir):
-                sync_dirs = "--sync ./src/tools/cargo/Cargo.toml " \
-                            "--sync ./src/tools/rust-analyzer/Cargo.toml " \
-                            "--sync ./compiler/rustc_codegen_cranelift/Cargo.toml " \
-                            "--sync ./src/bootstrap/Cargo.toml "
                 eprint('ERROR: vendoring required, but vendor directory does not exist.')
-                eprint('       Run `cargo vendor {}` to initialize the '
-                      'vendor directory.'.format(sync_dirs))
+                eprint('       Run `x.py vendor` to initialize the vendor directory.')
                 eprint('       Alternatively, use the pre-vendored `rustc-src` dist component.')
                 eprint('       To get a stable/beta/nightly version, download it from: ')
                 eprint('       '
@@ -1069,6 +1103,16 @@ def parse_args(args):
     parser.add_argument('-v', '--verbose', action='count', default=0)
 
     return parser.parse_known_args(args)[0]
+
+def parse_stage0_file(path):
+    result = {}
+    with open(path, 'r') as file:
+        for line in file:
+            line = line.strip()
+            if line and not line.startswith('#'):
+                key, value = line.split('=', 1)
+                result[key.strip()] = value.strip()
+    return result
 
 def bootstrap(args):
     """Configure, fetch, build and run the initial bootstrap"""

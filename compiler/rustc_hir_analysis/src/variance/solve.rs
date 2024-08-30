@@ -21,7 +21,7 @@ struct SolveContext<'a, 'tcx> {
     solutions: Vec<ty::Variance>,
 }
 
-pub fn solve_constraints<'tcx>(
+pub(crate) fn solve_constraints<'tcx>(
     constraints_cx: ConstraintContext<'_, 'tcx>,
 ) -> ty::CrateVariancesMap<'tcx> {
     let ConstraintContext { terms_cx, constraints, .. } = constraints_cx;
@@ -76,7 +76,7 @@ impl<'a, 'tcx> SolveContext<'a, 'tcx> {
         let tcx = self.terms_cx.tcx;
 
         // Make all const parameters invariant.
-        for param in generics.params.iter() {
+        for param in generics.own_params.iter() {
             if let ty::GenericParamDefKind::Const { .. } = param.kind {
                 variances[param.index as usize] = ty::Invariant;
             }

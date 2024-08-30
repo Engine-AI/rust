@@ -1,4 +1,4 @@
-//@ unit-test: DataflowConstProp
+//@ test-mir-pass: DataflowConstProp
 // EMIT_MIR_FOR_EACH_PANIC_STRATEGY
 // EMIT_MIR_FOR_EACH_BIT_WIDTH
 
@@ -14,8 +14,8 @@ fn main() {
     // CHECK: {{_.*}} = const true;
     // CHECK: assert(const true
 
-    // CHECK-NOT: [[t:_.*]] = [[array_lit]][_
-    // CHECK: [[t:_.*]] = [[array_lit]][2 of 3];
+    // CHECK-NOT: [[t:_.*]] = {{copy|move}} [[array_lit]][_
+    // CHECK: [[t:_.*]] = copy [[array_lit]][2 of 3];
     // CHECK: [[x]] = Add(move [[t]], const 0_u32);
     let x: u32 = [42; 8][2] + 0;
 }

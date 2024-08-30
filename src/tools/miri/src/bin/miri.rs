@@ -1,4 +1,3 @@
-#![feature(generic_nonzero)]
 #![feature(rustc_private, stmt_expr_attributes)]
 #![allow(
     clippy::manual_range_contains,
@@ -9,41 +8,51 @@
 )]
 
 // Some "regular" crates we want to share with rustc
-#[macro_use]
 extern crate tracing;
 
 // The rustc crates we need
 extern crate rustc_data_structures;
 extern crate rustc_driver;
 extern crate rustc_hir;
+extern crate rustc_hir_analysis;
 extern crate rustc_interface;
 extern crate rustc_log;
 extern crate rustc_metadata;
 extern crate rustc_middle;
 extern crate rustc_session;
+extern crate rustc_span;
+extern crate rustc_target;
 
 use std::env::{self, VarError};
 use std::num::NonZero;
 use std::path::PathBuf;
 use std::str::FromStr;
 
+use tracing::debug;
+
 use rustc_data_structures::sync::Lrc;
 use rustc_driver::Compilation;
+use rustc_hir::def_id::LOCAL_CRATE;
 use rustc_hir::{self as hir, Node};
+use rustc_hir_analysis::check::check_function_signature;
 use rustc_interface::interface::Config;
 use rustc_middle::{
-    middle::exported_symbols::{
-        ExportedSymbol, SymbolExportInfo, SymbolExportKind, SymbolExportLevel,
+    middle::{
+        codegen_fn_attrs::CodegenFnAttrFlags,
+        exported_symbols::{ExportedSymbol, SymbolExportInfo, SymbolExportKind, SymbolExportLevel},
     },
     query::LocalCrate,
-    ty::TyCtxt,
+    traits::{ObligationCause, ObligationCauseCode},
+    ty::{self, Ty, TyCtxt},
     util::Providers,
 };
-use rustc_session::config::{CrateType, ErrorOutputType, OptLevel};
+use rustc_session::config::{CrateType, EntryFnType, ErrorOutputType, OptLevel};
 use rustc_session::search_paths::PathKind;
 use rustc_session::{CtfeBacktrace, EarlyDiagCtxt};
+use rustc_span::def_id::DefId;
+use rustc_target::spec::abi::Abi;
 
-use miri::{BacktraceStyle, BorrowTrackerMethod, ProvenanceMode, RetagFields};
+use miri::{BacktraceStyle, BorrowTrackerMethod, ProvenanceMode, RetagFields, ValidationMode};
 
 struct MiriCompilerCalls {
     miri_config: miri::MiriConfig,
@@ -81,11 +90,7 @@ impl rustc_driver::Callbacks for MiriCompilerCalls {
                 tcx.dcx().fatal("miri only makes sense on bin crates");
             }
 
-            let (entry_def_id, entry_type) = if let Some(entry_def) = tcx.entry_fn(()) {
-                entry_def
-            } else {
-                tcx.dcx().fatal("miri can only run programs that have a main function");
-            };
+            let (entry_def_id, entry_type) = entry_fn(tcx);
             let mut config = self.miri_config.clone();
 
             // Add filename to `miri` arguments.
@@ -97,10 +102,9 @@ impl rustc_driver::Callbacks for MiriCompilerCalls {
             }
 
             if tcx.sess.opts.optimize != OptLevel::No {
-                tcx.dcx().warn("Miri does not support optimizations. If you have enabled optimizations \
-                    by selecting a Cargo profile (such as --release) which changes other profile settings \
-                    such as whether debug assertions and overflow checks are enabled, those settings are \
-                    still applied.");
+                tcx.dcx().warn("Miri does not support optimizations: the opt-level is ignored. The only effect \
+                    of selecting a Cargo profile that enables optimizations (such as --release) is to apply \
+                    its remaining settings, such as whether debug assertions and overflow checks are enabled.");
             }
             if tcx.sess.mir_opt_level() > 0 {
                 tcx.dcx().warn("You have explicitly enabled MIR optimizations, overriding Miri's default \
@@ -136,6 +140,7 @@ impl rustc_driver::Callbacks for MiriBeRustCompilerCalls {
             config.override_queries = Some(|_, local_providers| {
                 // `exported_symbols` and `reachable_non_generics` provided by rustc always returns
                 // an empty result if `tcx.sess.opts.output_types.should_codegen()` is false.
+                // In addition we need to add #[used] symbols to exported_symbols for `lookup_link_section`.
                 local_providers.exported_symbols = |tcx, LocalCrate| {
                     let reachable_set = tcx.with_stable_hashing_context(|hcx| {
                         tcx.reachable_set(()).to_sorted(&hcx, true)
@@ -160,24 +165,53 @@ impl rustc_driver::Callbacks for MiriBeRustCompilerCalls {
                                 })
                                 if !tcx.generics_of(local_def_id).requires_monomorphization(tcx)
                             );
-                            (is_reachable_non_generic
-                                && tcx.codegen_fn_attrs(local_def_id).contains_extern_indicator())
-                            .then_some((
-                                ExportedSymbol::NonGeneric(local_def_id.to_def_id()),
-                                // Some dummy `SymbolExportInfo` here. We only use
-                                // `exported_symbols` in shims/foreign_items.rs and the export info
-                                // is ignored.
-                                SymbolExportInfo {
-                                    level: SymbolExportLevel::C,
-                                    kind: SymbolExportKind::Text,
-                                    used: false,
-                                },
-                            ))
+                            if !is_reachable_non_generic {
+                                return None;
+                            }
+                            let codegen_fn_attrs = tcx.codegen_fn_attrs(local_def_id);
+                            if codegen_fn_attrs.contains_extern_indicator()
+                                || codegen_fn_attrs.flags.contains(CodegenFnAttrFlags::USED)
+                                || codegen_fn_attrs.flags.contains(CodegenFnAttrFlags::USED_LINKER)
+                            {
+                                Some((
+                                    ExportedSymbol::NonGeneric(local_def_id.to_def_id()),
+                                    // Some dummy `SymbolExportInfo` here. We only use
+                                    // `exported_symbols` in shims/foreign_items.rs and the export info
+                                    // is ignored.
+                                    SymbolExportInfo {
+                                        level: SymbolExportLevel::C,
+                                        kind: SymbolExportKind::Text,
+                                        used: false,
+                                    },
+                                ))
+                            } else {
+                                None
+                            }
                         }),
                     )
                 }
             });
         }
+    }
+
+    fn after_analysis<'tcx>(
+        &mut self,
+        _: &rustc_interface::interface::Compiler,
+        queries: &'tcx rustc_interface::Queries<'tcx>,
+    ) -> Compilation {
+        queries.global_ctxt().unwrap().enter(|tcx| {
+            if self.target_crate {
+                // cargo-miri has patched the compiler flags to make these into check-only builds,
+                // but we are still emulating regular rustc builds, which would perform post-mono
+                // const-eval during collection. So let's also do that here, even if we might be
+                // running with `--emit=metadata`. In particular this is needed to make
+                // `compile_fail` doc tests trigger post-mono errors.
+                // In general `collect_and_partition_mono_items` is not safe to call in check-only
+                // builds, but we are setting `-Zalways-encode-mir` which avoids those issues.
+                let _ = tcx.collect_and_partition_mono_items(());
+            }
+        });
+        Compilation::Continue
     }
 }
 
@@ -251,25 +285,6 @@ fn run_compiler(
     callbacks: &mut (dyn rustc_driver::Callbacks + Send),
     using_internal_features: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> ! {
-    if target_crate {
-        // Miri needs a custom sysroot for target crates.
-        // If no `--sysroot` is given, the `MIRI_SYSROOT` env var is consulted to find where
-        // that sysroot lives, and that is passed to rustc.
-        let sysroot_flag = "--sysroot";
-        if !args.iter().any(|e| e == sysroot_flag) {
-            // Using the built-in default here would be plain wrong, so we *require*
-            // the env var to make sure things make sense.
-            let miri_sysroot = env::var("MIRI_SYSROOT").unwrap_or_else(|_| {
-                show_error!(
-                    "Miri was invoked in 'target' mode without `MIRI_SYSROOT` or `--sysroot` being set"
-                    )
-            });
-
-            args.push(sysroot_flag.to_owned());
-            args.push(miri_sysroot);
-        }
-    }
-
     // Don't insert `MIRI_DEFAULT_ARGS`, in particular, `--cfg=miri`, if we are building
     // a "host" crate. That may cause procedural macros (and probably build scripts) to
     // depend on Miri-only symbols, such as `miri_resolve_frame`:
@@ -293,6 +308,15 @@ fn run_compiler(
 /// `<value1>,<value2>,<value3>,...`
 fn parse_comma_list<T: FromStr>(input: &str) -> Result<Vec<T>, T::Err> {
     input.split(',').map(str::parse::<T>).collect()
+}
+
+/// Parses the input as a float in the range from 0.0 to 1.0 (inclusive).
+fn parse_rate(input: &str) -> Result<f64, &'static str> {
+    match input.parse::<f64>() {
+        Ok(rate) if rate >= 0.0 && rate <= 1.0 => Ok(rate),
+        Ok(_) => Err("must be between `0.0` and `1.0`"),
+        Err(_) => Err("requires a `f64` between `0.0` and `1.0`"),
+    }
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -331,6 +355,56 @@ fn jemalloc_magic() {
     }
 }
 
+fn entry_fn(tcx: TyCtxt<'_>) -> (DefId, EntryFnType) {
+    if let Some(entry_def) = tcx.entry_fn(()) {
+        return entry_def;
+    }
+    // Look for a symbol in the local crate named `miri_start`, and treat that as the entry point.
+    let sym = tcx.exported_symbols(LOCAL_CRATE).iter().find_map(|(sym, _)| {
+        if sym.symbol_name_for_local_instance(tcx).name == "miri_start" { Some(sym) } else { None }
+    });
+    if let Some(ExportedSymbol::NonGeneric(id)) = sym {
+        let start_def_id = id.expect_local();
+        let start_span = tcx.def_span(start_def_id);
+
+        let expected_sig = ty::Binder::dummy(tcx.mk_fn_sig(
+            [tcx.types.isize, Ty::new_imm_ptr(tcx, Ty::new_imm_ptr(tcx, tcx.types.u8))],
+            tcx.types.isize,
+            false,
+            hir::Safety::Safe,
+            Abi::Rust,
+        ));
+
+        let correct_func_sig = check_function_signature(
+            tcx,
+            ObligationCause::new(start_span, start_def_id, ObligationCauseCode::Misc),
+            *id,
+            expected_sig,
+        )
+        .is_ok();
+
+        if correct_func_sig {
+            (*id, EntryFnType::Start)
+        } else {
+            tcx.dcx().fatal(
+                "`miri_start` must have the following signature:\n\
+                        fn miri_start(argc: isize, argv: *const *const u8) -> isize",
+            );
+        }
+    } else {
+        tcx.dcx().fatal(
+            "Miri can only run programs that have a main function.\n\
+            Alternatively, you can export a `miri_start` function:\n\
+            \n\
+            #[cfg(miri)]\n\
+            #[no_mangle]\n\
+            fn miri_start(argc: isize, argv: *const *const u8) -> isize {\
+            \n    // Call the actual start function that your project implements, based on your target's conventions.\n\
+            }"
+        );
+    }
+}
+
 fn main() {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     jemalloc_magic();
@@ -343,6 +417,10 @@ fn main() {
 
     let args = rustc_driver::args::raw_args(&early_dcx)
         .unwrap_or_else(|_| std::process::exit(rustc_driver::EXIT_FAILURE));
+
+    // Install the ctrlc handler that sets `rustc_const_eval::CTRL_C_RECEIVED`, even if
+    // MIRI_BE_RUSTC is set.
+    rustc_driver::install_ctrlc_handler();
 
     // If the environment asks us to actually be rustc, then do that.
     if let Some(crate_kind) = env::var_os("MIRI_BE_RUSTC") {
@@ -381,9 +459,12 @@ fn main() {
 
     let mut rustc_args = vec![];
     let mut after_dashdash = false;
-
     // If user has explicitly enabled/disabled isolation
     let mut isolation_enabled: Option<bool> = None;
+
+    // Note that we require values to be given with `=`, not with a space.
+    // This matches how rustc parses `-Z`.
+    // However, unlike rustc we do not accept a space after `-Z`.
     for arg in args {
         if rustc_args.is_empty() {
             // Very first arg: binary name.
@@ -394,7 +475,9 @@ fn main() {
         } else if arg == "--" {
             after_dashdash = true;
         } else if arg == "-Zmiri-disable-validation" {
-            miri_config.validate = false;
+            miri_config.validation = ValidationMode::No;
+        } else if arg == "-Zmiri-recursive-validation" {
+            miri_config.validation = ValidationMode::Deep;
         } else if arg == "-Zmiri-disable-stacked-borrows" {
             miri_config.borrow_tracker = None;
         } else if arg == "-Zmiri-tree-borrows" {
@@ -482,15 +565,15 @@ fn main() {
             );
         } else if let Some(param) = arg.strip_prefix("-Zmiri-env-forward=") {
             miri_config.forwarded_env_vars.push(param.to_owned());
-        } else if let Some(param) = arg.strip_prefix("-Zmiri-track-pointer-tag=") {
-            let ids: Vec<u64> = match parse_comma_list(param) {
-                Ok(ids) => ids,
-                Err(err) =>
-                    show_error!(
-                        "-Zmiri-track-pointer-tag requires a comma separated list of valid `u64` arguments: {}",
-                        err
-                    ),
+        } else if let Some(param) = arg.strip_prefix("-Zmiri-env-set=") {
+            let Some((name, value)) = param.split_once('=') else {
+                show_error!("-Zmiri-env-set requires an argument of the form <name>=<value>");
             };
+            miri_config.set_env_vars.insert(name.to_owned(), value.to_owned());
+        } else if let Some(param) = arg.strip_prefix("-Zmiri-track-pointer-tag=") {
+            let ids: Vec<u64> = parse_comma_list(param).unwrap_or_else(|err| {
+                show_error!("-Zmiri-track-pointer-tag requires a comma separated list of valid `u64` arguments: {err}")
+            });
             for id in ids.into_iter().map(miri::BorTag::new) {
                 if let Some(id) = id {
                     miri_config.tracked_pointer_tags.insert(id);
@@ -498,73 +581,38 @@ fn main() {
                     show_error!("-Zmiri-track-pointer-tag requires nonzero arguments");
                 }
             }
-        } else if let Some(param) = arg.strip_prefix("-Zmiri-track-call-id=") {
-            let ids: Vec<u64> = match parse_comma_list(param) {
-                Ok(ids) => ids,
-                Err(err) =>
-                    show_error!(
-                        "-Zmiri-track-call-id requires a comma separated list of valid `u64` arguments: {}",
-                        err
-                    ),
-            };
-            for id in ids.into_iter().map(miri::CallId::new) {
-                if let Some(id) = id {
-                    miri_config.tracked_call_ids.insert(id);
-                } else {
-                    show_error!("-Zmiri-track-call-id requires a nonzero argument");
-                }
-            }
         } else if let Some(param) = arg.strip_prefix("-Zmiri-track-alloc-id=") {
-            let ids: Vec<miri::AllocId> = match parse_comma_list::<NonZero<u64>>(param) {
-                Ok(ids) => ids.into_iter().map(miri::AllocId).collect(),
-                Err(err) =>
-                    show_error!(
-                        "-Zmiri-track-alloc-id requires a comma separated list of valid non-zero `u64` arguments: {}",
-                        err
-                    ),
-            };
-            miri_config.tracked_alloc_ids.extend(ids);
+            let ids = parse_comma_list::<NonZero<u64>>(param).unwrap_or_else(|err| {
+                show_error!("-Zmiri-track-alloc-id requires a comma separated list of valid non-zero `u64` arguments: {err}")
+            });
+            miri_config.tracked_alloc_ids.extend(ids.into_iter().map(miri::AllocId));
         } else if arg == "-Zmiri-track-alloc-accesses" {
             miri_config.track_alloc_accesses = true;
+        } else if let Some(param) = arg.strip_prefix("-Zmiri-address-reuse-rate=") {
+            miri_config.address_reuse_rate = parse_rate(param)
+                .unwrap_or_else(|err| show_error!("-Zmiri-address-reuse-rate {err}"));
+        } else if let Some(param) = arg.strip_prefix("-Zmiri-address-reuse-cross-thread-rate=") {
+            miri_config.address_reuse_cross_thread_rate = parse_rate(param)
+                .unwrap_or_else(|err| show_error!("-Zmiri-address-reuse-cross-thread-rate {err}"));
         } else if let Some(param) = arg.strip_prefix("-Zmiri-compare-exchange-weak-failure-rate=") {
-            let rate = match param.parse::<f64>() {
-                Ok(rate) if rate >= 0.0 && rate <= 1.0 => rate,
-                Ok(_) =>
-                    show_error!(
-                        "-Zmiri-compare-exchange-weak-failure-rate must be between `0.0` and `1.0`"
-                    ),
-                Err(err) =>
-                    show_error!(
-                        "-Zmiri-compare-exchange-weak-failure-rate requires a `f64` between `0.0` and `1.0`: {}",
-                        err
-                    ),
-            };
-            miri_config.cmpxchg_weak_failure_rate = rate;
+            miri_config.cmpxchg_weak_failure_rate = parse_rate(param).unwrap_or_else(|err| {
+                show_error!("-Zmiri-compare-exchange-weak-failure-rate {err}")
+            });
         } else if let Some(param) = arg.strip_prefix("-Zmiri-preemption-rate=") {
-            let rate = match param.parse::<f64>() {
-                Ok(rate) if rate >= 0.0 && rate <= 1.0 => rate,
-                Ok(_) => show_error!("-Zmiri-preemption-rate must be between `0.0` and `1.0`"),
-                Err(err) =>
-                    show_error!(
-                        "-Zmiri-preemption-rate requires a `f64` between `0.0` and `1.0`: {}",
-                        err
-                    ),
-            };
-            miri_config.preemption_rate = rate;
+            miri_config.preemption_rate =
+                parse_rate(param).unwrap_or_else(|err| show_error!("-Zmiri-preemption-rate {err}"));
         } else if arg == "-Zmiri-report-progress" {
             // This makes it take a few seconds between progress reports on my laptop.
             miri_config.report_progress = Some(1_000_000);
         } else if let Some(param) = arg.strip_prefix("-Zmiri-report-progress=") {
-            let interval = match param.parse::<u32>() {
-                Ok(i) => i,
-                Err(err) => show_error!("-Zmiri-report-progress requires a `u32`: {}", err),
-            };
+            let interval = param.parse::<u32>().unwrap_or_else(|err| {
+                show_error!("-Zmiri-report-progress requires a `u32`: {}", err)
+            });
             miri_config.report_progress = Some(interval);
         } else if let Some(param) = arg.strip_prefix("-Zmiri-provenance-gc=") {
-            let interval = match param.parse::<u32>() {
-                Ok(i) => i,
-                Err(err) => show_error!("-Zmiri-provenance-gc requires a `u32`: {}", err),
-            };
+            let interval = param.parse::<u32>().unwrap_or_else(|err| {
+                show_error!("-Zmiri-provenance-gc requires a `u32`: {}", err)
+            });
             miri_config.gc_interval = interval;
         } else if let Some(param) = arg.strip_prefix("-Zmiri-measureme=") {
             miri_config.measureme_out = Some(param.to_string());
@@ -575,37 +623,34 @@ fn main() {
                 "full" => BacktraceStyle::Full,
                 _ => show_error!("-Zmiri-backtrace may only be 0, 1, or full"),
             };
-        } else if let Some(param) = arg.strip_prefix("-Zmiri-extern-so-file=") {
+        } else if let Some(param) = arg.strip_prefix("-Zmiri-native-lib=") {
             let filename = param.to_string();
             if std::path::Path::new(&filename).exists() {
-                if let Some(other_filename) = miri_config.external_so_file {
-                    show_error!(
-                        "-Zmiri-extern-so-file is already set to {}",
-                        other_filename.display()
-                    );
+                if let Some(other_filename) = miri_config.native_lib {
+                    show_error!("-Zmiri-native-lib is already set to {}", other_filename.display());
                 }
-                miri_config.external_so_file = Some(filename.into());
+                miri_config.native_lib = Some(filename.into());
             } else {
-                show_error!("-Zmiri-extern-so-file `{}` does not exist", filename);
+                show_error!("-Zmiri-native-lib `{}` does not exist", filename);
             }
         } else if let Some(param) = arg.strip_prefix("-Zmiri-num-cpus=") {
-            let num_cpus = match param.parse::<u32>() {
-                Ok(i) => i,
-                Err(err) => show_error!("-Zmiri-num-cpus requires a `u32`: {}", err),
-            };
-
+            let num_cpus = param
+                .parse::<u32>()
+                .unwrap_or_else(|err| show_error!("-Zmiri-num-cpus requires a `u32`: {}", err));
+            if !(1..=miri::MAX_CPUS).contains(&usize::try_from(num_cpus).unwrap()) {
+                show_error!("-Zmiri-num-cpus must be in the range 1..={}", miri::MAX_CPUS);
+            }
             miri_config.num_cpus = num_cpus;
         } else if let Some(param) = arg.strip_prefix("-Zmiri-force-page-size=") {
-            let page_size = match param.parse::<u64>() {
-                Ok(i) =>
-                    if i.is_power_of_two() {
-                        i * 1024
-                    } else {
-                        show_error!("-Zmiri-force-page-size requires a power of 2: {}", i)
-                    },
-                Err(err) => show_error!("-Zmiri-force-page-size requires a `u64`: {}", err),
+            let page_size = param.parse::<u64>().unwrap_or_else(|err| {
+                show_error!("-Zmiri-force-page-size requires a `u64`: {}", err)
+            });
+            // Convert from kilobytes to bytes.
+            let page_size = if page_size.is_power_of_two() {
+                page_size * 1024
+            } else {
+                show_error!("-Zmiri-force-page-size requires a power of 2: {page_size}");
             };
-
             miri_config.page_size = Some(page_size);
         } else {
             // Forward to rustc.
@@ -618,6 +663,14 @@ fn main() {
     {
         show_error!(
             "-Zmiri-unique-is-unique only has an effect when -Zmiri-tree-borrows is also used"
+        );
+    }
+    // Tree Borrows + permissive provenance does not work.
+    if miri_config.provenance_mode == ProvenanceMode::Permissive
+        && matches!(miri_config.borrow_tracker, Some(BorrowTrackerMethod::TreeBorrows))
+    {
+        show_error!(
+            "Tree Borrows does not support integer-to-pointer casts, and is hence not compatible with permissive provenance"
         );
     }
 

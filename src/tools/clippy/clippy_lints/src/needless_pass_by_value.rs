@@ -1,7 +1,7 @@
-use clippy_utils::diagnostics::{multispan_sugg, span_lint_and_then};
+use clippy_utils::diagnostics::span_lint_and_then;
 use clippy_utils::is_self;
 use clippy_utils::ptr::get_spans;
-use clippy_utils::source::{snippet, snippet_opt};
+use clippy_utils::source::{snippet, SpanRangeExt};
 use clippy_utils::ty::{
     implements_trait, implements_trait_with_env_from_iter, is_copy, is_type_diagnostic_item, is_type_lang_item,
 };
@@ -9,11 +9,10 @@ use rustc_ast::ast::Attribute;
 use rustc_errors::{Applicability, Diag};
 use rustc_hir::intravisit::FnKind;
 use rustc_hir::{
-    BindingAnnotation, Body, FnDecl, GenericArg, HirId, HirIdSet, Impl, ItemKind, LangItem, Mutability, Node, PatKind,
-    QPath, TyKind,
+    BindingMode, Body, FnDecl, GenericArg, HirId, HirIdSet, Impl, ItemKind, LangItem, Mutability, Node, PatKind, QPath,
+    TyKind,
 };
 use rustc_hir_typeck::expr_use_visitor as euv;
-use rustc_infer::infer::TyCtxtInferExt;
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_middle::mir::FakeReadCause;
 use rustc_middle::ty::{self, Ty, TypeVisitableExt};
@@ -134,8 +133,9 @@ impl<'tcx> LateLintPass<'tcx> for NeedlessPassByValue {
         // function body.
         let MovedVariablesCtxt { moved_vars } = {
             let mut ctx = MovedVariablesCtxt::default();
-            let infcx = cx.tcx.infer_ctxt().build();
-            euv::ExprUseVisitor::new(&mut ctx, &infcx, fn_def_id, cx.param_env, cx.typeck_results()).consume_body(body);
+            euv::ExprUseVisitor::for_clippy(cx, fn_def_id, &mut ctx)
+                .consume_body(body)
+                .into_ok();
             ctx
         };
 
@@ -192,7 +192,7 @@ impl<'tcx> LateLintPass<'tcx> for NeedlessPassByValue {
                 })
                 && !implements_borrow_trait
                 && !all_borrowable_trait
-                && let PatKind::Binding(BindingAnnotation(_, Mutability::Not), canonical_id, ..) = arg.pat.kind
+                && let PatKind::Binding(BindingMode(_, Mutability::Not), canonical_id, ..) = arg.pat.kind
                 && !moved_vars.contains(&canonical_id)
             {
                 // Dereference suggestion
@@ -242,8 +242,8 @@ impl<'tcx> LateLintPass<'tcx> for NeedlessPassByValue {
                         for (span, suggestion) in clone_spans {
                             diag.span_suggestion(
                                 span,
-                                snippet_opt(cx, span)
-                                    .map_or("change the call to".into(), |x| format!("change `{x}` to")),
+                                span.get_source_text(cx)
+                                    .map_or("change the call to".to_owned(), |src| format!("change `{src}` to")),
                                 suggestion,
                                 Applicability::Unspecified,
                             );
@@ -267,8 +267,8 @@ impl<'tcx> LateLintPass<'tcx> for NeedlessPassByValue {
                             for (span, suggestion) in clone_spans {
                                 diag.span_suggestion(
                                     span,
-                                    snippet_opt(cx, span)
-                                        .map_or("change the call to".into(), |x| format!("change `{x}` to")),
+                                    span.get_source_text(cx)
+                                        .map_or("change the call to".to_owned(), |src| format!("change `{src}` to")),
                                     suggestion,
                                     Applicability::Unspecified,
                                 );
@@ -278,9 +278,12 @@ impl<'tcx> LateLintPass<'tcx> for NeedlessPassByValue {
                         }
                     }
 
-                    let spans = vec![(input.span, format!("&{}", snippet(cx, input.span, "_")))];
-
-                    multispan_sugg(diag, "consider taking a reference instead", spans);
+                    diag.span_suggestion(
+                        input.span,
+                        "consider taking a reference instead",
+                        format!("&{}", snippet(cx, input.span, "_")),
+                        Applicability::MaybeIncorrect,
+                    );
                 };
 
                 span_lint_and_then(

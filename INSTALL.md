@@ -48,7 +48,7 @@ If building LLVM from source, you'll need additional tools:
   [LLVM's documentation](https://llvm.org/docs/GettingStarted.html#host-c-toolchain-both-compiler-and-standard-library)
 * `ninja`, or GNU `make` 3.81 or later (Ninja is recommended, especially on
   Windows)
-* `cmake` 3.13.4 or later
+* `cmake` version listed on [LLVM's documentation](https://llvm.org/docs/GettingStarted.html#software)
 * `libstdc++-static` may be required on some Linux distributions such as Fedora
   and Ubuntu
 
@@ -151,8 +151,8 @@ toolchain.
    directory and uncomment the line `MSYS2_PATH_TYPE=inherit`.
 
    You could install and use MSYS2's version of git instead with `pacman`,
-   however this is not recommended as it's excrutiatingly slow, and not frequently
-   tested for compatability.
+   however this is not recommended as it's excruciatingly slow, and not frequently
+   tested for compatibility.
 
 3. Start a MINGW64 or MINGW32 shell (depending on whether you want 32-bit
    or 64-bit Rust) either from your start menu, or by running `mingw64.exe`
@@ -215,7 +215,7 @@ python x.py build
 
 Right now, building Rust only works with some known versions of Visual Studio.
 If you have a more recent version installed and the build system doesn't
-understand, you may need to force rustbuild to use an older version.
+understand, you may need to force bootstrap to use an older version.
 This can be done by manually calling the appropriate vcvars file before running
 the bootstrap.
 

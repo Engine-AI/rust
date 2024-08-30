@@ -51,6 +51,7 @@ pub(super) const ATOM_EXPR_FIRST: TokenSet =
         T![const],
         T![continue],
         T![do],
+        T![gen],
         T![for],
         T![if],
         T![let],
@@ -100,6 +101,8 @@ pub(super) fn atom_expr(
         }
         T![loop] => loop_expr(p, None),
         T![while] => while_expr(p, None),
+        // test try_macro_fallback 2015
+        // fn foo() { try!(Ok(())); }
         T![try] => try_block_expr(p, None),
         T![match] => match_expr(p),
         T![return] => return_expr(p),
@@ -138,15 +141,37 @@ pub(super) fn atom_expr(
         // fn f() { const { } }
         // fn f() { async { } }
         // fn f() { async move { } }
-        T![const] | T![unsafe] | T![async] if la == T!['{'] => {
+        T![const] | T![unsafe] | T![async] | T![gen] if la == T!['{'] => {
             let m = p.start();
             p.bump_any();
             stmt_list(p);
             m.complete(p, BLOCK_EXPR)
         }
-        T![async] if la == T![move] && p.nth(2) == T!['{'] => {
+        // test gen_blocks 2024
+        // pub fn main() {
+        //     gen { yield ""; };
+        //     async gen { yield ""; };
+        //     gen move { yield ""; };
+        //     async gen move { yield ""; };
+        // }
+        T![async] if la == T![gen] && p.nth(2) == T!['{'] => {
             let m = p.start();
             p.bump(T![async]);
+            p.eat(T![gen]);
+            stmt_list(p);
+            m.complete(p, BLOCK_EXPR)
+        }
+        T![async] | T![gen] if la == T![move] && p.nth(2) == T!['{'] => {
+            let m = p.start();
+            p.bump_any();
+            p.bump(T![move]);
+            stmt_list(p);
+            m.complete(p, BLOCK_EXPR)
+        }
+        T![async] if la == T![gen] && p.nth(2) == T![move] && p.nth(3) == T!['{'] => {
+            let m = p.start();
+            p.bump(T![async]);
+            p.bump(T![gen]);
             p.bump(T![move]);
             stmt_list(p);
             m.complete(p, BLOCK_EXPR)
@@ -355,6 +380,7 @@ fn closure_expr(p: &mut Parser<'_>) -> CompletedMarker {
     p.eat(T![const]);
     p.eat(T![static]);
     p.eat(T![async]);
+    p.eat(T![gen]);
     p.eat(T![move]);
 
     if !p.at(T![|]) {
@@ -490,6 +516,18 @@ fn match_expr(p: &mut Parser<'_>) -> CompletedMarker {
     m.complete(p, MATCH_EXPR)
 }
 
+// test_err match_arms_recovery
+// fn foo() {
+//     match () {
+//         _ => (),,
+//         _ => ,
+//         _ => (),
+//          => (),
+//         if true => (),
+//         _ => (),
+//         () if => (),
+//     }
+// }
 pub(crate) fn match_arm_list(p: &mut Parser<'_>) {
     assert!(p.at(T!['{']));
     let m = p.start();
@@ -509,6 +547,10 @@ pub(crate) fn match_arm_list(p: &mut Parser<'_>) {
     while !p.at(EOF) && !p.at(T!['}']) {
         if p.at(T!['{']) {
             error_block(p, "expected match arm");
+            continue;
+        }
+        if p.at(T![,]) {
+            p.err_and_bump("expected pattern");
             continue;
         }
         match_arm(p);
@@ -544,26 +586,30 @@ fn match_arm(p: &mut Parser<'_>) {
     // }
     attributes::outer_attrs(p);
 
-    patterns::pattern_top_r(p, TokenSet::EMPTY);
+    patterns::pattern_top_r(p, TokenSet::new(&[T![=], T![if]]));
     if p.at(T![if]) {
         match_guard(p);
     }
     p.expect(T![=>]);
-    let blocklike = match expr_stmt(p, None) {
-        Some((_, blocklike)) => blocklike,
-        None => BlockLike::NotBlock,
-    };
+    if p.eat(T![,]) {
+        p.error("expected expression");
+    } else {
+        let blocklike = match expr_stmt(p, None) {
+            Some((_, blocklike)) => blocklike,
+            None => BlockLike::NotBlock,
+        };
 
-    // test match_arms_commas
-    // fn foo() {
-    //     match () {
-    //         _ => (),
-    //         _ => {}
-    //         _ => ()
-    //     }
-    // }
-    if !p.eat(T![,]) && !blocklike.is_block() && !p.at(T!['}']) {
-        p.error("expected `,`");
+        // test match_arms_commas
+        // fn foo() {
+        //     match () {
+        //         _ => (),
+        //         _ => {}
+        //         _ => ()
+        //     }
+        // }
+        if !p.eat(T![,]) && !blocklike.is_block() && !p.at(T!['}']) {
+            p.error("expected `,`");
+        }
     }
     m.complete(p, MATCH_ARM);
 }
@@ -579,7 +625,11 @@ fn match_guard(p: &mut Parser<'_>) -> CompletedMarker {
     assert!(p.at(T![if]));
     let m = p.start();
     p.bump(T![if]);
-    expr(p);
+    if p.at(T![=]) {
+        p.error("expected expression");
+    } else {
+        expr(p);
+    }
     m.complete(p, MATCH_GUARD)
 }
 
@@ -719,24 +769,6 @@ fn break_expr(p: &mut Parser<'_>, r: Restrictions) -> CompletedMarker {
 fn try_block_expr(p: &mut Parser<'_>, m: Option<Marker>) -> CompletedMarker {
     assert!(p.at(T![try]));
     let m = m.unwrap_or_else(|| p.start());
-    // Special-case `try!` as macro.
-    // This is a hack until we do proper edition support
-    if p.nth_at(1, T![!]) {
-        // test try_macro_fallback
-        // fn foo() { try!(Ok(())); }
-        let macro_call = p.start();
-        let path = p.start();
-        let path_segment = p.start();
-        let name_ref = p.start();
-        p.bump_remap(IDENT);
-        name_ref.complete(p, NAME_REF);
-        path_segment.complete(p, PATH_SEGMENT);
-        path.complete(p, PATH);
-        let _block_like = items::macro_call_after_excl(p);
-        macro_call.complete(p, MACRO_CALL);
-        return m.complete(p, MACRO_EXPR);
-    }
-
     p.bump(T![try]);
     if p.at(T!['{']) {
         stmt_list(p);

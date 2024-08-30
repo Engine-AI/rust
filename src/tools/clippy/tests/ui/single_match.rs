@@ -1,12 +1,11 @@
-//@compile-flags: -Zdeduplicate-diagnostics=yes
-
 #![warn(clippy::single_match)]
 #![allow(
     unused,
     clippy::uninlined_format_args,
     clippy::needless_if,
     clippy::redundant_guards,
-    clippy::redundant_pattern_matching
+    clippy::redundant_pattern_matching,
+    clippy::manual_unwrap_or_default
 )]
 fn dummy() {}
 
@@ -310,5 +309,54 @@ mod issue8634 {
                 */
             },
         }
+    }
+}
+
+fn issue11365() {
+    enum Foo {
+        A,
+        B,
+        C,
+    }
+    use Foo::{A, B, C};
+
+    match Some(A) {
+        Some(A | B | C) => println!(),
+        None => {},
+    }
+
+    match Some(A) {
+        Some(A | B) => println!(),
+        Some { 0: C } | None => {},
+    }
+
+    match [A, A] {
+        [A, _] => println!(),
+        [_, A | B | C] => {},
+    }
+
+    match Ok::<_, u32>(Some(A)) {
+        Ok(Some(A)) => println!(),
+        Err(_) | Ok(None | Some(B | C)) => {},
+    }
+
+    match Ok::<_, u32>(Some(A)) {
+        Ok(Some(A)) => println!(),
+        Err(_) | Ok(None | Some(_)) => {},
+    }
+
+    match &Some(A) {
+        Some(A | B | C) => println!(),
+        None => {},
+    }
+
+    match &Some(A) {
+        &Some(A | B | C) => println!(),
+        None => {},
+    }
+
+    match &Some(A) {
+        Some(A | B) => println!(),
+        None | Some(_) => {},
     }
 }

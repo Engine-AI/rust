@@ -1,16 +1,18 @@
-use crate::method::MethodCallee;
-use crate::{FnCtxt, PlaceOp};
-use rustc_ast as ast;
 use rustc_errors::Applicability;
-use rustc_hir as hir;
 use rustc_hir_analysis::autoderef::Autoderef;
-use rustc_infer::infer::type_variable::{TypeVariableOrigin, TypeVariableOriginKind};
 use rustc_infer::infer::InferOk;
-use rustc_middle::ty::adjustment::{Adjust, Adjustment, OverloadedDeref, PointerCoercion};
-use rustc_middle::ty::adjustment::{AllowTwoPhase, AutoBorrow, AutoBorrowMutability};
+use rustc_middle::span_bug;
+use rustc_middle::ty::adjustment::{
+    Adjust, Adjustment, AllowTwoPhase, AutoBorrow, AutoBorrowMutability, OverloadedDeref,
+    PointerCoercion,
+};
 use rustc_middle::ty::{self, Ty};
 use rustc_span::symbol::{sym, Ident};
 use rustc_span::Span;
+use {rustc_ast as ast, rustc_hir as hir};
+
+use crate::method::MethodCallee;
+use crate::{FnCtxt, PlaceOp};
 
 impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     /// Type-check `*oprnd_expr` with `oprnd_expr` type-checked already.
@@ -20,8 +22,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         oprnd_expr: &'tcx hir::Expr<'tcx>,
         oprnd_ty: Ty<'tcx>,
     ) -> Option<Ty<'tcx>> {
-        if let Some(mt) = oprnd_ty.builtin_deref(true) {
-            return Some(mt.ty);
+        if let Some(ty) = oprnd_ty.builtin_deref(true) {
+            return Some(ty);
         }
 
         let ok = self.try_overloaded_deref(expr.span, oprnd_ty)?;
@@ -37,7 +39,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         } else {
             span_bug!(expr.span, "input to deref is not a ref?");
         }
-        let ty = self.make_overloaded_place_return_type(method).ty;
+        let ty = self.make_overloaded_place_return_type(method);
         self.write_method_call_and_enforce_effects(expr.hir_id, expr.span, method);
         Some(ty)
     }
@@ -147,10 +149,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             // If some lookup succeeds, write callee into table and extract index/element
             // type from the method signature.
             // If some lookup succeeded, install method in table
-            let input_ty = self.next_ty_var(TypeVariableOrigin {
-                kind: TypeVariableOriginKind::AutoDeref,
-                span: base_expr.span,
-            });
+            let input_ty = self.next_ty_var(base_expr.span);
             let method =
                 self.try_overloaded_place_op(expr.span, self_ty, &[input_ty], PlaceOp::Index);
 
@@ -162,11 +161,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 if let ty::Ref(region, _, hir::Mutability::Not) = method.sig.inputs()[0].kind() {
                     adjustments.push(Adjustment {
                         kind: Adjust::Borrow(AutoBorrow::Ref(*region, AutoBorrowMutability::Not)),
-                        target: Ty::new_ref(
-                            self.tcx,
-                            *region,
-                            ty::TypeAndMut { mutbl: hir::Mutability::Not, ty: adjusted_ty },
-                        ),
+                        target: Ty::new_imm_ref(self.tcx, *region, adjusted_ty),
                     });
                 } else {
                     span_bug!(expr.span, "input to index is not a ref?");
@@ -181,7 +176,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
                 self.write_method_call_and_enforce_effects(expr.hir_id, expr.span, method);
 
-                return Some((input_ty, self.make_overloaded_place_return_type(method).ty));
+                return Some((input_ty, self.make_overloaded_place_return_type(method)));
             }
         }
 
@@ -251,7 +246,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     /// always know whether a place needs to be mutable or not in the first pass.
     /// This happens whether there is an implicit mutable reborrow, e.g. when the type
     /// is used as the receiver of a method call.
-    pub fn convert_place_derefs_to_mutable(&self, expr: &hir::Expr<'_>) {
+    pub(crate) fn convert_place_derefs_to_mutable(&self, expr: &hir::Expr<'_>) {
         // Gather up expressions we want to munge.
         let mut exprs = vec![expr];
 
@@ -350,8 +345,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             .borrow()
             .expr_ty_adjusted(base_expr)
             .builtin_deref(false)
-            .expect("place op takes something that is not a ref")
-            .ty;
+            .expect("place op takes something that is not a ref");
 
         let arg_ty = match op {
             PlaceOp::Deref => None,
@@ -400,11 +394,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         allow_two_phase_borrow: AllowTwoPhase::No,
                     };
                     adjustment.kind = Adjust::Borrow(AutoBorrow::Ref(*region, mutbl));
-                    adjustment.target = Ty::new_ref(
-                        self.tcx,
-                        *region,
-                        ty::TypeAndMut { ty: source, mutbl: mutbl.into() },
-                    );
+                    adjustment.target = Ty::new_ref(self.tcx, *region, source, mutbl.into());
                 }
                 source = adjustment.target;
             }

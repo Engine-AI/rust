@@ -1,11 +1,12 @@
 use super::NEEDLESS_RANGE_LOOP;
-use clippy_utils::diagnostics::{multispan_sugg, span_lint_and_then};
+use clippy_utils::diagnostics::span_lint_and_then;
 use clippy_utils::source::snippet;
 use clippy_utils::ty::has_iter_method;
 use clippy_utils::visitors::is_local_used;
 use clippy_utils::{contains_name, higher, is_integer_const, sugg, SpanlessEq};
 use rustc_ast::ast;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
+use rustc_errors::Applicability;
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::intravisit::{walk_expr, Visitor};
 use rustc_hir::{BinOpKind, BorrowKind, Closure, Expr, ExprKind, HirId, Mutability, Pat, PatKind, QPath};
@@ -143,10 +144,9 @@ pub(super) fn check<'tcx>(
                         cx,
                         NEEDLESS_RANGE_LOOP,
                         arg.span,
-                        &format!("the loop variable `{}` is used to index `{indexed}`", ident.name),
+                        format!("the loop variable `{}` is used to index `{indexed}`", ident.name),
                         |diag| {
-                            multispan_sugg(
-                                diag,
+                            diag.multipart_suggestion(
                                 "consider using an iterator and enumerate()",
                                 vec![
                                     (pat.span, format!("({}, <item>)", ident.name)),
@@ -155,6 +155,7 @@ pub(super) fn check<'tcx>(
                                         format!("{indexed}.{method}().enumerate(){method_1}{method_2}"),
                                     ),
                                 ],
+                                Applicability::HasPlaceholders,
                             );
                         },
                     );
@@ -169,12 +170,12 @@ pub(super) fn check<'tcx>(
                         cx,
                         NEEDLESS_RANGE_LOOP,
                         arg.span,
-                        &format!("the loop variable `{}` is only used to index `{indexed}`", ident.name),
+                        format!("the loop variable `{}` is only used to index `{indexed}`", ident.name),
                         |diag| {
-                            multispan_sugg(
-                                diag,
+                            diag.multipart_suggestion(
                                 "consider using an iterator",
                                 vec![(pat.span, "<item>".to_string()), (arg.span, repl)],
+                                Applicability::HasPlaceholders,
                             );
                         },
                     );
@@ -273,7 +274,7 @@ impl<'a, 'tcx> VarVisitor<'a, 'tcx> {
                     }
                     return false; // no need to walk further *on the variable*
                 },
-                Res::Def(DefKind::Static{..} | DefKind::Const, ..) => {
+                Res::Def(DefKind::Static { .. } | DefKind::Const, ..) => {
                     if index_used_directly {
                         self.indexed_directly.insert(
                             seqvar.segments[0].ident.name,
@@ -357,7 +358,7 @@ impl<'a, 'tcx> Visitor<'tcx> for VarVisitor<'a, 'tcx> {
                 let def_id = self.cx.typeck_results().type_dependent_def_id(expr.hir_id).unwrap();
                 for (ty, expr) in iter::zip(
                     self.cx.tcx.fn_sig(def_id).instantiate_identity().inputs().skip_binder(),
-                    std::iter::once(receiver).chain(args.iter()),
+                    iter::once(receiver).chain(args.iter()),
                 ) {
                     self.prefer_mutable = false;
                     if let ty::Ref(_, _, mutbl) = *ty.kind() {

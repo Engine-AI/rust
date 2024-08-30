@@ -1,12 +1,12 @@
+use tracing::{debug, instrument, trace};
+
 pub(crate) mod query_context;
 #[cfg(test)]
 mod tests;
 
-use crate::{
-    layout::{self, dfa, Byte, Def, Dfa, Nfa, Ref, Tree, Uninhabited},
-    maybe_transmutable::query_context::QueryContext,
-    Answer, Condition, Map, Reason,
-};
+use crate::layout::{self, dfa, Byte, Def, Dfa, Nfa, Ref, Tree, Uninhabited};
+use crate::maybe_transmutable::query_context::QueryContext;
+use crate::{Answer, Condition, Map, Reason};
 
 pub(crate) struct MaybeTransmutableQuery<L, C>
 where
@@ -30,11 +30,11 @@ where
 // FIXME: Nix this cfg, so we can write unit tests independently of rustc
 #[cfg(feature = "rustc")]
 mod rustc {
+    use rustc_middle::ty::layout::LayoutCx;
+    use rustc_middle::ty::{ParamEnv, Ty, TyCtxt};
+
     use super::*;
     use crate::layout::tree::rustc::Err;
-
-    use rustc_middle::ty::Ty;
-    use rustc_middle::ty::TyCtxt;
 
     impl<'tcx> MaybeTransmutableQuery<Ty<'tcx>, TyCtxt<'tcx>> {
         /// This method begins by converting `src` and `dst` from `Ty`s to `Tree`s,
@@ -43,12 +43,12 @@ mod rustc {
         pub fn answer(self) -> Answer<<TyCtxt<'tcx> as QueryContext>::Ref> {
             let Self { src, dst, assume, context } = self;
 
+            let layout_cx = LayoutCx { tcx: context, param_env: ParamEnv::reveal_all() };
+
             // Convert `src` and `dst` from their rustc representations, to `Tree`-based
-            // representations. If these conversions fail, conclude that the transmutation is
-            // unacceptable; the layouts of both the source and destination types must be
-            // well-defined.
-            let src = Tree::from_ty(src, context);
-            let dst = Tree::from_ty(dst, context);
+            // representations.
+            let src = Tree::from_ty(src, layout_cx);
+            let dst = Tree::from_ty(dst, layout_cx);
 
             match (src, dst) {
                 (Err(Err::TypeError(_)), _) | (_, Err(Err::TypeError(_))) => {
@@ -85,6 +85,10 @@ where
         // more sophisticated to handle transmutations between mutable
         // references.
         let src = src.prune(&|def| false);
+
+        if src.is_inhabited() && !dst.is_inhabited() {
+            return Answer::No(Reason::DstUninhabited);
+        }
 
         trace!(?src, "pruned src");
 

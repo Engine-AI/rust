@@ -6,14 +6,13 @@
 //! This is all super highly experimental and not actually intended for
 //! wide/production use yet, it's still all in the experimental category. This
 //! will likely change over time.
+#![forbid(unsafe_op_in_unsafe_fn)]
 
 const WORD_SIZE: usize = core::mem::size_of::<u32>();
 
-pub mod alloc;
+pub mod abi;
 #[path = "../zkvm/args.rs"]
 pub mod args;
-#[path = "../unix/cmath.rs"]
-pub mod cmath;
 pub mod env;
 #[path = "../unsupported/fs.rs"]
 pub mod fs;
@@ -27,17 +26,10 @@ pub mod pipe;
 #[path = "../unsupported/process.rs"]
 pub mod process;
 pub mod stdio;
-pub mod thread_local_key;
-#[path = "../unsupported/time.rs"]
-pub mod time;
-
 #[path = "../unsupported/thread.rs"]
 pub mod thread;
-
-#[path = "../unsupported/thread_parking.rs"]
-pub mod thread_parking;
-
-mod abi;
+#[path = "../unsupported/time.rs"]
+pub mod time;
 
 use crate::io as std_io;
 
@@ -54,10 +46,7 @@ pub fn unsupported<T>() -> std_io::Result<T> {
 }
 
 pub fn unsupported_err() -> std_io::Error {
-    std_io::const_io_error!(
-        std_io::ErrorKind::Unsupported,
-        "operation not supported on this platform",
-    )
+    std_io::Error::UNSUPPORTED_PLATFORM
 }
 
 pub fn is_interrupted(_code: i32) -> bool {

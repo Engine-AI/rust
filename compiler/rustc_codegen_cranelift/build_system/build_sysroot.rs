@@ -1,13 +1,11 @@
-use std::env;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::{env, fs};
 
 use crate::path::{Dirs, RelPath};
 use crate::rustc_info::get_file_name;
 use crate::utils::{
-    maybe_incremental, remove_dir_if_exists, spawn_and_wait, try_hard_link, CargoProject, Compiler,
-    LogGroup,
+    remove_dir_if_exists, spawn_and_wait, try_hard_link, CargoProject, Compiler, LogGroup,
 };
 use crate::{config, CodegenBackend, SysrootKind};
 
@@ -270,11 +268,10 @@ fn build_clif_sysroot_for_triple(
     }
     compiler.rustflags.extend(rustflags);
     let mut build_cmd = STANDARD_LIBRARY.build(&compiler, dirs);
-    maybe_incremental(&mut build_cmd);
     if channel == "release" {
         build_cmd.arg("--release");
     }
-    build_cmd.arg("--features").arg("compiler-builtins-no-asm backtrace panic-unwind");
+    build_cmd.arg("--features").arg("backtrace panic-unwind compiler-builtins-no-f16-f128");
     build_cmd.env("CARGO_PROFILE_RELEASE_DEBUG", "true");
     build_cmd.env("__CARGO_DEFAULT_LIB_METADATA", "cg_clif");
     if compiler.triple.contains("apple") {
@@ -315,7 +312,6 @@ fn build_rtstartup(dirs: &Dirs, compiler: &Compiler) -> Option<SysrootTarget> {
         let obj = RTSTARTUP_SYSROOT.to_path(dirs).join(format!("{file}.o"));
         let mut build_rtstartup_cmd = Command::new(&compiler.rustc);
         build_rtstartup_cmd
-            .arg("-Ainternal_features") // Missing #[allow(internal_features)]
             .arg("--target")
             .arg(&compiler.triple)
             .arg("--emit=obj")

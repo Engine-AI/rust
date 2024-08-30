@@ -34,7 +34,7 @@ nav.sub {
 	in rustdoc.css */
 
 /* Begin theme: light */
-:root {
+:root, :root:not([data-theme]) {
 	--main-background-color: white;
 	--main-color: black;
 	--settings-input-color: #2196f3;
@@ -85,6 +85,7 @@ nav.sub {
 	--search-tab-button-not-selected-background: #e6e6e6;
 	--search-tab-button-selected-border-top-color: #0089ff;
 	--search-tab-button-selected-background: #fff;
+	--settings-menu-filter: none;
 	--stab-background-color: #fff5d6;
 	--stab-code-color: #000;
 	--code-highlight-kw-color: #8959a8;
@@ -103,10 +104,6 @@ nav.sub {
 	--code-highlight-doc-comment-color: #4d4d4c;
 	--src-line-numbers-span-color: #c67e2d;
 	--src-line-number-highlighted-background-color: #fdffd3;
-	--test-arrow-color: #f5f5f5;
-	--test-arrow-background-color: rgba(78, 139, 202, 0.2);
-	--test-arrow-hover-color: #f5f5f5;
-	--test-arrow-hover-background-color: rgb(78, 139, 202);
 	--target-background-color: #fdffd3;
 	--target-border-color: #ad7c37;
 	--kbd-color: #000;
@@ -140,7 +137,7 @@ nav.sub {
 
 @media (prefers-color-scheme: dark) {
 	/* Begin theme: dark */
-	:root {
+	:root, :root:not([data-theme]) {
 		--main-background-color: #353535;
 		--main-color: #ddd;
 		--settings-input-color: #2196f3;
@@ -209,10 +206,6 @@ nav.sub {
 		--code-highlight-doc-comment-color: #8ca375;
 		--src-line-numbers-span-color: #3b91e2;
 		--src-line-number-highlighted-background-color: #0a042f;
-		--test-arrow-color: #dedede;
-		--test-arrow-background-color: rgba(78, 139, 202, 0.2);
-		--test-arrow-hover-color: #dedede;
-		--test-arrow-hover-background-color: #4e8bca;
 		--target-background-color: #494a3d;
 		--target-border-color: #bb7410;
 		--kbd-color: #000;

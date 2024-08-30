@@ -1,7 +1,7 @@
 //! This module provides the functionality needed to convert diagnostics from
 //! `cargo check` json format to the LSP diagnostic format.
 
-use flycheck::{Applicability, DiagnosticLevel, DiagnosticSpan};
+use crate::flycheck::{Applicability, DiagnosticLevel, DiagnosticSpan};
 use itertools::Itertools;
 use rustc_hash::FxHashMap;
 use stdx::format_to;
@@ -17,8 +17,8 @@ use super::{DiagnosticsMapConfig, Fix};
 /// Determines the LSP severity from a diagnostic
 fn diagnostic_severity(
     config: &DiagnosticsMapConfig,
-    level: flycheck::DiagnosticLevel,
-    code: Option<flycheck::DiagnosticCode>,
+    level: crate::flycheck::DiagnosticLevel,
+    code: Option<crate::flycheck::DiagnosticCode>,
 ) -> Option<lsp_types::DiagnosticSeverity> {
     let res = match level {
         DiagnosticLevel::Ice => lsp_types::DiagnosticSeverity::ERROR,
@@ -66,10 +66,15 @@ fn location(
     let uri = url_from_abs_path(&file_name);
 
     let range = {
-        let position_encoding = snap.config.position_encoding();
+        let position_encoding = snap.config.negotiated_encoding();
         lsp_types::Range::new(
-            position(&position_encoding, span, span.line_start, span.column_start),
-            position(&position_encoding, span, span.line_end, span.column_end),
+            position(
+                &position_encoding,
+                span,
+                span.line_start,
+                span.column_start.saturating_sub(1),
+            ),
+            position(&position_encoding, span, span.line_end, span.column_end.saturating_sub(1)),
         )
     };
     lsp_types::Location::new(uri, range)
@@ -78,10 +83,10 @@ fn location(
 fn position(
     position_encoding: &PositionEncoding,
     span: &DiagnosticSpan,
-    line_offset: usize,
+    line_number: usize,
     column_offset_utf32: usize,
 ) -> lsp_types::Position {
-    let line_index = line_offset - span.line_start;
+    let line_index = line_number - span.line_start;
 
     let column_offset_encoded = match span.text.get(line_index) {
         // Fast path.
@@ -104,8 +109,8 @@ fn position(
     };
 
     lsp_types::Position {
-        line: (line_offset as u32).saturating_sub(1),
-        character: (column_offset_encoded as u32).saturating_sub(1),
+        line: (line_number as u32).saturating_sub(1),
+        character: column_offset_encoded as u32,
     }
 }
 
@@ -176,7 +181,7 @@ enum MappedRustChildDiagnostic {
 fn map_rust_child_diagnostic(
     config: &DiagnosticsMapConfig,
     workspace_root: &AbsPath,
-    rd: &flycheck::Diagnostic,
+    rd: &crate::flycheck::Diagnostic,
     snap: &GlobalStateSnapshot,
 ) -> MappedRustChildDiagnostic {
     let spans: Vec<&DiagnosticSpan> = rd.spans.iter().filter(|s| s.is_primary).collect();
@@ -279,7 +284,7 @@ pub(crate) struct MappedRustDiagnostic {
 /// If the diagnostic has no primary span this will return `None`
 pub(crate) fn map_rust_diagnostic_to_lsp(
     config: &DiagnosticsMapConfig,
-    rd: &flycheck::Diagnostic,
+    rd: &crate::flycheck::Diagnostic,
     workspace_root: &AbsPath,
     snap: &GlobalStateSnapshot,
 ) -> Vec<MappedRustDiagnostic> {
@@ -519,22 +524,22 @@ fn clippy_code_description(code: Option<&str>) -> Option<lsp_types::CodeDescript
 #[cfg(test)]
 #[cfg(not(windows))]
 mod tests {
-    use std::path::Path;
-
     use crate::{config::Config, global_state::GlobalState};
 
     use super::*;
 
     use expect_test::{expect_file, ExpectFile};
     use lsp_types::ClientCapabilities;
+    use paths::Utf8Path;
 
     fn check(diagnostics_json: &str, expect: ExpectFile) {
         check_with_config(DiagnosticsMapConfig::default(), diagnostics_json, expect)
     }
 
     fn check_with_config(config: DiagnosticsMapConfig, diagnostics_json: &str, expect: ExpectFile) {
-        let diagnostic: flycheck::Diagnostic = serde_json::from_str(diagnostics_json).unwrap();
-        let workspace_root: &AbsPath = Path::new("/test/").try_into().unwrap();
+        let diagnostic: crate::flycheck::Diagnostic =
+            serde_json::from_str(diagnostics_json).unwrap();
+        let workspace_root: &AbsPath = Utf8Path::new("/test/").try_into().unwrap();
         let (sender, _) = crossbeam_channel::unbounded();
         let state = GlobalState::new(
             sender,
@@ -542,6 +547,7 @@ mod tests {
                 workspace_root.to_path_buf(),
                 ClientCapabilities::default(),
                 Vec::new(),
+                None,
                 None,
             ),
         );

@@ -4,7 +4,9 @@
 use std::alloc::{alloc, Layout};
 use std::{fmt, mem, ptr};
 
-extern "C" {
+use rustc_interface::util::{DEFAULT_STACK_SIZE, STACK_SIZE};
+
+unsafe extern "C" {
     fn backtrace_symbols_fd(buffer: *const *mut libc::c_void, size: libc::c_int, fd: libc::c_int);
 }
 
@@ -100,7 +102,10 @@ extern "C" fn print_stack_trace(_: libc::c_int) {
         written += 1;
     }
     raw_errln!("note: we would appreciate a report at https://github.com/rust-lang/rust");
-    written += 1;
+    // get the current stack size WITHOUT blocking and double it
+    let new_size = STACK_SIZE.get().copied().unwrap_or(DEFAULT_STACK_SIZE) * 2;
+    raw_errln!("help: you can increase rustc's stack size by setting RUST_MIN_STACK={new_size}");
+    written += 2;
     if written > 24 {
         // We probably just scrolled the earlier "we got SIGSEGV" message off the terminal
         raw_errln!("note: backtrace dumped due to SIGSEGV! resuming signal");

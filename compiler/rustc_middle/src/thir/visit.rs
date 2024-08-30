@@ -92,7 +92,7 @@ pub fn walk_expr<'thir, 'tcx: 'thir, V: Visitor<'thir, 'tcx>>(
         }
         VarRef { id: _ } | UpvarRef { closure_def_id: _, var_hir_id: _ } => {}
         Borrow { arg, borrow_kind: _ } => visitor.visit_expr(&visitor.thir()[arg]),
-        AddressOf { arg, mutability: _ } => visitor.visit_expr(&visitor.thir()[arg]),
+        RawBorrow { arg, mutability: _ } => visitor.visit_expr(&visitor.thir()[arg]),
         Break { value, label: _ } => {
             if let Some(value) = value {
                 visitor.visit_expr(&visitor.thir()[value])
@@ -229,15 +229,8 @@ pub fn walk_pat<'thir, 'tcx: 'thir, V: Visitor<'thir, 'tcx>>(
     match &pat.kind {
         AscribeUserType { subpattern, ascription: _ }
         | Deref { subpattern }
-        | Binding {
-            subpattern: Some(subpattern),
-            mutability: _,
-            mode: _,
-            var: _,
-            ty: _,
-            is_primary: _,
-            name: _,
-        } => visitor.visit_pat(subpattern),
+        | DerefPattern { subpattern, .. }
+        | Binding { subpattern: Some(subpattern), .. } => visitor.visit_pat(subpattern),
         Binding { .. } | Wild | Never | Error(_) => {}
         Variant { subpatterns, adt_def: _, args: _, variant_index: _ } | Leaf { subpatterns } => {
             for subpattern in subpatterns {

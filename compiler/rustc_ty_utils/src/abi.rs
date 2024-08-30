@@ -1,10 +1,13 @@
+use std::iter;
+
 use rustc_hir as hir;
 use rustc_hir::lang_items::LangItem;
+use rustc_middle::bug;
 use rustc_middle::query::Providers;
 use rustc_middle::ty::layout::{
     fn_can_unwind, FnAbiError, HasParamEnv, HasTyCtxt, LayoutCx, LayoutOf, TyAndLayout,
 };
-use rustc_middle::ty::{self, InstanceDef, Ty, TyCtxt};
+use rustc_middle::ty::{self, InstanceKind, Ty, TyCtxt};
 use rustc_session::config::OptLevel;
 use rustc_span::def_id::DefId;
 use rustc_target::abi::call::{
@@ -13,8 +16,7 @@ use rustc_target::abi::call::{
 };
 use rustc_target::abi::*;
 use rustc_target::spec::abi::Abi as SpecAbi;
-
-use std::iter;
+use tracing::debug;
 
 pub(crate) fn provide(providers: &mut Providers) {
     *providers = Providers { fn_abi_of_fn_ptr, fn_abi_of_instance, ..*providers };
@@ -31,12 +33,12 @@ fn fn_sig_for_fn_abi<'tcx>(
     instance: ty::Instance<'tcx>,
     param_env: ty::ParamEnv<'tcx>,
 ) -> ty::PolyFnSig<'tcx> {
-    if let InstanceDef::ThreadLocalShim(..) = instance.def {
+    if let InstanceKind::ThreadLocalShim(..) = instance.def {
         return ty::Binder::dummy(tcx.mk_fn_sig(
             [],
             tcx.thread_local_ptr_ty(instance.def_id()),
             false,
-            hir::Unsafety::Normal,
+            hir::Safety::Safe,
             rustc_target::spec::abi::Abi::Unadjusted,
         ));
     }
@@ -61,7 +63,7 @@ fn fn_sig_for_fn_abi<'tcx>(
                 _ => unreachable!(),
             };
 
-            if let ty::InstanceDef::VTableShim(..) = instance.def {
+            if let ty::InstanceKind::VTableShim(..) = instance.def {
                 // Modify `fn(self, ...)` to `fn(self: *mut Self, ...)`.
                 sig = sig.map_bound(|mut sig| {
                     let mut inputs_and_output = sig.inputs_and_output.to_vec();
@@ -95,13 +97,14 @@ fn fn_sig_for_fn_abi<'tcx>(
                     iter::once(env_ty).chain(sig.inputs().iter().cloned()),
                     sig.output(),
                     sig.c_variadic,
-                    sig.unsafety,
+                    sig.safety,
                     sig.abi,
                 ),
                 bound_vars,
             )
         }
         ty::CoroutineClosure(def_id, args) => {
+            let coroutine_ty = Ty::new_coroutine_closure(tcx, def_id, args);
             let sig = args.as_coroutine_closure().coroutine_closure_sig();
             let bound_vars = tcx.mk_bound_variable_kinds_from_iter(
                 sig.bound_vars().iter().chain(iter::once(ty::BoundVariableKind::Region(ty::BrEnv))),
@@ -111,18 +114,28 @@ fn fn_sig_for_fn_abi<'tcx>(
                 kind: ty::BoundRegionKind::BrEnv,
             };
             let env_region = ty::Region::new_bound(tcx, ty::INNERMOST, br);
-
             // When this `CoroutineClosure` comes from a `ConstructCoroutineInClosureShim`,
             // make sure we respect the `target_kind` in that shim.
             // FIXME(async_closures): This shouldn't be needed, and we should be populating
             // a separate def-id for these bodies.
-            let mut kind = args.as_coroutine_closure().kind();
-            if let InstanceDef::ConstructCoroutineInClosureShim { target_kind, .. } = instance.def {
-                kind = target_kind;
-            }
+            let mut coroutine_kind = args.as_coroutine_closure().kind();
 
             let env_ty =
-                tcx.closure_env_ty(Ty::new_coroutine_closure(tcx, def_id, args), kind, env_region);
+                if let InstanceKind::ConstructCoroutineInClosureShim { receiver_by_ref, .. } =
+                    instance.def
+                {
+                    coroutine_kind = ty::ClosureKind::FnOnce;
+
+                    // Implementations of `FnMut` and `Fn` for coroutine-closures
+                    // still take their receiver by ref.
+                    if receiver_by_ref {
+                        Ty::new_imm_ref(tcx, tcx.lifetimes.re_erased, coroutine_ty)
+                    } else {
+                        coroutine_ty
+                    }
+                } else {
+                    tcx.closure_env_ty(coroutine_ty, coroutine_kind, env_region)
+                };
 
             let sig = sig.skip_binder();
             ty::Binder::bind_with_vars(
@@ -132,13 +145,13 @@ fn fn_sig_for_fn_abi<'tcx>(
                         tcx,
                         args.as_coroutine_closure().parent_args(),
                         tcx.coroutine_for_closure(def_id),
-                        kind,
+                        coroutine_kind,
                         env_region,
                         args.as_coroutine_closure().tupled_upvars_ty(),
                         args.as_coroutine_closure().coroutine_captures_by_ref_ty(),
                     ),
                     sig.c_variadic,
-                    sig.unsafety,
+                    sig.safety,
                     sig.abi,
                 ),
                 bound_vars,
@@ -156,39 +169,6 @@ fn fn_sig_for_fn_abi<'tcx>(
                 kind: ty::BoundRegionKind::BrEnv,
             };
 
-            let mut ty = ty;
-            // When this `Closure` comes from a `CoroutineKindShim`,
-            // make sure we respect the `target_kind` in that shim.
-            // FIXME(async_closures): This shouldn't be needed, and we should be populating
-            // a separate def-id for these bodies.
-            if let InstanceDef::CoroutineKindShim { target_kind, .. } = instance.def {
-                // Grab the parent coroutine-closure. It has the same args for the purposes
-                // of instantiation, so this will be okay to do.
-                let ty::CoroutineClosure(_, coroutine_closure_args) = *tcx
-                    .instantiate_and_normalize_erasing_regions(
-                        args,
-                        param_env,
-                        tcx.type_of(tcx.parent(did)),
-                    )
-                    .kind()
-                else {
-                    bug!("CoroutineKindShim comes from calling a coroutine-closure");
-                };
-                let coroutine_closure_args = coroutine_closure_args.as_coroutine_closure();
-                ty = tcx.instantiate_bound_regions_with_erased(
-                    coroutine_closure_args.coroutine_closure_sig().map_bound(|sig| {
-                        sig.to_coroutine_given_kind_and_upvars(
-                            tcx,
-                            coroutine_closure_args.parent_args(),
-                            did,
-                            target_kind,
-                            tcx.lifetimes.re_erased,
-                            coroutine_closure_args.tupled_upvars_ty(),
-                            coroutine_closure_args.coroutine_captures_by_ref_ty(),
-                        )
-                    }),
-                );
-            }
             let env_ty = Ty::new_mut_ref(tcx, ty::Region::new_bound(tcx, ty::INNERMOST, br), ty);
 
             let pin_did = tcx.require_lang_item(LangItem::Pin, None);
@@ -289,7 +269,7 @@ fn fn_sig_for_fn_abi<'tcx>(
                     [env_ty, resume_ty],
                     ret_ty,
                     false,
-                    hir::Unsafety::Normal,
+                    hir::Safety::Safe,
                     rustc_target::spec::abi::Abi::Rust,
                 )
             } else {
@@ -298,7 +278,7 @@ fn fn_sig_for_fn_abi<'tcx>(
                     [env_ty],
                     ret_ty,
                     false,
-                    hir::Unsafety::Normal,
+                    hir::Safety::Safe,
                     rustc_target::spec::abi::Abi::Rust,
                 )
             };
@@ -339,7 +319,6 @@ fn conv_from_spec_abi(tcx: TyCtxt<'_>, abi: SpecAbi, c_variadic: bool) -> Conv {
         AvrNonBlockingInterrupt => Conv::AvrNonBlockingInterrupt,
         RiscvInterruptM => Conv::RiscvInterrupt { kind: RiscvInterruptKind::Machine },
         RiscvInterruptS => Conv::RiscvInterrupt { kind: RiscvInterruptKind::Supervisor },
-        Wasm => Conv::C,
 
         // These API constants ought to be more specific...
         Cdecl { .. } => Conv::C,
@@ -373,7 +352,7 @@ fn fn_abi_of_instance<'tcx>(
         extra_args,
         caller_location,
         Some(instance.def_id()),
-        matches!(instance.def, ty::InstanceDef::Virtual(..)),
+        matches!(instance.def, ty::InstanceKind::Virtual(..)),
     )
 }
 
@@ -507,7 +486,8 @@ fn fn_abi_sanity_check<'tcx>(
                     assert!(
                         matches!(&*cx.tcx.sess.target.arch, "wasm32" | "wasm64")
                             || matches!(spec_abi, SpecAbi::PtxKernel | SpecAbi::Unadjusted),
-                        r#"`PassMode::Direct` for aggregates only allowed for "unadjusted" and "ptx-kernel" functions and on wasm\nProblematic type: {:#?}"#,
+                        "`PassMode::Direct` for aggregates only allowed for \"unadjusted\" and \"ptx-kernel\" functions and on wasm\n\
+                          Problematic type: {:#?}",
                         arg.layout,
                     );
                 }
@@ -536,7 +516,7 @@ fn fn_abi_sanity_check<'tcx>(
                 // With metadata. Must be unsized and not on the stack.
                 assert!(arg.layout.is_unsized() && !on_stack);
                 // Also, must not be `extern` type.
-                let tail = cx.tcx.struct_tail_with_normalize(arg.layout.ty, |ty| ty, || {});
+                let tail = cx.tcx.struct_tail_for_codegen(arg.layout.ty, cx.param_env());
                 if matches!(tail.kind(), ty::Foreign(..)) {
                     // These types do not have metadata, so having `meta_attrs` is bogus.
                     // Conceptually, unsized arguments must be copied around, which requires dynamically
@@ -571,7 +551,7 @@ fn fn_abi_new_uncached<'tcx>(
     let conv = conv_from_spec_abi(cx.tcx(), sig.abi, sig.c_variadic);
 
     let mut inputs = sig.inputs();
-    let extra_args = if sig.abi == RustCall {
+    let extra_args = if sig.abi == SpecAbi::RustCall {
         assert!(!sig.c_variadic && extra_args.is_empty());
 
         if let Some(input) = sig.inputs().last() {
@@ -595,20 +575,8 @@ fn fn_abi_new_uncached<'tcx>(
         extra_args
     };
 
-    let target = &cx.tcx.sess.target;
-    let target_env_gnu_like = matches!(&target.env[..], "gnu" | "musl" | "uclibc");
-    let win_x64_gnu = target.os == "windows" && target.arch == "x86_64" && target.env == "gnu";
-    let linux_s390x_gnu_like =
-        target.os == "linux" && target.arch == "s390x" && target_env_gnu_like;
-    let linux_sparc64_gnu_like =
-        target.os == "linux" && target.arch == "sparc64" && target_env_gnu_like;
-    let linux_powerpc_gnu_like =
-        target.os == "linux" && target.arch == "powerpc" && target_env_gnu_like;
-    use SpecAbi::*;
-    let rust_abi = matches!(sig.abi, RustIntrinsic | Rust | RustCall);
-
     let is_drop_in_place =
-        fn_def_id.is_some() && fn_def_id == cx.tcx.lang_items().drop_in_place_fn();
+        fn_def_id.is_some_and(|def_id| cx.tcx.is_lang_item(def_id, LangItem::DropInPlace));
 
     let arg_of = |ty: Ty<'tcx>, arg_idx: Option<usize>| -> Result<_, &'tcx FnAbiError<'tcx>> {
         let span = tracing::debug_span!("arg_of");
@@ -616,7 +584,7 @@ fn fn_abi_new_uncached<'tcx>(
         let is_return = arg_idx.is_none();
         let is_drop_target = is_drop_in_place && arg_idx == Some(0);
         let drop_target_pointee = is_drop_target.then(|| match ty.kind() {
-            ty::RawPtr(ty::TypeAndMut { ty, .. }) => *ty,
+            ty::RawPtr(ty, _) => *ty,
             _ => bug!("argument to drop_in_place is not a raw ptr: {:?}", ty),
         });
 
@@ -646,18 +614,7 @@ fn fn_abi_new_uncached<'tcx>(
         });
 
         if arg.layout.is_zst() {
-            // For some forsaken reason, x86_64-pc-windows-gnu
-            // doesn't ignore zero-sized struct arguments.
-            // The same is true for {s390x,sparc64,powerpc}-unknown-linux-{gnu,musl,uclibc}.
-            if is_return
-                || rust_abi
-                || (!win_x64_gnu
-                    && !linux_s390x_gnu_like
-                    && !linux_sparc64_gnu_like
-                    && !linux_powerpc_gnu_like)
-            {
-                arg.mode = PassMode::Ignore;
-            }
+            arg.mode = PassMode::Ignore;
         }
 
         Ok(arg)
@@ -728,6 +685,40 @@ fn fn_abi_adjust_for_abi<'tcx>(
         let fixup = |arg: &mut ArgAbi<'tcx, Ty<'tcx>>, arg_idx: Option<usize>| {
             if arg.is_ignore() {
                 return;
+            }
+
+            // Avoid returning floats in x87 registers on x86 as loading and storing from x87
+            // registers will quiet signalling NaNs.
+            if cx.tcx.sess.target.arch == "x86"
+                && arg_idx.is_none()
+                // Intrinsics themselves are not actual "real" functions, so theres no need to
+                // change their ABIs.
+                && abi != SpecAbi::RustIntrinsic
+            {
+                match arg.layout.abi {
+                    // Handle similar to the way arguments with an `Abi::Aggregate` abi are handled
+                    // below, by returning arguments up to the size of a pointer (32 bits on x86)
+                    // cast to an appropriately sized integer.
+                    Abi::Scalar(s) if s.primitive() == Float(F32) => {
+                        // Same size as a pointer, return in a register.
+                        arg.cast_to(Reg::i32());
+                        return;
+                    }
+                    Abi::Scalar(s) if s.primitive() == Float(F64) => {
+                        // Larger than a pointer, return indirectly.
+                        arg.make_indirect();
+                        return;
+                    }
+                    Abi::ScalarPair(s1, s2)
+                        if matches!(s1.primitive(), Float(F32 | F64))
+                            || matches!(s2.primitive(), Float(F32 | F64)) =>
+                    {
+                        // Larger than a pointer, return indirectly.
+                        arg.make_indirect();
+                        return;
+                    }
+                    _ => {}
+                };
             }
 
             match arg.layout.abi {
@@ -843,7 +834,7 @@ fn make_thin_self_ptr<'tcx>(
     // we now have a type like `*mut RcBox<dyn Trait>`
     // change its layout to that of `*mut ()`, a thin pointer, but keep the same type
     // this is understood as a special case elsewhere in the compiler
-    let unit_ptr_ty = Ty::new_mut_ptr(tcx, Ty::new_unit(tcx));
+    let unit_ptr_ty = Ty::new_mut_ptr(tcx, tcx.types.unit);
 
     TyAndLayout {
         ty: fat_pointer_ty,

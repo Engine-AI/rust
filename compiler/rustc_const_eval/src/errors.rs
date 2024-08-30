@@ -1,19 +1,22 @@
 use std::borrow::Cow;
+use std::fmt::Write;
 
+use either::Either;
+use rustc_errors::codes::*;
 use rustc_errors::{
-    codes::*, Diag, DiagArgValue, DiagCtxt, DiagMessage, Diagnostic, EmissionGuarantee, Level,
+    Diag, DiagArgValue, DiagCtxtHandle, DiagMessage, Diagnostic, EmissionGuarantee, Level,
 };
 use rustc_hir::ConstContext;
 use rustc_macros::{Diagnostic, LintDiagnostic, Subdiagnostic};
 use rustc_middle::mir::interpret::{
-    CheckInAllocMsg, ExpectedKind, InterpError, InvalidMetaKind, InvalidProgramInfo, Misalignment,
-    PointerKind, ResourceExhaustionInfo, UndefinedBehaviorInfo, UnsupportedOpInfo,
-    ValidationErrorInfo,
+    CheckInAllocMsg, CtfeProvenance, ExpectedKind, InterpError, InvalidMetaKind,
+    InvalidProgramInfo, Misalignment, Pointer, PointerKind, ResourceExhaustionInfo,
+    UndefinedBehaviorInfo, UnsupportedOpInfo, ValidationErrorInfo,
 };
 use rustc_middle::ty::{self, Mutability, Ty};
 use rustc_span::Span;
 use rustc_target::abi::call::AdjustForForeignAbiError;
-use rustc_target::abi::{Size, WrappingRange};
+use rustc_target::abi::WrappingRange;
 
 use crate::interpret::InternKind;
 
@@ -23,6 +26,13 @@ pub(crate) struct DanglingPtrInFinal {
     #[primary_span]
     pub span: Span,
     pub kind: InternKind,
+}
+
+#[derive(Diagnostic)]
+#[diag(const_eval_nested_static_in_thread_local)]
+pub(crate) struct NestedStaticInThreadLocal {
+    #[primary_span]
+    pub span: Span,
 }
 
 #[derive(LintDiagnostic)]
@@ -141,7 +151,7 @@ pub(crate) struct UnallowedMutableRefs {
     pub span: Span,
     pub kind: ConstContext,
     #[note(const_eval_teach_note)]
-    pub teach: Option<()>,
+    pub teach: bool,
 }
 
 #[derive(Diagnostic)]
@@ -151,7 +161,7 @@ pub(crate) struct UnallowedMutableRaw {
     pub span: Span,
     pub kind: ConstContext,
     #[note(const_eval_teach_note)]
-    pub teach: Option<()>,
+    pub teach: bool,
 }
 #[derive(Diagnostic)]
 #[diag(const_eval_non_const_fmt_macro_call, code = E0015)]
@@ -186,7 +196,7 @@ pub(crate) struct UnallowedHeapAllocations {
     pub span: Span,
     pub kind: ConstContext,
     #[note(const_eval_teach_note)]
-    pub teach: Option<()>,
+    pub teach: bool,
 }
 
 #[derive(Diagnostic)]
@@ -204,10 +214,10 @@ pub(crate) struct InteriorMutableDataRefer {
     #[label]
     pub span: Span,
     #[help]
-    pub opt_help: Option<()>,
+    pub opt_help: bool,
     pub kind: ConstContext,
     #[note(const_eval_teach_note)]
-    pub teach: Option<()>,
+    pub teach: bool,
 }
 
 #[derive(Diagnostic)]
@@ -397,13 +407,6 @@ pub struct ConstEvalError {
     pub frame_notes: Vec<FrameNote>,
 }
 
-#[derive(LintDiagnostic)]
-#[diag(const_eval_write_through_immutable_pointer)]
-pub struct WriteThroughImmutablePointer {
-    #[subdiagnostic]
-    pub frames: Vec<FrameNote>,
-}
-
 #[derive(Diagnostic)]
 #[diag(const_eval_nullary_intrinsic_fail)]
 pub struct NullaryIntrinsicError {
@@ -417,7 +420,7 @@ pub struct ValidationFailure {
     #[primary_span]
     pub span: Span,
     #[note(const_eval_validation_failure_note)]
-    pub ub_note: Option<()>,
+    pub ub_note: (),
     #[subdiagnostic]
     pub frames: Vec<FrameNote>,
     #[subdiagnostic]
@@ -445,7 +448,7 @@ pub trait ReportErrorExt {
     }
 }
 
-fn bad_pointer_message(msg: CheckInAllocMsg, dcx: &DiagCtxt) -> String {
+fn bad_pointer_message(msg: CheckInAllocMsg, dcx: DiagCtxtHandle<'_>) -> String {
     use crate::fluent_generated::*;
 
     let msg = match msg {
@@ -460,8 +463,9 @@ fn bad_pointer_message(msg: CheckInAllocMsg, dcx: &DiagCtxt) -> String {
 
 impl<'a> ReportErrorExt for UndefinedBehaviorInfo<'a> {
     fn diagnostic_message(&self) -> DiagMessage {
-        use crate::fluent_generated::*;
         use UndefinedBehaviorInfo::*;
+
+        use crate::fluent_generated::*;
         match self {
             Ub(msg) => msg.clone().into(),
             Custom(x) => (x.msg)(),
@@ -474,14 +478,15 @@ impl<'a> ReportErrorExt for UndefinedBehaviorInfo<'a> {
             DivisionOverflow => const_eval_division_overflow,
             RemainderOverflow => const_eval_remainder_overflow,
             PointerArithOverflow => const_eval_pointer_arithmetic_overflow,
+            ArithOverflow { .. } => const_eval_overflow_arith,
+            ShiftOverflow { .. } => const_eval_overflow_shift,
             InvalidMeta(InvalidMetaKind::SliceTooBig) => const_eval_invalid_meta_slice,
             InvalidMeta(InvalidMetaKind::TooBig) => const_eval_invalid_meta,
             UnterminatedCString(_) => const_eval_unterminated_c_string,
             PointerUseAfterFree(_, _) => const_eval_pointer_use_after_free,
-            PointerOutOfBounds { ptr_size: Size::ZERO, .. } => const_eval_zst_pointer_out_of_bounds,
             PointerOutOfBounds { .. } => const_eval_pointer_out_of_bounds,
-            DanglingIntPointer(0, _) => const_eval_dangling_null_pointer,
-            DanglingIntPointer(_, _) => const_eval_dangling_int_pointer,
+            DanglingIntPointer { addr: 0, .. } => const_eval_dangling_null_pointer,
+            DanglingIntPointer { .. } => const_eval_dangling_int_pointer,
             AlignmentCheckFailed { .. } => const_eval_alignment_check_failed,
             WriteToReadOnly(_) => const_eval_write_to_read_only,
             DerefFunctionPointer(_) => const_eval_deref_function_pointer,
@@ -491,6 +496,7 @@ impl<'a> ReportErrorExt for UndefinedBehaviorInfo<'a> {
             InvalidTag(_) => const_eval_invalid_tag,
             InvalidFunctionPointer(_) => const_eval_invalid_function_pointer,
             InvalidVTablePointer(_) => const_eval_invalid_vtable_pointer,
+            InvalidVTableTrait { .. } => const_eval_invalid_vtable_trait,
             InvalidStr(_) => const_eval_invalid_str,
             InvalidUninitBytes(None) => const_eval_invalid_uninit_bytes_unknown,
             InvalidUninitBytes(Some(_)) => const_eval_invalid_uninit_bytes,
@@ -530,6 +536,20 @@ impl<'a> ReportErrorExt for UndefinedBehaviorInfo<'a> {
             | DeadLocal
             | UninhabitedEnumVariantWritten(_)
             | UninhabitedEnumVariantRead(_) => {}
+
+            ArithOverflow { intrinsic } => {
+                diag.arg("intrinsic", intrinsic);
+            }
+            ShiftOverflow { intrinsic, shift_amount } => {
+                diag.arg("intrinsic", intrinsic);
+                diag.arg(
+                    "shift_amount",
+                    match shift_amount {
+                        Either::Left(v) => v.to_string(),
+                        Either::Right(v) => v.to_string(),
+                    },
+                );
+            }
             BoundsCheckFailed { len, index } => {
                 diag.arg("len", len);
                 diag.arg("index", index);
@@ -537,22 +557,48 @@ impl<'a> ReportErrorExt for UndefinedBehaviorInfo<'a> {
             UnterminatedCString(ptr) | InvalidFunctionPointer(ptr) | InvalidVTablePointer(ptr) => {
                 diag.arg("pointer", ptr);
             }
+            InvalidVTableTrait { expected_trait, vtable_trait } => {
+                diag.arg("expected_trait", expected_trait.to_string());
+                diag.arg(
+                    "vtable_trait",
+                    vtable_trait.map(|t| t.to_string()).unwrap_or_else(|| format!("<trivial>")),
+                );
+            }
             PointerUseAfterFree(alloc_id, msg) => {
                 diag.arg("alloc_id", alloc_id)
                     .arg("bad_pointer_message", bad_pointer_message(msg, dcx));
             }
-            PointerOutOfBounds { alloc_id, alloc_size, ptr_offset, ptr_size, msg } => {
-                diag.arg("alloc_id", alloc_id)
-                    .arg("alloc_size", alloc_size.bytes())
-                    .arg("ptr_offset", ptr_offset)
-                    .arg("ptr_size", ptr_size.bytes())
-                    .arg("bad_pointer_message", bad_pointer_message(msg, dcx));
+            PointerOutOfBounds { alloc_id, alloc_size, ptr_offset, inbounds_size, msg } => {
+                diag.arg("alloc_size", alloc_size.bytes());
+                diag.arg("bad_pointer_message", bad_pointer_message(msg, dcx));
+                diag.arg("pointer", {
+                    let mut out = format!("{:?}", alloc_id);
+                    if ptr_offset > 0 {
+                        write!(out, "+{:#x}", ptr_offset).unwrap();
+                    } else if ptr_offset < 0 {
+                        write!(out, "-{:#x}", ptr_offset.unsigned_abs()).unwrap();
+                    }
+                    out
+                });
+                diag.arg("inbounds_size_is_neg", inbounds_size < 0);
+                diag.arg("inbounds_size_abs", inbounds_size.unsigned_abs());
+                diag.arg("ptr_offset_is_neg", ptr_offset < 0);
+                diag.arg("ptr_offset_abs", ptr_offset.unsigned_abs());
+                diag.arg(
+                    "alloc_size_minus_ptr_offset",
+                    alloc_size.bytes().saturating_sub(ptr_offset as u64),
+                );
             }
-            DanglingIntPointer(ptr, msg) => {
-                if ptr != 0 {
-                    diag.arg("pointer", format!("{ptr:#x}[noalloc]"));
+            DanglingIntPointer { addr, inbounds_size, msg } => {
+                if addr != 0 {
+                    diag.arg(
+                        "pointer",
+                        Pointer::<Option<CtfeProvenance>>::from_addr_invalid(addr).to_string(),
+                    );
                 }
 
+                diag.arg("inbounds_size_is_neg", inbounds_size < 0);
+                diag.arg("inbounds_size_abs", inbounds_size.unsigned_abs());
                 diag.arg("bad_pointer_message", bad_pointer_message(msg, dcx));
             }
             AlignmentCheckFailed(Misalignment { required, has }, msg) => {
@@ -598,8 +644,9 @@ impl<'a> ReportErrorExt for UndefinedBehaviorInfo<'a> {
 
 impl<'tcx> ReportErrorExt for ValidationErrorInfo<'tcx> {
     fn diagnostic_message(&self) -> DiagMessage {
-        use crate::fluent_generated::*;
         use rustc_middle::mir::interpret::ValidationErrorKind::*;
+
+        use crate::fluent_generated::*;
         match self.kind {
             PtrToUninhabited { ptr_kind: PointerKind::Box, .. } => {
                 const_eval_validation_box_to_uninhabited
@@ -607,9 +654,6 @@ impl<'tcx> ReportErrorExt for ValidationErrorInfo<'tcx> {
             PtrToUninhabited { ptr_kind: PointerKind::Ref(_), .. } => {
                 const_eval_validation_ref_to_uninhabited
             }
-
-            PtrToStatic { ptr_kind: PointerKind::Box } => const_eval_validation_box_to_static,
-            PtrToStatic { ptr_kind: PointerKind::Ref(_) } => const_eval_validation_ref_to_static,
 
             PointerAsInt { .. } => const_eval_validation_pointer_as_int,
             PartialPointer => const_eval_validation_partial_pointer,
@@ -627,6 +671,7 @@ impl<'tcx> ReportErrorExt for ValidationErrorInfo<'tcx> {
             UninhabitedEnumVariant => const_eval_validation_uninhabited_enum_variant,
             Uninit { .. } => const_eval_validation_uninit,
             InvalidVTablePtr { .. } => const_eval_validation_invalid_vtable_ptr,
+            InvalidMetaWrongTrait { .. } => const_eval_validation_invalid_vtable_trait,
             InvalidMetaSliceTooLarge { ptr_kind: PointerKind::Box } => {
                 const_eval_validation_invalid_box_slice_meta
             }
@@ -672,8 +717,9 @@ impl<'tcx> ReportErrorExt for ValidationErrorInfo<'tcx> {
     }
 
     fn add_args<G: EmissionGuarantee>(self, err: &mut Diag<'_, G>) {
-        use crate::fluent_generated as fluent;
         use rustc_middle::mir::interpret::ValidationErrorKind::*;
+
+        use crate::fluent_generated as fluent;
 
         if let PointerAsInt { .. } | PartialPointer = self.kind {
             err.help(fluent::const_eval_ptr_as_bytes_1);
@@ -766,8 +812,14 @@ impl<'tcx> ReportErrorExt for ValidationErrorInfo<'tcx> {
             DanglingPtrNoProvenance { pointer, .. } => {
                 err.arg("pointer", pointer);
             }
+            InvalidMetaWrongTrait { expected_trait: ref_trait, vtable_trait } => {
+                err.arg("ref_trait", ref_trait.to_string());
+                err.arg(
+                    "vtable_trait",
+                    vtable_trait.map(|t| t.to_string()).unwrap_or_else(|| format!("<trivial>")),
+                );
+            }
             NullPtr { .. }
-            | PtrToStatic { .. }
             | ConstRefToMutable
             | ConstRefToExtern
             | MutableRefToImmutable
@@ -789,6 +841,7 @@ impl ReportErrorExt for UnsupportedOpInfo {
         use crate::fluent_generated::*;
         match self {
             UnsupportedOpInfo::Unsupported(s) => s.clone().into(),
+            UnsupportedOpInfo::ExternTypeField => const_eval_extern_type_field,
             UnsupportedOpInfo::UnsizedLocal => const_eval_unsized_local,
             UnsupportedOpInfo::OverwritePartialPointer(_) => const_eval_partial_pointer_overwrite,
             UnsupportedOpInfo::ReadPartialPointer(_) => const_eval_partial_pointer_copy,
@@ -798,9 +851,9 @@ impl ReportErrorExt for UnsupportedOpInfo {
         }
     }
     fn add_args<G: EmissionGuarantee>(self, diag: &mut Diag<'_, G>) {
-        use crate::fluent_generated::*;
-
         use UnsupportedOpInfo::*;
+
+        use crate::fluent_generated::*;
         if let ReadPointerAsInt(_) | OverwritePartialPointer(_) | ReadPartialPointer(_) = self {
             diag.help(const_eval_ptr_as_bytes_1);
             diag.help(const_eval_ptr_as_bytes_2);
@@ -809,7 +862,10 @@ impl ReportErrorExt for UnsupportedOpInfo {
             // `ReadPointerAsInt(Some(info))` is never printed anyway, it only serves as an error to
             // be further processed by validity checking which then turns it into something nice to
             // print. So it's not worth the effort of having diagnostics that can print the `info`.
-            UnsizedLocal | Unsupported(_) | ReadPointerAsInt(_) => {}
+            UnsizedLocal
+            | UnsupportedOpInfo::ExternTypeField
+            | Unsupported(_)
+            | ReadPointerAsInt(_) => {}
             OverwritePartialPointer(ptr) | ReadPartialPointer(ptr) => {
                 diag.arg("ptr", ptr);
             }
@@ -884,6 +940,7 @@ impl ReportErrorExt for ResourceExhaustionInfo {
             ResourceExhaustionInfo::StackFrameLimitReached => const_eval_stack_frame_limit_reached,
             ResourceExhaustionInfo::MemoryExhausted => const_eval_memory_exhausted,
             ResourceExhaustionInfo::AddressSpaceFull => const_eval_address_space_full,
+            ResourceExhaustionInfo::Interrupted => const_eval_interrupted,
         }
     }
     fn add_args<G: EmissionGuarantee>(self, _: &mut Diag<'_, G>) {}

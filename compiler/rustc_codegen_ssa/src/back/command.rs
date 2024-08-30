@@ -2,10 +2,8 @@
 //! read the arguments that are built up.
 
 use std::ffi::{OsStr, OsString};
-use std::fmt;
-use std::io;
-use std::mem;
 use std::process::{self, Output};
+use std::{fmt, io, mem};
 
 use rustc_target::spec::LldFlavor;
 
@@ -100,12 +98,6 @@ impl Command {
             Program::Lld(ref p, flavor) => {
                 let mut c = process::Command::new(p);
                 c.arg("-flavor").arg(flavor.as_str());
-                if let LldFlavor::Wasm = flavor {
-                    // LLVM expects host-specific formatting for @file
-                    // arguments, but we always generate posix formatted files
-                    // at this time. Indicate as such.
-                    c.arg("--rsp-quoting=posix");
-                }
                 c
             }
         };

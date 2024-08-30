@@ -268,6 +268,53 @@ mod prim_bool {}
 /// [`Debug`]: fmt::Debug
 /// [`default()`]: Default::default
 ///
+/// # Never type fallback
+///
+/// When the compiler sees a value of type `!` in a [coercion site], it implicitly inserts a
+/// coercion to allow the type checker to infer any type:
+///
+/// ```rust,ignore (illustrative-and-has-placeholders)
+/// // this
+/// let x: u8 = panic!();
+///
+/// // is (essentially) turned by the compiler into
+/// let x: u8 = absurd(panic!());
+///
+/// // where absurd is a function with the following signature
+/// // (it's sound, because `!` always marks unreachable code):
+/// fn absurd<T>(_: !) -> T { ... }
+// FIXME: use `core::convert::absurd` here instead, once it's merged
+/// ```
+///
+/// This can lead to compilation errors if the type cannot be inferred:
+///
+/// ```compile_fail
+/// // this
+/// { panic!() };
+///
+/// // gets turned into this
+/// { absurd(panic!()) }; // error: can't infer the type of `absurd`
+/// ```
+///
+/// To prevent such errors, the compiler remembers where it inserted `absurd` calls, and
+/// if it can't infer the type, it uses the fallback type instead:
+/// ```rust, ignore
+/// type Fallback = /* An arbitrarily selected type! */;
+/// { absurd::<Fallback>(panic!()) }
+/// ```
+///
+/// This is what is known as "never type fallback".
+///
+/// Historically, the fallback type was [`()`], causing confusing behavior where `!` spontaneously
+/// coerced to `()`, even when it would not infer `()` without the fallback. There are plans to
+/// change it in the [2024 edition] (and possibly in all editions on a later date); see
+/// [Tracking Issue for making `!` fall back to `!`][fallback-ti].
+///
+/// [coercion site]: <https://doc.rust-lang.org/reference/type-coercions.html#coercion-sites>
+/// [`()`]: prim@unit
+/// [fallback-ti]: <https://github.com/rust-lang/rust/issues/123748>
+/// [2024 edition]: <https://doc.rust-lang.org/nightly/edition-guide/rust-2024/index.html>
+///
 #[unstable(feature = "never_type", issue = "35121")]
 mod prim_never {}
 
@@ -537,7 +584,11 @@ impl () {}
 /// ## 4. Get it from C.
 ///
 /// ```
-/// # #![feature(rustc_private)]
+/// # mod libc {
+/// # pub unsafe fn malloc(_size: usize) -> *mut core::ffi::c_void { core::ptr::NonNull::dangling().as_ptr() }
+/// # pub unsafe fn free(_ptr: *mut core::ffi::c_void) {}
+/// # }
+/// # #[cfg(any())]
 /// #[allow(unused_extern_crates)]
 /// extern crate libc;
 ///
@@ -548,7 +599,7 @@ impl () {}
 ///     if my_num.is_null() {
 ///         panic!("failed to allocate memory");
 ///     }
-///     libc::free(my_num as *mut libc::c_void);
+///     libc::free(my_num as *mut core::ffi::c_void);
 /// }
 /// ```
 ///
@@ -1074,7 +1125,28 @@ mod prim_tuple {}
 #[doc(hidden)]
 impl<T> (T,) {}
 
+#[rustc_doc_primitive = "f16"]
+#[doc(alias = "half")]
+/// A 16-bit floating point type (specifically, the "binary16" type defined in IEEE 754-2008).
+///
+/// This type is very similar to [`prim@f32`] but has decreased precision because it uses half as many
+/// bits. Please see [the documentation for `f32`](prim@f32) or [Wikipedia on half-precision
+/// values][wikipedia] for more information.
+///
+/// Note that most common platforms will not support `f16` in hardware without enabling extra target
+/// features, with the notable exception of Apple Silicon (also known as M1, M2, etc.) processors.
+/// Hardware support on x86-64 requires the avx512fp16 feature, while RISC-V requires Zhf.
+/// Usually the fallback implementation will be to use `f32` hardware if it exists, and convert
+/// between `f16` and `f32` when performing math.
+///
+/// *[See also the `std::f16::consts` module](crate::f16::consts).*
+///
+/// [wikipedia]: https://en.wikipedia.org/wiki/Half-precision_floating-point_format
+#[unstable(feature = "f16", issue = "116909")]
+mod prim_f16 {}
+
 #[rustc_doc_primitive = "f32"]
+#[doc(alias = "single")]
 /// A 32-bit floating point type (specifically, the "binary32" type defined in IEEE 754-2008).
 ///
 /// This type can represent a wide range of decimal numbers, like `3.5`, `27`,
@@ -1118,6 +1190,11 @@ impl<T> (T,) {}
 ///     portable or even fully deterministic! This means that there may be some
 ///     surprising results upon inspecting the bit patterns,
 ///     as the same calculations might produce NaNs with different bit patterns.
+///     This also affects the sign of the NaN: checking `is_sign_positive` or `is_sign_negative` on
+///     a NaN is the most common way to run into these surprising results.
+///     (Checking `x >= 0.0` or `x <= 0.0` avoids those surprises, but also how negative/positive
+///     zero are treated.)
+///     See the section below for what exactly is guaranteed about the bit pattern of a NaN.
 ///
 /// When a primitive operation (addition, subtraction, multiplication, or
 /// division) is performed on this type, the result is rounded according to the
@@ -1139,23 +1216,118 @@ impl<T> (T,) {}
 /// *[See also the `std::f32::consts` module](crate::f32::consts).*
 ///
 /// [wikipedia]: https://en.wikipedia.org/wiki/Single-precision_floating-point_format
+///
+/// # NaN bit patterns
+///
+/// This section defines the possible NaN bit patterns returned by non-"bitwise" floating point
+/// operations. The bitwise operations are unary `-`, `abs`, `copysign`; those are guaranteed to
+/// exactly preserve the bit pattern of their input except for possibly changing the sign bit.
+///
+/// A floating-point NaN value consists of:
+/// - a sign bit
+/// - a quiet/signaling bit
+/// - a payload, which makes up the rest of the significand (i.e., the mantissa) except for the
+///   quiet/signaling bit.
+///
+/// Rust assumes that the quiet/signaling bit being set to `1` indicates a quiet NaN (QNaN), and a
+/// value of `0` indicates a signaling NaN (SNaN). In the following we will hence just call it the
+/// "quiet bit".
+///
+/// The following rules apply when a NaN value is returned: the result has a non-deterministic sign.
+/// The quiet bit and payload are non-deterministically chosen from the following set of options:
+///
+/// - **Preferred NaN**: The quiet bit is set and the payload is all-zero.
+/// - **Quieting NaN propagation**: The quiet bit is set and the payload is copied from any input
+///   operand that is a NaN. If the inputs and outputs do not have the same payload size (i.e., for
+///   `as` casts), then
+///   - If the output is smaller than the input, low-order bits of the payload get dropped.
+///   - If the output is larger than the input, the payload gets filled up with 0s in the low-order
+///     bits.
+/// - **Unchanged NaN propagation**: The quiet bit and payload are copied from any input operand
+///   that is a NaN. If the inputs and outputs do not have the same size (i.e., for `as` casts), the
+///   same rules as for "quieting NaN propagation" apply, with one caveat: if the output is smaller
+///   than the input, droppig the low-order bits may result in a payload of 0; a payload of 0 is not
+///   possible with a signaling NaN (the all-0 significand encodes an infinity) so unchanged NaN
+///   propagation cannot occur with some inputs.
+/// - **Target-specific NaN**: The quiet bit is set and the payload is picked from a target-specific
+///   set of "extra" possible NaN payloads. The set can depend on the input operand values.
+///   See the table below for the concrete NaNs this set contains on various targets.
+///
+/// In particular, if all input NaNs are quiet (or if there are no input NaNs), then the output NaN
+/// is definitely quiet. Signaling NaN outputs can only occur if they are provided as an input
+/// value. Similarly, if all input NaNs are preferred (or if there are no input NaNs) and the target
+/// does not have any "extra" NaN payloads, then the output NaN is guaranteed to be preferred.
+///
+/// The non-deterministic choice happens when the operation is executed; i.e., the result of a
+/// NaN-producing floating point operation is a stable bit pattern (looking at these bits multiple
+/// times will yield consistent results), but running the same operation twice with the same inputs
+/// can produce different results.
+///
+/// These guarantees are neither stronger nor weaker than those of IEEE 754: IEEE 754 guarantees
+/// that an operation never returns a signaling NaN, whereas it is possible for operations like
+/// `SNAN * 1.0` to return a signaling NaN in Rust. Conversely, IEEE 754 makes no statement at all
+/// about which quiet NaN is returned, whereas Rust restricts the set of possible results to the
+/// ones listed above.
+///
+/// Unless noted otherwise, the same rules also apply to NaNs returned by other library functions
+/// (e.g. `min`, `minimum`, `max`, `maximum`); other aspects of their semantics and which IEEE 754
+/// operation they correspond to are documented with the respective functions.
+///
+/// When a floating-point operation is executed in `const` context, the same rules apply: no
+/// guarantee is made about which of the NaN bit patterns described above will be returned. The
+/// result does not have to match what happens when executing the same code at runtime, and the
+/// result can vary depending on factors such as compiler version and flags.
+///
+/// ### Target-specific "extra" NaN values
+// FIXME: Is there a better place to put this?
+///
+/// | `target_arch` | Extra payloads possible on this platform |
+/// |---------------|---------|
+/// | `x86`, `x86_64`, `arm`, `aarch64`, `riscv32`, `riscv64` | None |
+/// | `sparc`, `sparc64` | The all-one payload |
+/// | `wasm32`, `wasm64` | If all input NaNs are quiet with all-zero payload: None.<br> Otherwise: all possible payloads. |
+///
+/// For targets not in this table, all payloads are possible.
+
 #[stable(feature = "rust1", since = "1.0.0")]
 mod prim_f32 {}
 
 #[rustc_doc_primitive = "f64"]
+#[doc(alias = "double")]
 /// A 64-bit floating point type (specifically, the "binary64" type defined in IEEE 754-2008).
 ///
-/// This type is very similar to [`f32`], but has increased
-/// precision by using twice as many bits. Please see [the documentation for
-/// `f32`][`f32`] or [Wikipedia on double precision
+/// This type is very similar to [`prim@f32`], but has increased precision by using twice as many
+/// bits. Please see [the documentation for `f32`](prim@f32) or [Wikipedia on double-precision
 /// values][wikipedia] for more information.
 ///
 /// *[See also the `std::f64::consts` module](crate::f64::consts).*
 ///
-/// [`f32`]: prim@f32
 /// [wikipedia]: https://en.wikipedia.org/wiki/Double-precision_floating-point_format
 #[stable(feature = "rust1", since = "1.0.0")]
 mod prim_f64 {}
+
+#[rustc_doc_primitive = "f128"]
+#[doc(alias = "quad")]
+/// A 128-bit floating point type (specifically, the "binary128" type defined in IEEE 754-2008).
+///
+/// This type is very similar to [`prim@f32`] and [`prim@f64`], but has increased precision by using twice
+/// as many bits as `f64`. Please see [the documentation for `f32`](prim@f32) or [Wikipedia on
+/// quad-precision values][wikipedia] for more information.
+///
+/// Note that no platforms have hardware support for `f128` without enabling target specific features,
+/// as for all instruction set architectures `f128` is considered an optional feature.
+/// Only Power ISA ("PowerPC") and RISC-V specify it, and only certain microarchitectures
+/// actually implement it. For x86-64 and AArch64, ISA support is not even specified,
+/// so it will always be a software implementation significantly slower than `f64`.
+///
+/// _Note: `f128` support is incomplete. Many platforms will not be able to link math functions. On
+/// x86 in particular, these functions do link but their results are always incorrect._
+///
+/// *[See also the `std::f128::consts` module](crate::f128::consts).*
+///
+/// [wikipedia]: https://en.wikipedia.org/wiki/Quadruple-precision_floating-point_format
+#[unstable(feature = "f128", issue = "116909")]
+mod prim_f128 {}
 
 #[rustc_doc_primitive = "i8"]
 //
@@ -1374,22 +1546,26 @@ mod prim_usize {}
 /// For all types, `T: ?Sized`, and for all `t: &T` or `t: &mut T`, when such values cross an API
 /// boundary, the following invariants must generally be upheld:
 ///
+/// * `t` is non-null
 /// * `t` is aligned to `align_of_val(t)`
-/// * `t` is dereferenceable for `size_of_val(t)` many bytes
+/// * if `size_of_val(t) > 0`, then `t` is dereferenceable for `size_of_val(t)` many bytes
 ///
 /// If `t` points at address `a`, being "dereferenceable" for N bytes means that the memory range
 /// `[a, a + N)` is all contained within a single [allocated object].
 ///
 /// For instance, this means that unsafe code in a safe function may assume these invariants are
 /// ensured of arguments passed by the caller, and it may assume that these invariants are ensured
-/// of return values from any safe functions it calls. In most cases, the inverse is also true:
-/// unsafe code must not violate these invariants when passing arguments to safe functions or
-/// returning values from safe functions; such violations may result in undefined behavior. Where
-/// exceptions to this latter requirement exist, they will be called out explicitly in documentation.
+/// of return values from any safe functions it calls.
+///
+/// For the other direction, things are more complicated: when unsafe code passes arguments
+/// to safe functions or returns values from safe functions, they generally must *at least*
+/// not violate these invariants. The full requirements are stronger, as the reference generally
+/// must point to data that is safe to use at type `T`.
 ///
 /// It is not decided yet whether unsafe code may violate these invariants temporarily on internal
 /// data. As a consequence, unsafe code which violates these invariants temporarily on internal data
-/// may become unsound in future versions of Rust depending on how this question is decided.
+/// may be unsound or become unsound in future versions of Rust depending on how this question is
+/// decided.
 ///
 /// [allocated object]: ptr#allocated-object
 #[stable(feature = "rust1", since = "1.0.0")]

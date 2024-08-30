@@ -1,18 +1,22 @@
 // Not in interpret to make sure we do not use private implementation details
 
-use rustc_middle::mir;
 use rustc_middle::mir::interpret::InterpErrorInfo;
-use rustc_middle::query::TyCtxtAt;
-use rustc_middle::ty::{self, Ty};
+use rustc_middle::query::{Key, TyCtxtAt};
+use rustc_middle::ty::{self, Ty, TyCtxt};
+use rustc_middle::{bug, mir};
+use rustc_target::abi::VariantIdx;
+use tracing::instrument;
 
-use crate::interpret::format_interp_error;
+use crate::interpret::{format_interp_error, InterpCx};
 
+mod dummy_machine;
 mod error;
 mod eval_queries;
 mod fn_queries;
 mod machine;
 mod valtrees;
 
+pub use dummy_machine::*;
 pub use error::*;
 pub use eval_queries::*;
 pub use fn_queries::*;
@@ -22,15 +26,15 @@ pub(crate) use valtrees::{eval_to_valtree, valtree_to_const_value};
 // We forbid type-level constants that contain more than `VALTREE_MAX_NODES` nodes.
 const VALTREE_MAX_NODES: usize = 100000;
 
-pub(crate) enum ValTreeCreationError {
+pub(crate) enum ValTreeCreationError<'tcx> {
     NodesOverflow,
     /// Values of this type, or this particular value, are not supported as valtrees.
-    NonSupportedType,
+    NonSupportedType(Ty<'tcx>),
 }
-pub(crate) type ValTreeCreationResult<'tcx> = Result<ty::ValTree<'tcx>, ValTreeCreationError>;
+pub(crate) type ValTreeCreationResult<'tcx> = Result<ty::ValTree<'tcx>, ValTreeCreationError<'tcx>>;
 
-impl From<InterpErrorInfo<'_>> for ValTreeCreationError {
-    fn from(err: InterpErrorInfo<'_>) -> Self {
+impl<'tcx> From<InterpErrorInfo<'tcx>> for ValTreeCreationError<'tcx> {
+    fn from(err: InterpErrorInfo<'tcx>) -> Self {
         ty::tls::with(|tcx| {
             bug!(
                 "Unexpected Undefined Behavior error during valtree construction: {}",
@@ -74,4 +78,22 @@ pub(crate) fn try_destructure_mir_constant_for_user_output<'tcx>(
     let fields = tcx.arena.alloc_from_iter(fields_iter);
 
     Some(mir::DestructuredConstant { variant, fields })
+}
+
+/// Computes the tag (if any) for a given type and variant.
+#[instrument(skip(tcx), level = "debug")]
+pub fn tag_for_variant_provider<'tcx>(
+    tcx: TyCtxt<'tcx>,
+    (ty, variant_index): (Ty<'tcx>, VariantIdx),
+) -> Option<ty::ScalarInt> {
+    assert!(ty.is_enum());
+
+    let ecx = InterpCx::new(
+        tcx,
+        ty.default_span(tcx),
+        ty::ParamEnv::reveal_all(),
+        crate::const_eval::DummyMachine,
+    );
+
+    ecx.tag_for_variant(ty, variant_index).unwrap().map(|(tag, _tag_field)| tag)
 }

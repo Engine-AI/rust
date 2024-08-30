@@ -1,26 +1,27 @@
+use std::iter;
+use std::ops::ControlFlow;
+
+use rustc_ast as ast;
+use rustc_ast::util::{classify, parser};
+use rustc_ast::{ExprKind, StmtKind};
+use rustc_errors::{pluralize, MultiSpan};
+use rustc_hir::def::{DefKind, Res};
+use rustc_hir::def_id::DefId;
+use rustc_hir::{self as hir, LangItem};
+use rustc_infer::traits::util::elaborate;
+use rustc_middle::ty::{self, adjustment, Ty};
+use rustc_session::{declare_lint, declare_lint_pass, impl_lint_pass};
+use rustc_span::symbol::{kw, sym, Symbol};
+use rustc_span::{BytePos, Span};
+use tracing::instrument;
+
 use crate::lints::{
     PathStatementDrop, PathStatementDropSub, PathStatementNoEffect, UnusedAllocationDiag,
     UnusedAllocationMutDiag, UnusedClosure, UnusedCoroutine, UnusedDef, UnusedDefSuggestion,
     UnusedDelim, UnusedDelimSuggestion, UnusedImportBracesDiag, UnusedOp, UnusedOpSuggestion,
     UnusedResult,
 };
-use crate::Lint;
-use crate::{EarlyContext, EarlyLintPass, LateContext, LateLintPass, LintContext};
-use rustc_ast as ast;
-use rustc_ast::util::{classify, parser};
-use rustc_ast::{ExprKind, StmtKind};
-use rustc_errors::{pluralize, MultiSpan};
-use rustc_hir as hir;
-use rustc_hir::def::{DefKind, Res};
-use rustc_hir::def_id::DefId;
-use rustc_infer::traits::util::elaborate;
-use rustc_middle::ty::adjustment;
-use rustc_middle::ty::{self, Ty};
-use rustc_span::symbol::Symbol;
-use rustc_span::symbol::{kw, sym};
-use rustc_span::{BytePos, Span};
-use std::iter;
-use std::ops::ControlFlow;
+use crate::{EarlyContext, EarlyLintPass, LateContext, LateLintPass, Lint, LintContext};
 
 declare_lint! {
     /// The `unused_must_use` lint detects unused result of a type flagged as
@@ -176,6 +177,7 @@ impl<'tcx> LateLintPass<'tcx> for UnusedResults {
                 | hir::BinOpKind::Shr => Some("bitwise operation"),
             },
             hir::ExprKind::AddrOf(..) => Some("borrow"),
+            hir::ExprKind::OffsetOf(..) => Some("`offset_of` call"),
             hir::ExprKind::Unary(..) => Some("unary operation"),
             _ => None,
         };
@@ -286,7 +288,7 @@ impl<'tcx> LateLintPass<'tcx> for UnusedResults {
                     is_ty_must_use(cx, boxed_ty, expr, span)
                         .map(|inner| MustUsePath::Boxed(Box::new(inner)))
                 }
-                ty::Adt(def, args) if cx.tcx.lang_items().pin_type() == Some(def.did()) => {
+                ty::Adt(def, args) if cx.tcx.is_lang_item(def.did(), LangItem::Pin) => {
                     let pinned_ty = args.type_at(0);
                     is_ty_must_use(cx, pinned_ty, expr, span)
                         .map(|inner| MustUsePath::Pinned(Box::new(inner)))
@@ -295,7 +297,7 @@ impl<'tcx> LateLintPass<'tcx> for UnusedResults {
                 ty::Alias(ty::Opaque | ty::Projection, ty::AliasTy { def_id: def, .. }) => {
                     elaborate(
                         cx.tcx,
-                        cx.tcx.explicit_item_bounds(def).instantiate_identity_iter_copied(),
+                        cx.tcx.explicit_item_super_predicates(def).iter_identity_copied(),
                     )
                     // We only care about self bounds for the impl-trait
                     .filter_only_self()
@@ -382,7 +384,8 @@ impl<'tcx> LateLintPass<'tcx> for UnusedResults {
             }
         }
 
-        // Returns whether further errors should be suppressed because either a lint has been emitted or the type should be ignored.
+        // Returns whether further errors should be suppressed because either a lint has been
+        // emitted or the type should be ignored.
         fn check_must_use_def(
             cx: &LateContext<'_>,
             def_id: DefId,
@@ -672,7 +675,42 @@ trait UnusedDelimLint {
             return true;
         }
 
-        // Check if LHS needs parens to prevent false-positives in cases like `fn x() -> u8 { ({ 0 } + 1) }`.
+        // Do not lint against parentheses around `&raw [const|mut] expr`.
+        // These parentheses will have to be added e.g. when calling a method on the result of this
+        // expression, and we want to avoid churn wrt adding and removing parentheses.
+        if matches!(inner.kind, ast::ExprKind::AddrOf(ast::BorrowKind::Raw, ..)) {
+            return true;
+        }
+
+        // Check if LHS needs parens to prevent false-positives in cases like
+        // `fn x() -> u8 { ({ 0 } + 1) }`.
+        //
+        // FIXME: https://github.com/rust-lang/rust/issues/119426
+        // The syntax tree in this code is from after macro expansion, so the
+        // current implementation has both false negatives and false positives
+        // related to expressions containing macros.
+        //
+        //     macro_rules! m1 {
+        //         () => {
+        //             1
+        //         };
+        //     }
+        //
+        //     fn f1() -> u8 {
+        //         // Lint says parens are not needed, but they are.
+        //         (m1! {} + 1)
+        //     }
+        //
+        //     macro_rules! m2 {
+        //         () => {
+        //             loop { break 1; }
+        //         };
+        //     }
+        //
+        //     fn f2() -> u8 {
+        //         // Lint says parens are needed, but they are not.
+        //         (m2!() + 1)
+        //     }
         {
             let mut innermost = inner;
             loop {
@@ -690,7 +728,8 @@ trait UnusedDelimLint {
             }
         }
 
-        // Check if RHS needs parens to prevent false-positives in cases like `if (() == return) {}`.
+        // Check if RHS needs parens to prevent false-positives in cases like `if (() == return)
+        // {}`.
         if !followed_by_block {
             return false;
         }
@@ -769,7 +808,7 @@ trait UnusedDelimLint {
             return;
         }
         let spans = match value.kind {
-            ast::ExprKind::Block(ref block, None) if block.stmts.len() == 1 => block.stmts[0]
+            ast::ExprKind::Block(ref block, None) if let [stmt] = block.stmts.as_slice() => stmt
                 .span
                 .find_ancestor_inside(value.span)
                 .map(|span| (value.span.with_hi(span.lo()), value.span.with_lo(span.hi()))),
@@ -863,7 +902,9 @@ trait UnusedDelimLint {
                 (iter, UnusedDelimsCtx::ForIterExpr, true, None, Some(body.span.lo()), true)
             }
 
-            Match(ref head, _) if Self::LINT_EXPR_IN_PATTERN_MATCHING_CTX => {
+            Match(ref head, _, ast::MatchKind::Prefix)
+                if Self::LINT_EXPR_IN_PATTERN_MATCHING_CTX =>
+            {
                 let left = e.span.lo() + rustc_span::BytePos(5);
                 (head, UnusedDelimsCtx::MatchScrutineeExpr, true, Some(left), None, true)
             }
@@ -978,7 +1019,7 @@ declare_lint! {
     "`if`, `match`, `while` and `return` do not need parentheses"
 }
 
-pub struct UnusedParens {
+pub(crate) struct UnusedParens {
     with_self_ty_parens: bool,
     /// `1 as (i32) < 2` parses to ExprKind::Lt
     /// `1 as i32 < 2` parses to i32::<2[missing angle bracket]
@@ -986,7 +1027,7 @@ pub struct UnusedParens {
 }
 
 impl UnusedParens {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self { with_self_ty_parens: false, parens_in_cast_in_lt: Vec::new() }
     }
 }
@@ -1052,7 +1093,7 @@ impl UnusedParens {
         avoid_mut: bool,
         keep_space: (bool, bool),
     ) {
-        use ast::{BindingAnnotation, PatKind};
+        use ast::{BindingMode, PatKind};
 
         if let PatKind::Paren(inner) = &value.kind {
             match inner.kind {
@@ -1064,16 +1105,20 @@ impl UnusedParens {
                 // Avoid `p0 | .. | pn` if we should.
                 PatKind::Or(..) if avoid_or => return,
                 // Avoid `mut x` and `mut x @ p` if we should:
-                PatKind::Ident(BindingAnnotation::MUT, ..) if avoid_mut => {
+                PatKind::Ident(BindingMode::MUT, ..) if avoid_mut => {
                     return;
                 }
                 // Otherwise proceed with linting.
                 _ => {}
             }
-            let spans = inner
-                .span
-                .find_ancestor_inside(value.span)
-                .map(|inner| (value.span.with_hi(inner.lo()), value.span.with_lo(inner.hi())));
+            let spans = if !value.span.from_expansion() {
+                inner
+                    .span
+                    .find_ancestor_inside(value.span)
+                    .map(|inner| (value.span.with_hi(inner.lo()), value.span.with_lo(inner.hi())))
+            } else {
+                None
+            };
             self.emit_unused_delims(cx, value.span, spans, "pattern", keep_space, false);
         }
     }
@@ -1131,7 +1176,7 @@ impl EarlyLintPass for UnusedParens {
                 }
                 return;
             }
-            ExprKind::Match(ref _expr, ref arm) => {
+            ExprKind::Match(ref _expr, ref arm, _) => {
                 for a in arm {
                     if let Some(body) = &a.body {
                         self.check_unused_delims_expr(
@@ -1166,7 +1211,8 @@ impl EarlyLintPass for UnusedParens {
     }
 
     fn check_pat(&mut self, cx: &EarlyContext<'_>, p: &ast::Pat) {
-        use ast::{Mutability, PatKind::*};
+        use ast::Mutability;
+        use ast::PatKind::*;
         let keep_space = (false, false);
         match &p.kind {
             // Do not lint on `(..)` as that will result in the other arms being useless.
@@ -1181,7 +1227,7 @@ impl EarlyLintPass for UnusedParens {
                 self.check_unused_parens_pat(cx, &f.pat, false, false, keep_space);
             },
             // Avoid linting on `i @ (p0 | .. | pn)` and `box (p0 | .. | pn)`, #64106.
-            Ident(.., Some(p)) | Box(p) => self.check_unused_parens_pat(cx, p, true, false, keep_space),
+            Ident(.., Some(p)) | Box(p) | Deref(p) => self.check_unused_parens_pat(cx, p, true, false, keep_space),
             // Avoid linting on `&(mut x)` as `&mut x` has a different meaning, #55342.
             // Also avoid linting on `& mut? (p0 | .. | pn)`, #64106.
             Ref(p, m) => self.check_unused_parens_pat(cx, p, true, *m == Mutability::Not, keep_space),
@@ -1229,11 +1275,13 @@ impl EarlyLintPass for UnusedParens {
                         if self.with_self_ty_parens && b.generic_params.len() > 0 => {}
                     ast::TyKind::ImplTrait(_, bounds) if bounds.len() > 1 => {}
                     _ => {
-                        let spans = r
-                            .span
-                            .find_ancestor_inside(ty.span)
-                            .map(|r| (ty.span.with_hi(r.lo()), ty.span.with_lo(r.hi())));
-
+                        let spans = if !ty.span.from_expansion() {
+                            r.span
+                                .find_ancestor_inside(ty.span)
+                                .map(|r| (ty.span.with_hi(r.lo()), ty.span.with_lo(r.hi())))
+                        } else {
+                            None
+                        };
                         self.emit_unused_delims(cx, ty.span, spans, "type", (false, false), false);
                     }
                 }
@@ -1489,28 +1537,26 @@ declare_lint_pass!(UnusedImportBraces => [UNUSED_IMPORT_BRACES]);
 
 impl UnusedImportBraces {
     fn check_use_tree(&self, cx: &EarlyContext<'_>, use_tree: &ast::UseTree, item: &ast::Item) {
-        if let ast::UseTreeKind::Nested(ref items) = use_tree.kind {
+        if let ast::UseTreeKind::Nested { ref items, .. } = use_tree.kind {
             // Recursively check nested UseTrees
             for (tree, _) in items {
                 self.check_use_tree(cx, tree, item);
             }
 
             // Trigger the lint only if there is one nested item
-            if items.len() != 1 {
-                return;
-            }
+            let [(tree, _)] = items.as_slice() else { return };
 
             // Trigger the lint if the nested item is a non-self single item
-            let node_name = match items[0].0.kind {
+            let node_name = match tree.kind {
                 ast::UseTreeKind::Simple(rename) => {
-                    let orig_ident = items[0].0.prefix.segments.last().unwrap().ident;
+                    let orig_ident = tree.prefix.segments.last().unwrap().ident;
                     if orig_ident.name == kw::SelfLower {
                         return;
                     }
                     rename.unwrap_or(orig_ident).name
                 }
                 ast::UseTreeKind::Glob => Symbol::intern("*"),
-                ast::UseTreeKind::Nested(_) => return,
+                ast::UseTreeKind::Nested { .. } => return,
             };
 
             cx.emit_span_lint(

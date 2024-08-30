@@ -1,19 +1,16 @@
-use rustc_middle::infer::unify_key::{ConstVariableOriginKind, ConstVariableValue, ConstVidKey};
-use rustc_middle::ty::fold::{TypeFoldable, TypeFolder, TypeSuperFoldable};
-use rustc_middle::ty::{self, ConstVid, FloatVid, IntVid, RegionVid, Ty, TyCtxt, TyVid};
-
-use crate::infer::type_variable::TypeVariableOrigin;
-use crate::infer::InferCtxt;
-use crate::infer::{ConstVariableOrigin, RegionVariableOrigin, UnificationTable};
-
-use rustc_data_structures::snapshot_vec as sv;
-use rustc_data_structures::unify as ut;
-use ut::UnifyKey;
-
 use std::ops::Range;
 
+use rustc_data_structures::{snapshot_vec as sv, unify as ut};
+use rustc_middle::infer::unify_key::{ConstVariableValue, ConstVidKey};
+use rustc_middle::ty::fold::{TypeFoldable, TypeFolder, TypeSuperFoldable};
+use rustc_middle::ty::{self, ConstVid, FloatVid, IntVid, RegionVid, Ty, TyCtxt, TyVid};
+use ut::UnifyKey;
+
+use crate::infer::type_variable::TypeVariableOrigin;
+use crate::infer::{ConstVariableOrigin, InferCtxt, RegionVariableOrigin, UnificationTable};
+
 fn vars_since_snapshot<'tcx, T>(
-    table: &mut UnificationTable<'_, 'tcx, T>,
+    table: &UnificationTable<'_, 'tcx, T>,
     snapshot_var_len: usize,
 ) -> Range<T>
 where
@@ -33,10 +30,9 @@ fn const_vars_since_snapshot<'tcx>(
         range.start.vid..range.end.vid,
         (range.start.index()..range.end.index())
             .map(|index| match table.probe_value(ConstVid::from_u32(index)) {
-                ConstVariableValue::Known { value: _ } => ConstVariableOrigin {
-                    kind: ConstVariableOriginKind::MiscVariable,
-                    span: rustc_span::DUMMY_SP,
-                },
+                ConstVariableValue::Known { value: _ } => {
+                    ConstVariableOrigin { param_def_id: None, span: rustc_span::DUMMY_SP }
+                }
                 ConstVariableValue::Unknown { origin, universe: _ } => origin,
             })
             .collect(),
@@ -124,11 +120,11 @@ impl<'tcx> InferCtxt<'tcx> {
                     let type_vars =
                         inner.type_variables().vars_since_snapshot(variable_lengths.type_var_len);
                     let int_vars = vars_since_snapshot(
-                        &mut inner.int_unification_table(),
+                        &inner.int_unification_table(),
                         variable_lengths.int_var_len,
                     );
                     let float_vars = vars_since_snapshot(
-                        &mut inner.float_unification_table(),
+                        &inner.float_unification_table(),
                         variable_lengths.float_var_len,
                     );
                     let region_vars = inner
@@ -174,7 +170,7 @@ impl<'tcx> InferCtxt<'tcx> {
     }
 }
 
-pub struct InferenceFudger<'a, 'tcx> {
+struct InferenceFudger<'a, 'tcx> {
     infcx: &'a InferCtxt<'tcx>,
     type_vars: (Range<TyVid>, Vec<TypeVariableOrigin>),
     int_vars: Range<IntVid>,
@@ -184,7 +180,7 @@ pub struct InferenceFudger<'a, 'tcx> {
 }
 
 impl<'a, 'tcx> TypeFolder<TyCtxt<'tcx>> for InferenceFudger<'a, 'tcx> {
-    fn interner(&self) -> TyCtxt<'tcx> {
+    fn cx(&self) -> TyCtxt<'tcx> {
         self.infcx.tcx
     }
 
@@ -196,7 +192,7 @@ impl<'a, 'tcx> TypeFolder<TyCtxt<'tcx>> for InferenceFudger<'a, 'tcx> {
                     // Recreate it with a fresh variable here.
                     let idx = vid.as_usize() - self.type_vars.0.start.as_usize();
                     let origin = self.type_vars.1[idx];
-                    self.infcx.next_ty_var(origin)
+                    self.infcx.next_ty_var_with_origin(origin)
                 } else {
                     // This variable was created before the
                     // "fudging". Since we refresh all type
@@ -245,7 +241,7 @@ impl<'a, 'tcx> TypeFolder<TyCtxt<'tcx>> for InferenceFudger<'a, 'tcx> {
                 // Recreate it with a fresh variable here.
                 let idx = vid.index() - self.const_vars.0.start.index();
                 let origin = self.const_vars.1[idx];
-                self.infcx.next_const_var(ct.ty(), origin)
+                self.infcx.next_const_var_with_origin(origin)
             } else {
                 ct
             }

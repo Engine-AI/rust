@@ -1,6 +1,7 @@
 #![allow(clippy::wildcard_imports, clippy::enum_glob_use)]
 
 use clippy_config::msrvs::{self, Msrv};
+use clippy_config::Conf;
 use clippy_utils::ast_utils::{eq_field_pat, eq_id, eq_maybe_qself, eq_pat, eq_path};
 use clippy_utils::diagnostics::span_lint_and_then;
 use clippy_utils::over;
@@ -51,9 +52,10 @@ pub struct UnnestedOrPatterns {
 }
 
 impl UnnestedOrPatterns {
-    #[must_use]
-    pub fn new(msrv: Msrv) -> Self {
-        Self { msrv }
+    pub fn new(conf: &'static Conf) -> Self {
+        Self {
+            msrv: conf.msrv.clone(),
+        }
     }
 }
 
@@ -121,7 +123,7 @@ fn remove_all_parens(pat: &mut P<Pat>) {
     struct Visitor;
     impl MutVisitor for Visitor {
         fn visit_pat(&mut self, pat: &mut P<Pat>) {
-            noop_visit_pat(pat, self);
+            walk_pat(self, pat);
             let inner = match &mut pat.kind {
                 Paren(i) => mem::replace(&mut i.kind, Wild),
                 _ => return,
@@ -137,12 +139,12 @@ fn insert_necessary_parens(pat: &mut P<Pat>) {
     struct Visitor;
     impl MutVisitor for Visitor {
         fn visit_pat(&mut self, pat: &mut P<Pat>) {
-            use ast::BindingAnnotation;
-            noop_visit_pat(pat, self);
+            use ast::BindingMode;
+            walk_pat(self, pat);
             let target = match &mut pat.kind {
                 // `i @ a | b`, `box a | b`, and `& mut? a | b`.
                 Ident(.., Some(p)) | Box(p) | Ref(p, _) if matches!(&p.kind, Or(ps) if ps.len() > 1) => p,
-                Ref(p, Mutability::Not) if matches!(p.kind, Ident(BindingAnnotation::MUT, ..)) => p, // `&(mut x)`
+                Ref(p, Mutability::Not) if matches!(p.kind, Ident(BindingMode::MUT, ..)) => p, // `&(mut x)`
                 _ => return,
             };
             target.kind = Paren(P(take_pat(target)));
@@ -160,7 +162,7 @@ fn unnest_or_patterns(pat: &mut P<Pat>) -> bool {
     impl MutVisitor for Visitor {
         fn visit_pat(&mut self, p: &mut P<Pat>) {
             // This is a bottom up transformation, so recurse first.
-            noop_visit_pat(p, self);
+            walk_pat(self, p);
 
             // Don't have an or-pattern? Just quit early on.
             let Or(alternatives) = &mut p.kind else { return };
@@ -189,7 +191,7 @@ fn unnest_or_patterns(pat: &mut P<Pat>) -> bool {
 
             // Deal with `Some(Some(0)) | Some(Some(1))`.
             if this_level_changed {
-                noop_visit_pat(p, self);
+                walk_pat(self, p);
             }
         }
     }
@@ -215,7 +217,7 @@ macro_rules! always_pat {
 /// in `alternatives[focus_idx + 1..]`.
 fn transform_with_focus_on_idx(alternatives: &mut ThinVec<P<Pat>>, focus_idx: usize) -> bool {
     // Extract the kind; we'll need to make some changes in it.
-    let mut focus_kind = mem::replace(&mut alternatives[focus_idx].kind, PatKind::Wild);
+    let mut focus_kind = mem::replace(&mut alternatives[focus_idx].kind, Wild);
     // We'll focus on `alternatives[focus_idx]`,
     // so we're draining from `alternatives[focus_idx + 1..]`.
     let start = focus_idx + 1;
@@ -232,7 +234,7 @@ fn transform_with_focus_on_idx(alternatives: &mut ThinVec<P<Pat>>, focus_idx: us
         // In the case of only two patterns, replacement adds net characters.
         | Ref(_, Mutability::Not)
         // Dealt with elsewhere.
-        | Or(_) | Paren(_) => false,
+        | Or(_) | Paren(_) | Deref(_) => false,
         // Transform `box x | ... | box y` into `box (x | y)`.
         //
         // The cases below until `Slice(...)` deal with *singleton* products.

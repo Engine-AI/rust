@@ -1,6 +1,7 @@
-#![feature(lint_reasons)]
 #![warn(clippy::let_unit_value)]
 #![allow(unused, clippy::no_effect, clippy::needless_late_init, path_statements)]
+
+//@no-rustfix: need to change the suggestion to a multipart suggestion
 
 macro_rules! let_and_return {
     ($n:expr) => {{
@@ -177,3 +178,21 @@ async fn issue10433() {
 }
 
 pub async fn issue11502(a: ()) {}
+
+pub fn issue12594() {
+    fn returns_unit() {}
+
+    fn returns_result<T>(res: T) -> Result<T, ()> {
+        Ok(res)
+    }
+
+    fn actual_test() {
+        // create first a unit value'd value
+        let res = returns_unit();
+        returns_result(res).unwrap();
+        returns_result(res).unwrap();
+        // make sure we replace only the first variable
+        let res = 1;
+        returns_result(res).unwrap();
+    }
+}

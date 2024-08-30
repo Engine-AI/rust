@@ -35,10 +35,10 @@ use crate::task::{Context, Poll};
 pub trait Future {
     /// The type of value produced on completion.
     #[stable(feature = "futures_api", since = "1.36.0")]
-    #[rustc_diagnostic_item = "FutureOutput"]
+    #[lang = "future_output"]
     type Output;
 
-    /// Attempt to resolve the future to a final value, registering
+    /// Attempts to resolve the future to a final value, registering
     /// the current task for wakeup if the value is not yet available.
     ///
     /// # Return value
@@ -81,7 +81,7 @@ pub trait Future {
     /// An implementation of `poll` should strive to return quickly, and should
     /// not block. Returning quickly prevents unnecessarily clogging up
     /// threads or event loops. If it is known ahead of time that a call to
-    /// `poll` may end up taking awhile, the work should be offloaded to a
+    /// `poll` may end up taking a while, the work should be offloaded to a
     /// thread pool (or something similar) to ensure that `poll` can return
     /// quickly.
     ///

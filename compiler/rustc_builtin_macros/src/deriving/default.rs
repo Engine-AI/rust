@@ -1,19 +1,20 @@
-use crate::deriving::generic::ty::*;
-use crate::deriving::generic::*;
-use crate::errors;
 use core::ops::ControlFlow;
+
 use rustc_ast as ast;
-use rustc_ast::visit::walk_list;
+use rustc_ast::visit::visit_opt;
 use rustc_ast::{attr, EnumDef, VariantData};
 use rustc_expand::base::{Annotatable, DummyResult, ExtCtxt};
-use rustc_span::symbol::Ident;
-use rustc_span::symbol::{kw, sym};
+use rustc_span::symbol::{kw, sym, Ident};
 use rustc_span::{ErrorGuaranteed, Span};
 use smallvec::SmallVec;
 use thin_vec::{thin_vec, ThinVec};
 
-pub fn expand_deriving_default(
-    cx: &mut ExtCtxt<'_>,
+use crate::deriving::generic::ty::*;
+use crate::deriving::generic::*;
+use crate::errors;
+
+pub(crate) fn expand_deriving_default(
+    cx: &ExtCtxt<'_>,
     span: Span,
     mitem: &ast::MetaItem,
     item: &Annotatable,
@@ -54,7 +55,7 @@ pub fn expand_deriving_default(
 }
 
 fn default_struct_substructure(
-    cx: &mut ExtCtxt<'_>,
+    cx: &ExtCtxt<'_>,
     trait_span: Span,
     substr: &Substructure<'_>,
     summary: &StaticFields,
@@ -81,7 +82,7 @@ fn default_struct_substructure(
 }
 
 fn default_enum_substructure(
-    cx: &mut ExtCtxt<'_>,
+    cx: &ExtCtxt<'_>,
     trait_span: Span,
     enum_def: &EnumDef,
 ) -> BlockOrExpr {
@@ -103,7 +104,7 @@ fn default_enum_substructure(
 }
 
 fn extract_default_variant<'a>(
-    cx: &mut ExtCtxt<'_>,
+    cx: &ExtCtxt<'_>,
     enum_def: &'a EnumDef,
     trait_span: Span,
 ) -> Result<&'a rustc_ast::Variant, ErrorGuaranteed> {
@@ -173,7 +174,7 @@ fn extract_default_variant<'a>(
 }
 
 fn validate_default_attribute(
-    cx: &mut ExtCtxt<'_>,
+    cx: &ExtCtxt<'_>,
     default_variant: &rustc_ast::Variant,
 ) -> Result<(), ErrorGuaranteed> {
     let attrs: SmallVec<[_; 1]> =
@@ -224,7 +225,7 @@ impl<'a, 'b> rustc_ast::visit::Visitor<'a> for DetectNonVariantDefaultAttr<'a, '
         self.visit_ident(v.ident);
         self.visit_vis(&v.vis);
         self.visit_variant_data(&v.data);
-        walk_list!(self, visit_anon_const, &v.disr_expr);
+        visit_opt!(self, visit_anon_const, &v.disr_expr);
         for attr in &v.attrs {
             rustc_ast::visit::walk_attribute(self, attr);
         }
@@ -240,7 +241,7 @@ fn has_a_default_variant(item: &Annotatable) -> bool {
             if v.attrs.iter().any(|attr| attr.has_name(kw::Default)) {
                 ControlFlow::Break(())
             } else {
-                // no need to subrecurse.
+                // no need to walk the variant, we are only looking for top level variants
                 ControlFlow::Continue(())
             }
         }

@@ -1,22 +1,24 @@
 //! See docs in `build/expr/mod.rs`.
 
-use rustc_index::{Idx, IndexVec};
-use rustc_middle::ty::util::IntTypeExt;
-use rustc_span::source_map::Spanned;
-use rustc_target::abi::{Abi, FieldIdx, Primitive};
-
-use crate::build::expr::as_place::PlaceBase;
-use crate::build::expr::category::{Category, RvalueFunc};
-use crate::build::{BlockAnd, BlockAndExtension, Builder, NeedsTemporary};
 use rustc_hir::lang_items::LangItem;
+use rustc_index::{Idx, IndexVec};
+use rustc_middle::bug;
 use rustc_middle::middle::region;
 use rustc_middle::mir::interpret::Scalar;
 use rustc_middle::mir::*;
 use rustc_middle::thir::*;
 use rustc_middle::ty::cast::{mir_cast_kind, CastTy};
 use rustc_middle::ty::layout::IntegerExt;
+use rustc_middle::ty::util::IntTypeExt;
 use rustc_middle::ty::{self, Ty, UpvarArgs};
+use rustc_span::source_map::Spanned;
 use rustc_span::{Span, DUMMY_SP};
+use rustc_target::abi::{Abi, FieldIdx, Primitive};
+use tracing::debug;
+
+use crate::build::expr::as_place::PlaceBase;
+use crate::build::expr::category::{Category, RvalueFunc};
+use crate::build::{BlockAnd, BlockAndExtension, Builder, NeedsTemporary};
 
 impl<'a, 'tcx> Builder<'a, 'tcx> {
     /// Returns an rvalue suitable for use until the end of the current
@@ -118,19 +120,12 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             ExprKind::Box { value } => {
                 let value_ty = this.thir[value].ty;
                 let tcx = this.tcx;
-
-                // `exchange_malloc` is unsafe but box is safe, so need a new scope.
-                let synth_scope = this.new_source_scope(
-                    expr_span,
-                    LintLevel::Inherited,
-                    Some(Safety::BuiltinUnsafe),
-                );
-                let synth_info = SourceInfo { span: expr_span, scope: synth_scope };
+                let source_info = this.source_info(expr_span);
 
                 let size = this.temp(tcx.types.usize, expr_span);
                 this.cfg.push_assign(
                     block,
-                    synth_info,
+                    source_info,
                     size,
                     Rvalue::NullaryOp(NullOp::SizeOf, value_ty),
                 );
@@ -138,7 +133,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 let align = this.temp(tcx.types.usize, expr_span);
                 this.cfg.push_assign(
                     block,
-                    synth_info,
+                    source_info,
                     align,
                     Rvalue::NullaryOp(NullOp::AlignOf, value_ty),
                 );
@@ -154,13 +149,14 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 let success = this.cfg.start_new_block();
                 this.cfg.terminate(
                     block,
-                    synth_info,
+                    source_info,
                     TerminatorKind::Call {
                         func: exchange_malloc,
-                        args: vec![
+                        args: [
                             Spanned { node: Operand::Move(size), span: DUMMY_SP },
                             Spanned { node: Operand::Move(align), span: DUMMY_SP },
-                        ],
+                        ]
+                        .into(),
                         destination: storage,
                         target: Some(success),
                         unwind: UnwindAction::Continue,
@@ -189,13 +185,9 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 this.cfg.push_assign(block, source_info, Place::from(result), box_);
 
                 // initialize the box contents:
-                unpack!(
-                    block = this.expr_into_dest(
-                        this.tcx.mk_place_deref(Place::from(result)),
-                        block,
-                        value,
-                    )
-                );
+                block = this
+                    .expr_into_dest(this.tcx.mk_place_deref(Place::from(result)), block, value)
+                    .into_block();
                 block.and(Rvalue::Use(Operand::Move(Place::from(result))))
             }
             ExprKind::Cast { source } => {
@@ -490,7 +482,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 block.and(Rvalue::Aggregate(result, operands))
             }
             ExprKind::Assign { .. } | ExprKind::AssignOp { .. } => {
-                block = unpack!(this.stmt_expr(block, expr_id, None));
+                block = this.stmt_expr(block, expr_id, None).into_block();
                 block.and(Rvalue::Use(Operand::Constant(Box::new(ConstOperand {
                     span: expr_span,
                     user_ty: None,
@@ -520,7 +512,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             | ExprKind::NeverToAny { .. }
             | ExprKind::Use { .. }
             | ExprKind::Borrow { .. }
-            | ExprKind::AddressOf { .. }
+            | ExprKind::RawBorrow { .. }
             | ExprKind::Adt { .. }
             | ExprKind::Loop { .. }
             | ExprKind::LogicalOp { .. }
@@ -574,13 +566,15 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 let result_tup = Ty::new_tup(self.tcx, &[ty, bool_ty]);
                 let result_value = self.temp(result_tup, span);
 
+                let op_with_overflow = op.wrapping_to_overflowing().unwrap();
+
                 self.cfg.push_assign(
                     block,
                     source_info,
                     result_value,
-                    Rvalue::CheckedBinaryOp(op, Box::new((lhs.to_copy(), rhs.to_copy()))),
+                    Rvalue::BinaryOp(op_with_overflow, Box::new((lhs.to_copy(), rhs.to_copy()))),
                 );
-                let val_fld = FieldIdx::new(0);
+                let val_fld = FieldIdx::ZERO;
                 let of_fld = FieldIdx::new(1);
 
                 let tcx = self.tcx;

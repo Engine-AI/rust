@@ -3,7 +3,6 @@
 //! This module is "publicly exported" through the `FromStr` implementations
 //! below.
 
-use crate::convert::{TryFrom, TryInto};
 use crate::error::Error;
 use crate::fmt;
 use crate::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
@@ -69,7 +68,7 @@ impl<'a> Parser<'a> {
         self.state.first().map(|&b| char::from(b))
     }
 
-    /// Read the next character from the input
+    /// Reads the next character from the input
     fn read_char(&mut self) -> Option<char> {
         self.state.split_first().map(|(&b, tail)| {
             self.state = tail;
@@ -78,7 +77,7 @@ impl<'a> Parser<'a> {
     }
 
     #[must_use]
-    /// Read the next character from the input if it matches the target.
+    /// Reads the next character from the input if it matches the target.
     fn read_given_char(&mut self, target: char) -> Option<()> {
         self.read_atomically(|p| {
             p.read_char().and_then(|c| if c == target { Some(()) } else { None })
@@ -166,7 +165,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Read an IPv4 address.
+    /// Reads an IPv4 address.
     fn read_ipv4_addr(&mut self) -> Option<Ipv4Addr> {
         self.read_atomically(|p| {
             let mut groups = [0; 4];
@@ -183,7 +182,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// Read an IPv6 Address.
+    /// Reads an IPv6 address.
     fn read_ipv6_addr(&mut self) -> Option<Ipv6Addr> {
         /// Read a chunk of an IPv6 address into `groups`. Returns the number
         /// of groups read, along with a bool indicating if an embedded
@@ -250,12 +249,12 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// Read an IP Address, either IPv4 or IPv6.
+    /// Reads an IP address, either IPv4 or IPv6.
     fn read_ip_addr(&mut self) -> Option<IpAddr> {
         self.read_ipv4_addr().map(IpAddr::V4).or_else(move || self.read_ipv6_addr().map(IpAddr::V6))
     }
 
-    /// Read a `:` followed by a port in base 10.
+    /// Reads a `:` followed by a port in base 10.
     fn read_port(&mut self) -> Option<u16> {
         self.read_atomically(|p| {
             p.read_given_char(':')?;
@@ -263,7 +262,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// Read a `%` followed by a scope ID in base 10.
+    /// Reads a `%` followed by a scope ID in base 10.
     fn read_scope_id(&mut self) -> Option<u32> {
         self.read_atomically(|p| {
             p.read_given_char('%')?;
@@ -271,7 +270,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// Read an IPv4 address with a port.
+    /// Reads an IPv4 address with a port.
     fn read_socket_addr_v4(&mut self) -> Option<SocketAddrV4> {
         self.read_atomically(|p| {
             let ip = p.read_ipv4_addr()?;
@@ -280,7 +279,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// Read an IPv6 address with a port.
+    /// Reads an IPv6 address with a port.
     fn read_socket_addr_v6(&mut self) -> Option<SocketAddrV6> {
         self.read_atomically(|p| {
             p.read_given_char('[')?;
@@ -293,7 +292,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// Read an IP address with a port
+    /// Reads an IP address with a port.
     fn read_socket_addr(&mut self) -> Option<SocketAddr> {
         self.read_socket_addr_v4()
             .map(SocketAddr::V4)

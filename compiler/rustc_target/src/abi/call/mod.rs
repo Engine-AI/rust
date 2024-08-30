@@ -1,9 +1,11 @@
-use crate::abi::{self, Abi, Align, FieldsShape, Size};
-use crate::abi::{HasDataLayout, TyAbiInterface, TyAndLayout};
-use crate::spec::{self, HasTargetSpec};
-use rustc_span::Symbol;
 use std::fmt;
 use std::str::FromStr;
+
+use rustc_macros::HashStable_Generic;
+use rustc_span::Symbol;
+
+use crate::abi::{self, Abi, Align, FieldsShape, HasDataLayout, Size, TyAbiInterface, TyAndLayout};
+use crate::spec::{self, HasTargetSpec, HasWasmCAbiOpt, WasmCAbi};
 
 mod aarch64;
 mod amdgpu;
@@ -28,6 +30,7 @@ mod wasm;
 mod x86;
 mod x86_64;
 mod x86_win64;
+mod xtensa;
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug, HashStable_Generic)]
 pub enum PassMode {
@@ -100,6 +103,8 @@ pub use attr_impl::ArgAttribute;
 #[allow(non_upper_case_globals)]
 #[allow(unused)]
 mod attr_impl {
+    use rustc_macros::HashStable_Generic;
+
     // The subset of llvm::Attribute needed for arguments, packed into a bitfield.
     #[derive(Clone, Copy, Default, Hash, PartialEq, Eq, HashStable_Generic)]
     pub struct ArgAttribute(u8);
@@ -233,8 +238,10 @@ impl Reg {
                 _ => panic!("unsupported integer: {self:?}"),
             },
             RegKind::Float => match self.size.bits() {
+                16 => dl.f16_align.abi,
                 32 => dl.f32_align.abi,
                 64 => dl.f64_align.abi,
+                128 => dl.f128_align.abi,
                 _ => panic!("unsupported float: {self:?}"),
             },
             RegKind::Vector => dl.vector_align(self.size).abi,
@@ -251,21 +258,38 @@ pub struct Uniform {
     /// The total size of the argument, which can be:
     /// * equal to `unit.size` (one scalar/vector),
     /// * a multiple of `unit.size` (an array of scalar/vectors),
-    /// * if `unit.kind` is `Integer`, the last element
-    ///   can be shorter, i.e., `{ i64, i64, i32 }` for
-    ///   64-bit integers with a total size of 20 bytes.
+    /// * if `unit.kind` is `Integer`, the last element can be shorter, i.e., `{ i64, i64, i32 }`
+    ///   for 64-bit integers with a total size of 20 bytes. When the argument is actually passed,
+    ///   this size will be rounded up to the nearest multiple of `unit.size`.
     pub total: Size,
+
+    /// Indicate that the argument is consecutive, in the sense that either all values need to be
+    /// passed in register, or all on the stack. If they are passed on the stack, there should be
+    /// no additional padding between elements.
+    pub is_consecutive: bool,
 }
 
 impl From<Reg> for Uniform {
     fn from(unit: Reg) -> Uniform {
-        Uniform { unit, total: unit.size }
+        Uniform { unit, total: unit.size, is_consecutive: false }
     }
 }
 
 impl Uniform {
     pub fn align<C: HasDataLayout>(&self, cx: &C) -> Align {
         self.unit.align(cx)
+    }
+
+    /// Pass using one or more values of the given type, without requiring them to be consecutive.
+    /// That is, some values may be passed in register and some on the stack.
+    pub fn new(unit: Reg, total: Size) -> Self {
+        Uniform { unit, total, is_consecutive: false }
+    }
+
+    /// Pass using one or more consecutive values of the given type. Either all values will be
+    /// passed in registers, or all on the stack.
+    pub fn consecutive(unit: Reg, total: Size) -> Self {
+        Uniform { unit, total, is_consecutive: true }
     }
 }
 
@@ -318,15 +342,24 @@ impl CastTarget {
         }
     }
 
-    pub fn size<C: HasDataLayout>(&self, _cx: &C) -> Size {
-        let mut size = self.rest.total;
-        for i in 0..self.prefix.iter().count() {
-            match self.prefix[i] {
-                Some(v) => size += v.size,
-                None => {}
-            }
-        }
-        return size;
+    /// When you only access the range containing valid data, you can use this unaligned size;
+    /// otherwise, use the safer `size` method.
+    pub fn unaligned_size<C: HasDataLayout>(&self, _cx: &C) -> Size {
+        // Prefix arguments are passed in specific designated registers
+        let prefix_size = self
+            .prefix
+            .iter()
+            .filter_map(|x| x.map(|reg| reg.size))
+            .fold(Size::ZERO, |acc, size| acc + size);
+        // Remaining arguments are passed in chunks of the unit size
+        let rest_size =
+            self.rest.unit.size * self.rest.total.bytes().div_ceil(self.rest.unit.size.bytes());
+
+        prefix_size + rest_size
+    }
+
+    pub fn size<C: HasDataLayout>(&self, cx: &C) -> Size {
+        self.unaligned_size(cx).align_to(self.align(cx))
     }
 
     pub fn align<C: HasDataLayout>(&self, cx: &C) -> Align {
@@ -420,7 +453,7 @@ impl<'a, Ty> TyAndLayout<'a, Ty> {
             Abi::Scalar(scalar) => {
                 let kind = match scalar.primitive() {
                     abi::Int(..) | abi::Pointer(_) => RegKind::Integer,
-                    abi::F16 | abi::F32 | abi::F64 | abi::F128 => RegKind::Float,
+                    abi::Float(_) => RegKind::Float,
                 };
                 Ok(HomogeneousAggregate::Homogeneous(Reg { kind, size: self.size }))
             }
@@ -619,6 +652,21 @@ impl<'a, Ty> ArgAbi<'a, Ty> {
         }
     }
 
+    /// Same as `make_indirect`, but for arguments that are ignored. Only needed for ABIs that pass
+    /// ZSTs indirectly.
+    pub fn make_indirect_from_ignore(&mut self) {
+        match self.mode {
+            PassMode::Ignore => {
+                self.mode = Self::indirect_pass_mode(&self.layout);
+            }
+            PassMode::Indirect { attrs: _, meta_attrs: _, on_stack: false } => {
+                // already indirect
+                return;
+            }
+            _ => panic!("Tried to make {:?} indirect (expected `PassMode::Ignore`)", self.mode),
+        }
+    }
+
     /// Pass this argument indirectly, by placing it at a fixed stack offset.
     /// This corresponds to the `byval` LLVM argument attribute.
     /// This is only valid for sized arguments.
@@ -697,10 +745,25 @@ impl<'a, Ty> ArgAbi<'a, Ty> {
 
     /// Checks if these two `ArgAbi` are equal enough to be considered "the same for all
     /// function call ABIs".
-    pub fn eq_abi(&self, other: &Self) -> bool {
+    pub fn eq_abi(&self, other: &Self) -> bool
+    where
+        Ty: PartialEq,
+    {
         // Ideally we'd just compare the `mode`, but that is not enough -- for some modes LLVM will look
         // at the type.
-        self.layout.eq_abi(&other.layout) && self.mode.eq_abi(&other.mode)
+        self.layout.eq_abi(&other.layout) && self.mode.eq_abi(&other.mode) && {
+            // `fn_arg_sanity_check` accepts `PassMode::Direct` for some aggregates.
+            // That elevates any type difference to an ABI difference since we just use the
+            // full Rust type as the LLVM argument/return type.
+            if matches!(self.mode, PassMode::Direct(..))
+                && matches!(self.layout.abi, Abi::Aggregate { .. })
+            {
+                // For aggregates in `Direct` mode to be compatible, the types need to be equal.
+                self.layout.ty == other.layout.ty
+            } else {
+                true
+            }
+        }
     }
 }
 
@@ -756,16 +819,21 @@ impl RiscvInterruptKind {
 /// Metadata describing how the arguments to a native function
 /// should be passed in order to respect the native ABI.
 ///
+/// The signature represented by this type may not match the MIR function signature.
+/// Certain attributes, like `#[track_caller]` can introduce additional arguments, which are present in [`FnAbi`], but not in `FnSig`.
+/// While this difference is rarely relevant, it should still be kept in mind.
+///
 /// I will do my best to describe this structure, but these
 /// comments are reverse-engineered and may be inaccurate. -NDM
 #[derive(Clone, PartialEq, Eq, Hash, HashStable_Generic)]
 pub struct FnAbi<'a, Ty> {
-    /// The LLVM types of each argument.
+    /// The type, layout, and information about how each argument is passed.
     pub args: Box<[ArgAbi<'a, Ty>]>,
 
-    /// LLVM return type.
+    /// The layout, type, and the way a value is returned from this function.
     pub ret: ArgAbi<'a, Ty>,
 
+    /// Marks this function as variadic (accepting a variable number of arguments).
     pub c_variadic: bool,
 
     /// The count of non-variadic arguments.
@@ -773,9 +841,9 @@ pub struct FnAbi<'a, Ty> {
     /// Should only be different from args.len() when c_variadic is true.
     /// This can be used to know whether an argument is variadic or not.
     pub fixed_count: u32,
-
+    /// The calling convention of this function.
     pub conv: Conv,
-
+    /// Indicates if an unwind may happen across a call to this function.
     pub can_unwind: bool,
 }
 
@@ -809,7 +877,7 @@ impl<'a, Ty> FnAbi<'a, Ty> {
     ) -> Result<(), AdjustForForeignAbiError>
     where
         Ty: TyAbiInterface<'a, C> + Copy,
-        C: HasDataLayout + HasTargetSpec,
+        C: HasDataLayout + HasTargetSpec + HasWasmCAbiOpt,
     {
         if abi == spec::abi::Abi::X86Interrupt {
             if let Some(arg) = self.args.first_mut() {
@@ -819,7 +887,8 @@ impl<'a, Ty> FnAbi<'a, Ty> {
             return Ok(());
         }
 
-        match &cx.target_spec().arch[..] {
+        let spec = cx.target_spec();
+        match &spec.arch[..] {
             "x86" => {
                 let flavor = if let spec::abi::Abi::Fastcall { .. }
                 | spec::abi::Abi::Vectorcall { .. } = abi
@@ -832,10 +901,10 @@ impl<'a, Ty> FnAbi<'a, Ty> {
             }
             "x86_64" => match abi {
                 spec::abi::Abi::SysV64 { .. } => x86_64::compute_abi_info(cx, self),
-                spec::abi::Abi::Win64 { .. } => x86_win64::compute_abi_info(self),
+                spec::abi::Abi::Win64 { .. } => x86_win64::compute_abi_info(cx, self),
                 _ => {
                     if cx.target_spec().is_like_windows {
-                        x86_win64::compute_abi_info(self)
+                        x86_win64::compute_abi_info(cx, self)
                     } else {
                         x86_64::compute_abi_info(cx, self)
                     }
@@ -859,7 +928,7 @@ impl<'a, Ty> FnAbi<'a, Ty> {
             "csky" => csky::compute_abi_info(self),
             "mips" | "mips32r6" => mips::compute_abi_info(cx, self),
             "mips64" | "mips64r6" => mips64::compute_abi_info(cx, self),
-            "powerpc" => powerpc::compute_abi_info(self),
+            "powerpc" => powerpc::compute_abi_info(cx, self),
             "powerpc64" => powerpc64::compute_abi_info(cx, self),
             "s390x" => s390x::compute_abi_info(cx, self),
             "msp430" => msp430::compute_abi_info(self),
@@ -873,14 +942,16 @@ impl<'a, Ty> FnAbi<'a, Ty> {
                 }
             }
             "hexagon" => hexagon::compute_abi_info(self),
+            "xtensa" => xtensa::compute_abi_info(cx, self),
             "riscv32" | "riscv64" => riscv::compute_abi_info(cx, self),
-            "wasm32" | "wasm64" => {
-                if cx.target_spec().adjust_abi(abi, self.c_variadic) == spec::abi::Abi::Wasm {
+            "wasm32" => {
+                if spec.os == "unknown" && cx.wasm_c_abi_opt() == WasmCAbi::Legacy {
                     wasm::compute_wasm_abi_info(self)
                 } else {
                     wasm::compute_c_abi_info(cx, self)
                 }
             }
+            "wasm64" => wasm::compute_c_abi_info(cx, self),
             "bpf" => bpf::compute_abi_info(self),
             arch => {
                 return Err(AdjustForForeignAbiError::Unsupported {
@@ -927,10 +998,11 @@ impl FromStr for Conv {
 }
 
 // Some types are used a lot. Make sure they don't unintentionally get bigger.
-#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+#[cfg(target_pointer_width = "64")]
 mod size_asserts {
-    use super::*;
     use rustc_data_structures::static_assert_size;
+
+    use super::*;
     // tidy-alphabetical-start
     static_assert_size!(ArgAbi<'_, usize>, 56);
     static_assert_size!(FnAbi<'_, usize>, 80);

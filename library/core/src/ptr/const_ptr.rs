@@ -48,12 +48,8 @@ impl<T: ?Sized> *const T {
             }
         }
 
-        // on bootstrap bump, remove unsafe block
-        #[cfg_attr(not(bootstrap), allow(unused_unsafe))]
-        // SAFETY: The two versions are equivalent at runtime.
-        unsafe {
-            const_eval_select((self as *const u8,), const_impl, runtime_impl)
-        }
+        #[allow(unused_unsafe)]
+        const_eval_select((self as *const u8,), const_impl, runtime_impl)
     }
 
     /// Casts to a pointer of another type.
@@ -65,7 +61,7 @@ impl<T: ?Sized> *const T {
         self as _
     }
 
-    /// Use the pointer value in a new pointer of another type.
+    /// Uses the pointer value in a new pointer of another type.
     ///
     /// In case `meta` is a (fat) pointer to an unsized type, this operation
     /// will ignore the pointer part, whereas for (thin) pointers to sized
@@ -116,71 +112,6 @@ impl<T: ?Sized> *const T {
         self as _
     }
 
-    /// Casts a pointer to its raw bits.
-    ///
-    /// This is equivalent to `as usize`, but is more specific to enhance readability.
-    /// The inverse method is [`from_bits`](#method.from_bits).
-    ///
-    /// In particular, `*p as usize` and `p as usize` will both compile for
-    /// pointers to numeric types but do very different things, so using this
-    /// helps emphasize that reading the bits was intentional.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// #![feature(ptr_to_from_bits)]
-    /// # #[cfg(not(miri))] { // doctest does not work with strict provenance
-    /// let array = [13, 42];
-    /// let p0: *const i32 = &array[0];
-    /// assert_eq!(<*const _>::from_bits(p0.to_bits()), p0);
-    /// let p1: *const i32 = &array[1];
-    /// assert_eq!(p1.to_bits() - p0.to_bits(), 4);
-    /// # }
-    /// ```
-    #[unstable(feature = "ptr_to_from_bits", issue = "91126")]
-    #[deprecated(
-        since = "1.67.0",
-        note = "replaced by the `expose_addr` method, or update your code \
-            to follow the strict provenance rules using its APIs"
-    )]
-    #[inline(always)]
-    pub fn to_bits(self) -> usize
-    where
-        T: Sized,
-    {
-        self as usize
-    }
-
-    /// Creates a pointer from its raw bits.
-    ///
-    /// This is equivalent to `as *const T`, but is more specific to enhance readability.
-    /// The inverse method is [`to_bits`](#method.to_bits).
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// #![feature(ptr_to_from_bits)]
-    /// # #[cfg(not(miri))] { // doctest does not work with strict provenance
-    /// use std::ptr::NonNull;
-    /// let dangling: *const u8 = NonNull::dangling().as_ptr();
-    /// assert_eq!(<*const u8>::from_bits(1), dangling);
-    /// # }
-    /// ```
-    #[unstable(feature = "ptr_to_from_bits", issue = "91126")]
-    #[deprecated(
-        since = "1.67.0",
-        note = "replaced by the `ptr::from_exposed_addr` function, or update \
-            your code to follow the strict provenance rules using its APIs"
-    )]
-    #[allow(fuzzy_provenance_casts)] // this is an unstable and semi-deprecated cast function
-    #[inline(always)]
-    pub fn from_bits(bits: usize) -> Self
-    where
-        T: Sized,
-    {
-        bits as Self
-    }
-
     /// Gets the "address" portion of the pointer.
     ///
     /// This is similar to `self as usize`, which semantically discards *provenance* and
@@ -191,7 +122,7 @@ impl<T: ?Sized> *const T {
     ///
     /// If using those APIs is not possible because there is no way to preserve a pointer with the
     /// required provenance, then Strict Provenance might not be for you. Use pointer-integer casts
-    /// or [`expose_addr`][pointer::expose_addr] and [`from_exposed_addr`][from_exposed_addr]
+    /// or [`expose_provenance`][pointer::expose_provenance] and [`with_exposed_provenance`][with_exposed_provenance]
     /// instead. However, note that this makes your code less portable and less amenable to tools
     /// that check for compliance with the Rust memory model.
     ///
@@ -214,35 +145,35 @@ impl<T: ?Sized> *const T {
         unsafe { mem::transmute(self.cast::<()>()) }
     }
 
-    /// Gets the "address" portion of the pointer, and 'exposes' the "provenance" part for future
-    /// use in [`from_exposed_addr`][].
+    /// Exposes the "provenance" part of the pointer for future use in
+    /// [`with_exposed_provenance`][] and returns the "address" portion.
     ///
     /// This is equivalent to `self as usize`, which semantically discards *provenance* and
     /// *address-space* information. Furthermore, this (like the `as` cast) has the implicit
     /// side-effect of marking the provenance as 'exposed', so on platforms that support it you can
-    /// later call [`from_exposed_addr`][] to reconstitute the original pointer including its
+    /// later call [`with_exposed_provenance`][] to reconstitute the original pointer including its
     /// provenance. (Reconstructing address space information, if required, is your responsibility.)
     ///
     /// Using this method means that code is *not* following [Strict
     /// Provenance][super#strict-provenance] rules. Supporting
-    /// [`from_exposed_addr`][] complicates specification and reasoning and may not be supported by
+    /// [`with_exposed_provenance`][] complicates specification and reasoning and may not be supported by
     /// tools that help you to stay conformant with the Rust memory model, so it is recommended to
     /// use [`addr`][pointer::addr] wherever possible.
     ///
     /// On most platforms this will produce a value with the same bytes as the original pointer,
     /// because all the bytes are dedicated to describing the address. Platforms which need to store
     /// additional information in the pointer may not support this operation, since the 'expose'
-    /// side-effect which is required for [`from_exposed_addr`][] to work is typically not
+    /// side-effect which is required for [`with_exposed_provenance`][] to work is typically not
     /// available.
     ///
     /// It is unclear whether this method can be given a satisfying unambiguous specification. This
     /// API and its claimed semantics are part of [Exposed Provenance][super#exposed-provenance].
     ///
-    /// [`from_exposed_addr`]: from_exposed_addr
+    /// [`with_exposed_provenance`]: with_exposed_provenance
     #[must_use]
     #[inline(always)]
     #[unstable(feature = "exposed_provenance", issue = "95228")]
-    pub fn expose_addr(self) -> usize {
+    pub fn expose_provenance(self) -> usize {
         // FIXME(strict_provenance_magic): I am magic and should be a compiler intrinsic.
         self.cast::<()>() as usize
     }
@@ -308,24 +239,7 @@ impl<T: ?Sized> *const T {
     /// # Safety
     ///
     /// When calling this method, you have to ensure that *either* the pointer is null *or*
-    /// all of the following is true:
-    ///
-    /// * The pointer must be properly aligned.
-    ///
-    /// * It must be "dereferenceable" in the sense defined in [the module documentation].
-    ///
-    /// * The pointer must point to an initialized instance of `T`.
-    ///
-    /// * You must enforce Rust's aliasing rules, since the returned lifetime `'a` is
-    ///   arbitrarily chosen and does not necessarily reflect the actual lifetime of the data.
-    ///   In particular, while this reference exists, the memory the pointer points to must
-    ///   not get mutated (except inside `UnsafeCell`).
-    ///
-    /// This applies even if the result of this method is unused!
-    /// (The part about being initialized is not yet fully decided, but until
-    /// it is, the only safe approach is to ensure that they are indeed initialized.)
-    ///
-    /// [the module documentation]: crate::ptr#safety
+    /// the pointer is [convertible to a reference](crate::ptr#pointer-to-reference-conversion).
     ///
     /// # Examples
     ///
@@ -334,7 +248,7 @@ impl<T: ?Sized> *const T {
     ///
     /// unsafe {
     ///     if let Some(val_back) = ptr.as_ref() {
-    ///         println!("We got back the value: {val_back}!");
+    ///         assert_eq!(val_back, &10);
     ///     }
     /// }
     /// ```
@@ -350,7 +264,7 @@ impl<T: ?Sized> *const T {
     ///
     /// unsafe {
     ///     let val_back = &*ptr;
-    ///     println!("We got back the value: {val_back}!");
+    ///     assert_eq!(val_back, &10);
     /// }
     /// ```
     #[stable(feature = "ptr_as_ref", since = "1.9.0")]
@@ -362,6 +276,38 @@ impl<T: ?Sized> *const T {
         if self.is_null() { None } else { unsafe { Some(&*self) } }
     }
 
+    /// Returns a shared reference to the value behind the pointer.
+    /// If the pointer may be null or the value may be uninitialized, [`as_uninit_ref`] must be used instead.
+    /// If the pointer may be null, but the value is known to have been initialized, [`as_ref`] must be used instead.
+    ///
+    /// [`as_ref`]: #method.as_ref
+    /// [`as_uninit_ref`]: #method.as_uninit_ref
+    ///
+    /// # Safety
+    ///
+    /// When calling this method, you have to ensure that
+    /// the pointer is [convertible to a reference](crate::ptr#pointer-to-reference-conversion).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(ptr_as_ref_unchecked)]
+    /// let ptr: *const u8 = &10u8 as *const u8;
+    ///
+    /// unsafe {
+    ///     assert_eq!(ptr.as_ref_unchecked(), &10);
+    /// }
+    /// ```
+    // FIXME: mention it in the docs for `as_ref` and `as_uninit_ref` once stabilized.
+    #[unstable(feature = "ptr_as_ref_unchecked", issue = "122034")]
+    #[rustc_const_unstable(feature = "const_ptr_as_ref", issue = "91822")]
+    #[inline]
+    #[must_use]
+    pub const unsafe fn as_ref_unchecked<'a>(self) -> &'a T {
+        // SAFETY: the caller must guarantee that `self` is valid for a reference
+        unsafe { &*self }
+    }
+
     /// Returns `None` if the pointer is null, or else returns a shared reference to
     /// the value wrapped in `Some`. In contrast to [`as_ref`], this does not require
     /// that the value has to be initialized.
@@ -371,20 +317,7 @@ impl<T: ?Sized> *const T {
     /// # Safety
     ///
     /// When calling this method, you have to ensure that *either* the pointer is null *or*
-    /// all of the following is true:
-    ///
-    /// * The pointer must be properly aligned.
-    ///
-    /// * It must be "dereferenceable" in the sense defined in [the module documentation].
-    ///
-    /// * You must enforce Rust's aliasing rules, since the returned lifetime `'a` is
-    ///   arbitrarily chosen and does not necessarily reflect the actual lifetime of the data.
-    ///   In particular, while this reference exists, the memory the pointer points to must
-    ///   not get mutated (except inside `UnsafeCell`).
-    ///
-    /// This applies even if the result of this method is unused!
-    ///
-    /// [the module documentation]: crate::ptr#safety
+    /// the pointer is [convertible to a reference](crate::ptr#pointer-to-reference-conversion).
     ///
     /// # Examples
     ///
@@ -395,7 +328,7 @@ impl<T: ?Sized> *const T {
     ///
     /// unsafe {
     ///     if let Some(val_back) = ptr.as_uninit_ref() {
-    ///         println!("We got back the value: {}!", val_back.assume_init());
+    ///         assert_eq!(val_back.assume_init(), 10);
     ///     }
     /// }
     /// ```
@@ -411,36 +344,26 @@ impl<T: ?Sized> *const T {
         if self.is_null() { None } else { Some(unsafe { &*(self as *const MaybeUninit<T>) }) }
     }
 
-    /// Calculates the offset from a pointer.
+    /// Adds an offset to a pointer.
     ///
     /// `count` is in units of T; e.g., a `count` of 3 represents a pointer
     /// offset of `3 * size_of::<T>()` bytes.
     ///
     /// # Safety
     ///
-    /// If any of the following conditions are violated, the result is Undefined
-    /// Behavior:
+    /// If any of the following conditions are violated, the result is Undefined Behavior:
     ///
-    /// * Both the starting and resulting pointer must be either in bounds or one
-    ///   byte past the end of the same [allocated object].
+    /// * The computed offset, `count * size_of::<T>()` bytes, must not overflow `isize`.
     ///
-    /// * The computed offset, **in bytes**, cannot overflow an `isize`.
+    /// * If the computed offset is non-zero, then `self` must be derived from a pointer to some
+    ///   [allocated object], and the entire memory range between `self` and the result must be in
+    ///   bounds of that allocated object. In particular, this range must not "wrap around" the edge
+    ///   of the address space.
     ///
-    /// * The offset being in bounds cannot rely on "wrapping around" the address
-    ///   space. That is, the infinite-precision sum, **in bytes** must fit in a usize.
-    ///
-    /// The compiler and standard library generally tries to ensure allocations
-    /// never reach a size where an offset is a concern. For instance, `Vec`
-    /// and `Box` ensure they never allocate more than `isize::MAX` bytes, so
-    /// `vec.as_ptr().add(vec.len())` is always safe.
-    ///
-    /// Most platforms fundamentally can't even construct such an allocation.
-    /// For instance, no known 64-bit platform can ever serve a request
-    /// for 2<sup>63</sup> bytes due to page-table limitations or splitting the address space.
-    /// However, some 32-bit and 16-bit platforms may successfully serve a request for
-    /// more than `isize::MAX` bytes with things like Physical Address
-    /// Extension. As such, memory acquired directly from allocators or memory
-    /// mapped files *may* be too large to handle with this function.
+    /// Allocated objects can never be larger than `isize::MAX` bytes, so if the computed offset
+    /// stays in bounds of the allocated object, it is guaranteed to satisfy the first requirement.
+    /// This implies, for instance, that `vec.as_ptr().add(vec.len())` (for `vec: Vec<T>`) is always
+    /// safe.
     ///
     /// Consider using [`wrapping_offset`] instead if these constraints are
     /// difficult to satisfy. The only advantage of this method is that it
@@ -456,8 +379,8 @@ impl<T: ?Sized> *const T {
     /// let ptr: *const u8 = s.as_ptr();
     ///
     /// unsafe {
-    ///     println!("{}", *ptr.offset(1) as char);
-    ///     println!("{}", *ptr.offset(2) as char);
+    ///     assert_eq!(*ptr.offset(1) as char, '2');
+    ///     assert_eq!(*ptr.offset(2) as char, '3');
     /// }
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
@@ -528,19 +451,21 @@ impl<T: ?Sized> *const T {
     /// # Examples
     ///
     /// ```
+    /// # use std::fmt::Write;
     /// // Iterate using a raw pointer in increments of two elements
     /// let data = [1u8, 2, 3, 4, 5];
     /// let mut ptr: *const u8 = data.as_ptr();
     /// let step = 2;
     /// let end_rounded_up = ptr.wrapping_offset(6);
     ///
-    /// // This loop prints "1, 3, 5, "
+    /// let mut out = String::new();
     /// while ptr != end_rounded_up {
     ///     unsafe {
-    ///         print!("{}, ", *ptr);
+    ///         write!(&mut out, "{}, ", *ptr).unwrap();
     ///     }
     ///     ptr = ptr.wrapping_offset(step);
     /// }
+    /// assert_eq!(out.as_str(), "1, 3, 5, ");
     /// ```
     #[stable(feature = "ptr_wrapping_offset", since = "1.16.0")]
     #[must_use = "returns a new pointer rather than modifying its argument"]
@@ -629,38 +554,21 @@ impl<T: ?Sized> *const T {
     ///
     /// # Safety
     ///
-    /// If any of the following conditions are violated, the result is Undefined
-    /// Behavior:
+    /// If any of the following conditions are violated, the result is Undefined Behavior:
     ///
-    /// * Both `self` and `origin` must be either in bounds or one
-    ///   byte past the end of the same [allocated object].
+    /// * `self` and `origin` must either
     ///
-    /// * Both pointers must be *derived from* a pointer to the same object.
-    ///   (See below for an example.)
+    ///   * point to the same address, or
+    ///   * both be *derived from* a pointer to the same [allocated object], and the memory range between
+    ///     the two pointers must be in bounds of that object. (See below for an example.)
     ///
     /// * The distance between the pointers, in bytes, must be an exact multiple
     ///   of the size of `T`.
     ///
-    /// * The distance between the pointers, **in bytes**, cannot overflow an `isize`.
-    ///
-    /// * The distance being in bounds cannot rely on "wrapping around" the address space.
-    ///
-    /// Rust types are never larger than `isize::MAX` and Rust allocations never wrap around the
-    /// address space, so two pointers within some value of any Rust type `T` will always satisfy
-    /// the last two conditions. The standard library also generally ensures that allocations
-    /// never reach a size where an offset is a concern. For instance, `Vec` and `Box` ensure they
-    /// never allocate more than `isize::MAX` bytes, so `ptr_into_vec.offset_from(vec.as_ptr())`
-    /// always satisfies the last two conditions.
-    ///
-    /// Most platforms fundamentally can't even construct such a large allocation.
-    /// For instance, no known 64-bit platform can ever serve a request
-    /// for 2<sup>63</sup> bytes due to page-table limitations or splitting the address space.
-    /// However, some 32-bit and 16-bit platforms may successfully serve a request for
-    /// more than `isize::MAX` bytes with things like Physical Address
-    /// Extension. As such, memory acquired directly from allocators or memory
-    /// mapped files *may* be too large to handle with this function.
-    /// (Note that [`offset`] and [`add`] also have a similar limitation and hence cannot be used on
-    /// such large allocations either.)
+    /// As a consequence, the absolute distance between the pointers, in bytes, computed on
+    /// mathematical integers (without "wrapping around"), cannot overflow an `isize`. This is
+    /// implied by the in-bounds requirement, and the fact that no allocated object can be larger
+    /// than `isize::MAX` bytes.
     ///
     /// The requirement for pointers to be derived from the same allocated object is primarily
     /// needed for `const`-compatibility: the distance between pointers into *different* allocated
@@ -699,14 +607,14 @@ impl<T: ?Sized> *const T {
     /// let ptr1 = Box::into_raw(Box::new(0u8)) as *const u8;
     /// let ptr2 = Box::into_raw(Box::new(1u8)) as *const u8;
     /// let diff = (ptr2 as isize).wrapping_sub(ptr1 as isize);
-    /// // Make ptr2_other an "alias" of ptr2, but derived from ptr1.
-    /// let ptr2_other = (ptr1 as *const u8).wrapping_offset(diff);
+    /// // Make ptr2_other an "alias" of ptr2.add(1), but derived from ptr1.
+    /// let ptr2_other = (ptr1 as *const u8).wrapping_offset(diff).wrapping_offset(1);
     /// assert_eq!(ptr2 as usize, ptr2_other as usize);
     /// // Since ptr2_other and ptr2 are derived from pointers to different objects,
     /// // computing their offset is undefined behavior, even though
-    /// // they point to the same address!
+    /// // they point to addresses that are in-bounds of the same object!
     /// unsafe {
-    ///     let zero = ptr2_other.offset_from(ptr2); // Undefined Behavior
+    ///     let one = ptr2_other.offset_from(ptr2); // Undefined Behavior! ⚠️
     /// }
     /// ```
     #[stable(feature = "ptr_offset_from", since = "1.47.0")]
@@ -818,16 +726,11 @@ impl<T: ?Sized> *const T {
                 true
             }
 
-            #[cfg_attr(not(bootstrap), allow(unused_unsafe))]
-            // on bootstrap bump, remove unsafe block
-            // SAFETY: This function is only used to provide the same check that the const eval
-            // interpreter does at runtime.
-            unsafe {
-                intrinsics::const_eval_select((this, origin), comptime, runtime)
-            }
+            #[allow(unused_unsafe)]
+            intrinsics::const_eval_select((this, origin), comptime, runtime)
         }
 
-        assert_unsafe_precondition!(
+        ub_checks::assert_unsafe_precondition!(
             check_language_ub,
             "ptr::sub_ptr requires `self >= origin`",
             (
@@ -902,36 +805,26 @@ impl<T: ?Sized> *const T {
         }
     }
 
-    /// Calculates the offset from a pointer (convenience for `.offset(count as isize)`).
+    /// Adds an offset to a pointer (convenience for `.offset(count as isize)`).
     ///
     /// `count` is in units of T; e.g., a `count` of 3 represents a pointer
     /// offset of `3 * size_of::<T>()` bytes.
     ///
     /// # Safety
     ///
-    /// If any of the following conditions are violated, the result is Undefined
-    /// Behavior:
+    /// If any of the following conditions are violated, the result is Undefined Behavior:
     ///
-    /// * Both the starting and resulting pointer must be either in bounds or one
-    ///   byte past the end of the same [allocated object].
+    /// * The computed offset, `count * size_of::<T>()` bytes, must not overflow `isize`.
     ///
-    /// * The computed offset, **in bytes**, cannot overflow an `isize`.
+    /// * If the computed offset is non-zero, then `self` must be derived from a pointer to some
+    ///   [allocated object], and the entire memory range between `self` and the result must be in
+    ///   bounds of that allocated object. In particular, this range must not "wrap around" the edge
+    ///   of the address space.
     ///
-    /// * The offset being in bounds cannot rely on "wrapping around" the address
-    ///   space. That is, the infinite-precision sum must fit in a `usize`.
-    ///
-    /// The compiler and standard library generally tries to ensure allocations
-    /// never reach a size where an offset is a concern. For instance, `Vec`
-    /// and `Box` ensure they never allocate more than `isize::MAX` bytes, so
-    /// `vec.as_ptr().add(vec.len())` is always safe.
-    ///
-    /// Most platforms fundamentally can't even construct such an allocation.
-    /// For instance, no known 64-bit platform can ever serve a request
-    /// for 2<sup>63</sup> bytes due to page-table limitations or splitting the address space.
-    /// However, some 32-bit and 16-bit platforms may successfully serve a request for
-    /// more than `isize::MAX` bytes with things like Physical Address
-    /// Extension. As such, memory acquired directly from allocators or memory
-    /// mapped files *may* be too large to handle with this function.
+    /// Allocated objects can never be larger than `isize::MAX` bytes, so if the computed offset
+    /// stays in bounds of the allocated object, it is guaranteed to satisfy the first requirement.
+    /// This implies, for instance, that `vec.as_ptr().add(vec.len())` (for `vec: Vec<T>`) is always
+    /// safe.
     ///
     /// Consider using [`wrapping_add`] instead if these constraints are
     /// difficult to satisfy. The only advantage of this method is that it
@@ -947,8 +840,8 @@ impl<T: ?Sized> *const T {
     /// let ptr: *const u8 = s.as_ptr();
     ///
     /// unsafe {
-    ///     println!("{}", *ptr.add(1) as char);
-    ///     println!("{}", *ptr.add(2) as char);
+    ///     assert_eq!(*ptr.add(1), b'2');
+    ///     assert_eq!(*ptr.add(2), b'3');
     /// }
     /// ```
     #[stable(feature = "pointer_methods", since = "1.26.0")]
@@ -985,7 +878,7 @@ impl<T: ?Sized> *const T {
         unsafe { self.cast::<u8>().add(count).with_metadata_of(self) }
     }
 
-    /// Calculates the offset from a pointer (convenience for
+    /// Subtracts an offset from a pointer (convenience for
     /// `.offset((count as isize).wrapping_neg())`).
     ///
     /// `count` is in units of T; e.g., a `count` of 3 represents a pointer
@@ -993,29 +886,19 @@ impl<T: ?Sized> *const T {
     ///
     /// # Safety
     ///
-    /// If any of the following conditions are violated, the result is Undefined
-    /// Behavior:
+    /// If any of the following conditions are violated, the result is Undefined Behavior:
     ///
-    /// * Both the starting and resulting pointer must be either in bounds or one
-    ///   byte past the end of the same [allocated object].
+    /// * The computed offset, `count * size_of::<T>()` bytes, must not overflow `isize`.
     ///
-    /// * The computed offset cannot exceed `isize::MAX` **bytes**.
+    /// * If the computed offset is non-zero, then `self` must be derived from a pointer to some
+    ///   [allocated object], and the entire memory range between `self` and the result must be in
+    ///   bounds of that allocated object. In particular, this range must not "wrap around" the edge
+    ///   of the address space.
     ///
-    /// * The offset being in bounds cannot rely on "wrapping around" the address
-    ///   space. That is, the infinite-precision sum must fit in a usize.
-    ///
-    /// The compiler and standard library generally tries to ensure allocations
-    /// never reach a size where an offset is a concern. For instance, `Vec`
-    /// and `Box` ensure they never allocate more than `isize::MAX` bytes, so
-    /// `vec.as_ptr().add(vec.len()).sub(vec.len())` is always safe.
-    ///
-    /// Most platforms fundamentally can't even construct such an allocation.
-    /// For instance, no known 64-bit platform can ever serve a request
-    /// for 2<sup>63</sup> bytes due to page-table limitations or splitting the address space.
-    /// However, some 32-bit and 16-bit platforms may successfully serve a request for
-    /// more than `isize::MAX` bytes with things like Physical Address
-    /// Extension. As such, memory acquired directly from allocators or memory
-    /// mapped files *may* be too large to handle with this function.
+    /// Allocated objects can never be larger than `isize::MAX` bytes, so if the computed offset
+    /// stays in bounds of the allocated object, it is guaranteed to satisfy the first requirement.
+    /// This implies, for instance, that `vec.as_ptr().add(vec.len())` (for `vec: Vec<T>`) is always
+    /// safe.
     ///
     /// Consider using [`wrapping_sub`] instead if these constraints are
     /// difficult to satisfy. The only advantage of this method is that it
@@ -1031,15 +914,14 @@ impl<T: ?Sized> *const T {
     ///
     /// unsafe {
     ///     let end: *const u8 = s.as_ptr().add(3);
-    ///     println!("{}", *end.sub(1) as char);
-    ///     println!("{}", *end.sub(2) as char);
+    ///     assert_eq!(*end.sub(1), b'3');
+    ///     assert_eq!(*end.sub(2), b'2');
     /// }
     /// ```
     #[stable(feature = "pointer_methods", since = "1.26.0")]
     #[must_use = "returns a new pointer rather than modifying its argument"]
     #[rustc_const_stable(feature = "const_ptr_offset", since = "1.61.0")]
-    // We could always go back to wrapping if unchecked becomes unacceptable
-    #[rustc_allow_const_fn_unstable(const_int_unchecked_arith)]
+    #[rustc_allow_const_fn_unstable(unchecked_neg)]
     #[inline(always)]
     #[cfg_attr(miri, track_caller)] // even without panics, this helps for Miri backtraces
     pub const unsafe fn sub(self, count: usize) -> Self
@@ -1053,7 +935,7 @@ impl<T: ?Sized> *const T {
             // SAFETY: the caller must uphold the safety contract for `offset`.
             // Because the pointee is *not* a ZST, that means that `count` is
             // at most `isize::MAX`, and thus the negation cannot overflow.
-            unsafe { self.offset(intrinsics::unchecked_sub(0, count as isize)) }
+            unsafe { self.offset((count as isize).unchecked_neg()) }
         }
     }
 
@@ -1114,19 +996,21 @@ impl<T: ?Sized> *const T {
     /// # Examples
     ///
     /// ```
+    /// # use std::fmt::Write;
     /// // Iterate using a raw pointer in increments of two elements
     /// let data = [1u8, 2, 3, 4, 5];
     /// let mut ptr: *const u8 = data.as_ptr();
     /// let step = 2;
     /// let end_rounded_up = ptr.wrapping_add(6);
     ///
-    /// // This loop prints "1, 3, 5, "
+    /// let mut out = String::new();
     /// while ptr != end_rounded_up {
     ///     unsafe {
-    ///         print!("{}, ", *ptr);
+    ///         write!(&mut out, "{}, ", *ptr).unwrap();
     ///     }
     ///     ptr = ptr.wrapping_add(step);
     /// }
+    /// assert_eq!(out, "1, 3, 5, ");
     /// ```
     #[stable(feature = "pointer_methods", since = "1.26.0")]
     #[must_use = "returns a new pointer rather than modifying its argument"]
@@ -1193,19 +1077,21 @@ impl<T: ?Sized> *const T {
     /// # Examples
     ///
     /// ```
+    /// # use std::fmt::Write;
     /// // Iterate using a raw pointer in increments of two elements (backwards)
     /// let data = [1u8, 2, 3, 4, 5];
     /// let mut ptr: *const u8 = data.as_ptr();
     /// let start_rounded_down = ptr.wrapping_sub(2);
     /// ptr = ptr.wrapping_add(4);
     /// let step = 2;
-    /// // This loop prints "5, 3, 1, "
+    /// let mut out = String::new();
     /// while ptr != start_rounded_down {
     ///     unsafe {
-    ///         print!("{}, ", *ptr);
+    ///         write!(&mut out, "{}, ", *ptr).unwrap();
     ///     }
     ///     ptr = ptr.wrapping_sub(step);
     /// }
+    /// assert_eq!(out, "5, 3, 1, ");
     /// ```
     #[stable(feature = "pointer_methods", since = "1.26.0")]
     #[must_use = "returns a new pointer rather than modifying its argument"]
@@ -1412,8 +1298,6 @@ impl<T: ?Sized> *const T {
     /// # Examples
     ///
     /// ```
-    /// #![feature(pointer_is_aligned)]
-    ///
     /// // On some platforms, the alignment of i32 is less than 4.
     /// #[repr(align(4))]
     /// struct AlignedI32(i32);
@@ -1436,7 +1320,6 @@ impl<T: ?Sized> *const T {
     /// underlying allocation.
     ///
     /// ```
-    /// #![feature(pointer_is_aligned)]
     /// #![feature(const_pointer_is_aligned)]
     ///
     /// // On some platforms, the alignment of primitives is less than their size.
@@ -1462,7 +1345,6 @@ impl<T: ?Sized> *const T {
     /// pointer is aligned, even if the compiletime pointer wasn't aligned.
     ///
     /// ```
-    /// #![feature(pointer_is_aligned)]
     /// #![feature(const_pointer_is_aligned)]
     ///
     /// // On some platforms, the alignment of primitives is less than their size.
@@ -1488,7 +1370,6 @@ impl<T: ?Sized> *const T {
     /// runtime and compiletime.
     ///
     /// ```
-    /// #![feature(pointer_is_aligned)]
     /// #![feature(const_pointer_is_aligned)]
     ///
     /// // On some platforms, the alignment of primitives is less than their size.
@@ -1512,7 +1393,7 @@ impl<T: ?Sized> *const T {
     /// [tracking issue]: https://github.com/rust-lang/rust/issues/104203
     #[must_use]
     #[inline]
-    #[unstable(feature = "pointer_is_aligned", issue = "96284")]
+    #[stable(feature = "pointer_is_aligned", since = "1.79.0")]
     #[rustc_const_unstable(feature = "const_pointer_is_aligned", issue = "104203")]
     pub const fn is_aligned(self) -> bool
     where
@@ -1533,7 +1414,7 @@ impl<T: ?Sized> *const T {
     /// # Examples
     ///
     /// ```
-    /// #![feature(pointer_is_aligned)]
+    /// #![feature(pointer_is_aligned_to)]
     ///
     /// // On some platforms, the alignment of i32 is less than 4.
     /// #[repr(align(4))]
@@ -1562,7 +1443,7 @@ impl<T: ?Sized> *const T {
     /// cannot be stricter aligned than the reference's underlying allocation.
     ///
     /// ```
-    /// #![feature(pointer_is_aligned)]
+    /// #![feature(pointer_is_aligned_to)]
     /// #![feature(const_pointer_is_aligned)]
     ///
     /// // On some platforms, the alignment of i32 is less than 4.
@@ -1587,7 +1468,7 @@ impl<T: ?Sized> *const T {
     /// pointer is aligned, even if the compiletime pointer wasn't aligned.
     ///
     /// ```
-    /// #![feature(pointer_is_aligned)]
+    /// #![feature(pointer_is_aligned_to)]
     /// #![feature(const_pointer_is_aligned)]
     ///
     /// // On some platforms, the alignment of i32 is less than 4.
@@ -1611,7 +1492,7 @@ impl<T: ?Sized> *const T {
     /// runtime and compiletime.
     ///
     /// ```
-    /// #![feature(pointer_is_aligned)]
+    /// #![feature(pointer_is_aligned_to)]
     /// #![feature(const_pointer_is_aligned)]
     ///
     /// const _: () = {
@@ -1627,7 +1508,7 @@ impl<T: ?Sized> *const T {
     /// [tracking issue]: https://github.com/rust-lang/rust/issues/104203
     #[must_use]
     #[inline]
-    #[unstable(feature = "pointer_is_aligned", issue = "96284")]
+    #[unstable(feature = "pointer_is_aligned_to", issue = "96284")]
     #[rustc_const_unstable(feature = "const_pointer_is_aligned", issue = "104203")]
     pub const fn is_aligned_to(self, align: usize) -> bool {
         if !align.is_power_of_two() {
@@ -1648,11 +1529,7 @@ impl<T: ?Sized> *const T {
         // The cast to `()` is used to
         //   1. deal with fat pointers; and
         //   2. ensure that `align_offset` (in `const_impl`) doesn't actually try to compute an offset.
-        #[cfg_attr(not(bootstrap), allow(unused_unsafe))] // on bootstrap bump, remove unsafe block
-        // SAFETY: The two versions are equivalent at runtime.
-        unsafe {
-            const_eval_select((self.cast::<()>(), align), const_impl, runtime_impl)
-        }
+        const_eval_select((self.cast::<()>(), align), const_impl, runtime_impl)
     }
 }
 
@@ -1667,16 +1544,15 @@ impl<T> *const [T] {
     /// # Examples
     ///
     /// ```rust
-    /// #![feature(slice_ptr_len)]
-    ///
     /// use std::ptr;
     ///
     /// let slice: *const [i8] = ptr::slice_from_raw_parts(ptr::null(), 3);
     /// assert_eq!(slice.len(), 3);
     /// ```
     #[inline]
-    #[unstable(feature = "slice_ptr_len", issue = "71146")]
-    #[rustc_const_unstable(feature = "const_slice_ptr_len", issue = "71146")]
+    #[stable(feature = "slice_ptr_len", since = "1.79.0")]
+    #[rustc_const_stable(feature = "const_slice_ptr_len", since = "1.79.0")]
+    #[rustc_allow_const_fn_unstable(ptr_metadata)]
     pub const fn len(self) -> usize {
         metadata(self)
     }
@@ -1686,15 +1562,14 @@ impl<T> *const [T] {
     /// # Examples
     ///
     /// ```
-    /// #![feature(slice_ptr_len)]
     /// use std::ptr;
     ///
     /// let slice: *const [i8] = ptr::slice_from_raw_parts(ptr::null(), 3);
     /// assert!(!slice.is_empty());
     /// ```
     #[inline(always)]
-    #[unstable(feature = "slice_ptr_len", issue = "71146")]
-    #[rustc_const_unstable(feature = "const_slice_ptr_len", issue = "71146")]
+    #[stable(feature = "slice_ptr_len", since = "1.79.0")]
+    #[rustc_const_stable(feature = "const_slice_ptr_len", since = "1.79.0")]
     pub const fn is_empty(self) -> bool {
         self.len() == 0
     }
@@ -1824,7 +1699,7 @@ impl<T, const N: usize> *const [T; N] {
     /// # Examples
     ///
     /// ```
-    /// #![feature(array_ptr_get, slice_ptr_len)]
+    /// #![feature(array_ptr_get)]
     ///
     /// let arr: *const [i32; 3] = &[1, 2, 4] as *const [i32; 3];
     /// let slice: *const [i32] = arr.as_slice();
@@ -1870,6 +1745,7 @@ impl<T: ?Sized> Ord for *const T {
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<T: ?Sized> PartialOrd for *const T {
     #[inline]
+    #[allow(ambiguous_wide_pointer_comparisons)]
     fn partial_cmp(&self, other: &*const T) -> Option<Ordering> {
         Some(self.cmp(other))
     }

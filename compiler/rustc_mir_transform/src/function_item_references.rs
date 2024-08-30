@@ -5,7 +5,8 @@ use rustc_middle::mir::*;
 use rustc_middle::ty::{self, EarlyBinder, GenericArgsRef, Ty, TyCtxt};
 use rustc_session::lint::builtin::FUNCTION_ITEM_REFERENCES;
 use rustc_span::source_map::Spanned;
-use rustc_span::{symbol::sym, Span};
+use rustc_span::symbol::sym;
+use rustc_span::Span;
 use rustc_target::spec::abi::Abi;
 
 use crate::{errors, MirLint};
@@ -121,7 +122,7 @@ impl<'tcx> FunctionItemRefChecker<'_, 'tcx> {
     fn is_fn_ref(ty: Ty<'tcx>) -> Option<(DefId, GenericArgsRef<'tcx>)> {
         let referent_ty = match ty.kind() {
             ty::Ref(_, referent_ty, _) => Some(referent_ty),
-            ty::RawPtr(ty_and_mut) => Some(&ty_and_mut.ty),
+            ty::RawPtr(referent_ty, _) => Some(referent_ty),
             _ => None,
         };
         referent_ty
@@ -158,7 +159,7 @@ impl<'tcx> FunctionItemRefChecker<'_, 'tcx> {
             .lint_root;
         // FIXME: use existing printing routines to print the function signature
         let fn_sig = self.tcx.fn_sig(fn_id).instantiate(self.tcx, fn_args);
-        let unsafety = fn_sig.unsafety().prefix_str();
+        let unsafety = fn_sig.safety().prefix_str();
         let abi = match fn_sig.abi() {
             Abi::Rust => String::from(""),
             other_abi => {

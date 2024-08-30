@@ -19,20 +19,20 @@
 //! Errors are reported if we are in the suitable configuration but
 //! the required condition is not met.
 
-use crate::errors;
 use rustc_ast::{self as ast, Attribute, NestedMetaItem};
 use rustc_data_structures::fx::FxHashSet;
 use rustc_data_structures::unord::UnordSet;
 use rustc_hir::def_id::LocalDefId;
-use rustc_hir::intravisit;
-use rustc_hir::Node as HirNode;
-use rustc_hir::{ImplItemKind, ItemKind as HirItem, TraitItemKind};
+use rustc_hir::{intravisit, ImplItemKind, ItemKind as HirItem, Node as HirNode, TraitItemKind};
 use rustc_middle::dep_graph::{label_strs, DepNode, DepNodeExt};
 use rustc_middle::hir::nested_filter;
 use rustc_middle::ty::TyCtxt;
 use rustc_span::symbol::{sym, Symbol};
 use rustc_span::Span;
 use thin_vec::ThinVec;
+use tracing::debug;
+
+use crate::errors;
 
 const LOADED_FROM_DISK: Symbol = sym::loaded_from_disk;
 const EXCEPT: Symbol = sym::except;
@@ -65,7 +65,7 @@ const BASE_HIR: &[&str] = &[
 const BASE_IMPL: &[&str] =
     &[label_strs::associated_item_def_ids, label_strs::generics_of, label_strs::impl_trait_header];
 
-/// DepNodes for mir_built/Optimized, which is relevant in "executable"
+/// DepNodes for exported mir bodies, which is relevant in "executable"
 /// code, i.e., functions+methods
 const BASE_MIR: &[&str] = &[label_strs::optimized_mir, label_strs::promoted_mir];
 
@@ -133,7 +133,7 @@ struct Assertion {
     loaded_from_disk: Labels,
 }
 
-pub fn check_dirty_clean_annotations(tcx: TyCtxt<'_>) {
+pub(crate) fn check_dirty_clean_annotations(tcx: TyCtxt<'_>) {
     if !tcx.sess.opts.unstable_opts.query_dep_graph {
         return;
     }
@@ -148,7 +148,7 @@ pub fn check_dirty_clean_annotations(tcx: TyCtxt<'_>) {
 
         let crate_items = tcx.hir_crate_items(());
 
-        for id in crate_items.items() {
+        for id in crate_items.free_items() {
             dirty_clean_visitor.check_item(id.owner_id.def_id);
         }
 
@@ -174,7 +174,7 @@ pub fn check_dirty_clean_annotations(tcx: TyCtxt<'_>) {
     })
 }
 
-pub struct DirtyCleanVisitor<'tcx> {
+struct DirtyCleanVisitor<'tcx> {
     tcx: TyCtxt<'tcx>,
     checked_attrs: FxHashSet<ast::AttrId>,
 }
@@ -429,7 +429,7 @@ fn expect_associated_value(tcx: TyCtxt<'_>, item: &NestedMetaItem) -> Symbol {
 /// A visitor that collects all `#[rustc_clean]` attributes from
 /// the HIR. It is used to verify that we really ran checks for all annotated
 /// nodes.
-pub struct FindAllAttrs<'tcx> {
+struct FindAllAttrs<'tcx> {
     tcx: TyCtxt<'tcx>,
     found_attrs: Vec<&'tcx Attribute>,
 }

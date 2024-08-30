@@ -1,4 +1,4 @@
-//@ unit-test: GVN
+//@ test-mir-pass: GVN
 //@ compile-flags: -O
 // EMIT_MIR_FOR_EACH_PANIC_STRATEGY
 
@@ -11,8 +11,8 @@ fn main() {
     // CHECK-LABEL: fn main(
     // CHECK: debug x => [[x:_.*]];
     // CHECK: (*{{_.*}}) = const 42_i32;
-    // CHECK: [[tmp:_.*]] = (*{{_.*}});
-    // CHECK: [[x]] = [[tmp]];
+    // CHECK: [[tmp:_.*]] = copy (*{{_.*}});
+    // CHECK: [[x]] = copy [[tmp]];
     let x = *(#[rustc_box]
     Box::new(42))
         + 0;

@@ -4,15 +4,13 @@
 // switch to use those structures instead.
 
 use std::fmt::{self, Write};
-use std::mem;
-use std::ops;
+use std::{mem, ops};
 
 use rustc_ast::{LitKind, MetaItem, MetaItemKind, NestedMetaItem};
 use rustc_data_structures::fx::FxHashSet;
 use rustc_feature::Features;
 use rustc_session::parse::ParseSess;
 use rustc_span::symbol::{sym, Symbol};
-
 use rustc_span::Span;
 
 use crate::html::escape::Escape;
@@ -511,6 +509,7 @@ impl<'a> fmt::Display for Display<'a> {
                         "wasi" => "WASI",
                         "watchos" => "watchOS",
                         "windows" => "Windows",
+                        "visionos" => "visionOS",
                         _ => "",
                     },
                     (sym::target_arch, Some(arch)) => match arch.as_str() {

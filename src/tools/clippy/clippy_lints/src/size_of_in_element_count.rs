@@ -1,10 +1,7 @@
-//! Lint on use of `size_of` or `size_of_val` of T in an expression
-//! expecting a count of T
-
 use clippy_utils::diagnostics::span_lint_and_help;
 use rustc_hir::{BinOpKind, Expr, ExprKind};
 use rustc_lint::{LateContext, LateLintPass};
-use rustc_middle::ty::{self, Ty, TypeAndMut};
+use rustc_middle::ty::{self, Ty};
 use rustc_session::declare_lint_pass;
 use rustc_span::sym;
 
@@ -107,7 +104,7 @@ fn get_pointee_ty_and_count_expr<'tcx>(
         && METHODS.iter().any(|m| *m == method_ident)
 
         // Get the pointee type
-        && let ty::RawPtr(TypeAndMut { ty: pointee_ty, .. }) =
+        && let ty::RawPtr(pointee_ty, _) =
             cx.typeck_results().expr_ty(ptr_self).kind()
     {
         return Some((*pointee_ty, count));

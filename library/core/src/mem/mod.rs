@@ -5,13 +5,9 @@
 
 #![stable(feature = "rust1", since = "1.0.0")]
 
-use crate::clone;
-use crate::cmp;
-use crate::fmt;
-use crate::hash;
-use crate::intrinsics;
+use crate::alloc::Layout;
 use crate::marker::DiscriminantKind;
-use crate::ptr;
+use crate::{clone, cmp, fmt, hash, intrinsics, ptr};
 
 mod manually_drop;
 #[stable(feature = "manually_drop", since = "1.20.0")]
@@ -23,7 +19,7 @@ pub use maybe_uninit::MaybeUninit;
 
 mod transmutability;
 #[unstable(feature = "transmutability", issue = "99571")]
-pub use transmutability::{Assume, BikeshedIntrinsicFrom};
+pub use transmutability::{Assume, TransmuteFrom};
 
 #[stable(feature = "rust1", since = "1.0.0")]
 #[doc(inline)]
@@ -359,6 +355,12 @@ pub const fn size_of_val<T: ?Sized>(val: &T) -> usize {
 ///     - a [slice], then the length of the slice tail must be an initialized
 ///       integer, and the size of the *entire value*
 ///       (dynamic tail length + statically sized prefix) must fit in `isize`.
+///       For the special case where the dynamic tail length is 0, this function
+///       is safe to call.
+//        NOTE: the reason this is safe is that if an overflow were to occur already with size 0,
+//        then we would stop compilation as even the "statically known" part of the type would
+//        already be too big (or the call may be in dead code and optimized away, but then it
+//        doesn't matter).
 ///     - a [trait object], then the vtable part of the pointer must point
 ///       to a valid vtable acquired by an unsizing coercion, and the size
 ///       of the *entire value* (dynamic tail length + statically sized prefix)
@@ -506,6 +508,8 @@ pub const fn align_of_val<T: ?Sized>(val: &T) -> usize {
 ///     - a [slice], then the length of the slice tail must be an initialized
 ///       integer, and the size of the *entire value*
 ///       (dynamic tail length + statically sized prefix) must fit in `isize`.
+///       For the special case where the dynamic tail length is 0, this function
+///       is safe to call.
 ///     - a [trait object], then the vtable part of the pointer must point
 ///       to a valid vtable acquired by an unsizing coercion, and the size
 ///       of the *entire value* (dynamic tail length + statically sized prefix)
@@ -726,63 +730,9 @@ pub unsafe fn uninitialized<T>() -> T {
 #[rustc_const_unstable(feature = "const_swap", issue = "83163")]
 #[rustc_diagnostic_item = "mem_swap"]
 pub const fn swap<T>(x: &mut T, y: &mut T) {
-    // NOTE(eddyb) SPIR-V's Logical addressing model doesn't allow for arbitrary
-    // reinterpretation of values as (chunkable) byte arrays, and the loop in the
-    // block optimization in `swap_slice` is hard to rewrite back
-    // into the (unoptimized) direct swapping implementation, so we disable it.
-    #[cfg(not(any(target_arch = "spirv")))]
-    {
-        // For types that are larger multiples of their alignment, the simple way
-        // tends to copy the whole thing to stack rather than doing it one part
-        // at a time, so instead treat them as one-element slices and piggy-back
-        // the slice optimizations that will split up the swaps.
-        if const { size_of::<T>() / align_of::<T>() > 2 } {
-            // SAFETY: exclusive references always point to one non-overlapping
-            // element and are non-null and properly aligned.
-            return unsafe { ptr::swap_nonoverlapping(x, y, 1) };
-        }
-    }
-
-    // If a scalar consists of just a small number of alignment units, let
-    // the codegen just swap those pieces directly, as it's likely just a
-    // few instructions and anything else is probably overcomplicated.
-    //
-    // Most importantly, this covers primitives and simd types that tend to
-    // have size=align where doing anything else can be a pessimization.
-    // (This will also be used for ZSTs, though any solution works for them.)
-    swap_simple(x, y);
-}
-
-/// Same as [`swap`] semantically, but always uses the simple implementation.
-///
-/// Used elsewhere in `mem` and `ptr` at the bottom layer of calls.
-#[rustc_const_unstable(feature = "const_swap", issue = "83163")]
-#[inline]
-pub(crate) const fn swap_simple<T>(x: &mut T, y: &mut T) {
-    // We arrange for this to typically be called with small types,
-    // so this reads-and-writes approach is actually better than using
-    // copy_nonoverlapping as it easily puts things in LLVM registers
-    // directly and doesn't end up inlining allocas.
-    // And LLVM actually optimizes it to 3×memcpy if called with
-    // a type larger than it's willing to keep in a register.
-    // Having typed reads and writes in MIR here is also good as
-    // it lets Miri and CTFE understand them better, including things
-    // like enforcing type validity for them.
-    // Importantly, read+copy_nonoverlapping+write introduces confusing
-    // asymmetry to the behaviour where one value went through read+write
-    // whereas the other was copied over by the intrinsic (see #94371).
-    // Furthermore, using only read+write here benefits limited backends
-    // such as SPIR-V that work on an underlying *typed* view of memory,
-    // and thus have trouble with Rust's untyped memory operations.
-
-    // SAFETY: exclusive references are always valid to read/write,
-    // including being aligned, and nothing here panics so it's drop-safe.
-    unsafe {
-        let a = ptr::read(x);
-        let b = ptr::read(y);
-        ptr::write(x, b);
-        ptr::write(y, a);
-    }
+    // SAFETY: `&mut` guarantees these are typed readable and writable
+    // as well as non-overlapping.
+    unsafe { intrinsics::typed_swap(x, y) }
 }
 
 /// Replaces `dest` with the default value of `T`, returning the previous `dest` value.
@@ -1289,6 +1239,10 @@ pub trait SizedTypeProperties: Sized {
     #[doc(hidden)]
     #[unstable(feature = "sized_type_properties", issue = "none")]
     const IS_ZST: bool = size_of::<Self>() == 0;
+
+    #[doc(hidden)]
+    #[unstable(feature = "sized_type_properties", issue = "none")]
+    const LAYOUT: Layout = Layout::new::<Self>();
 }
 #[doc(hidden)]
 #[unstable(feature = "sized_type_properties", issue = "none")]
@@ -1320,6 +1274,20 @@ impl<T> SizedTypeProperties for T {}
 /// // ^^^ error[E0616]: field `private` of struct `Struct` is private
 /// ```
 ///
+/// Only [`Sized`] fields are supported, but the container may be unsized:
+/// ```
+/// # use core::mem;
+/// #[repr(C)]
+/// pub struct Struct {
+///     a: u8,
+///     b: [u8],
+/// }
+///
+/// assert_eq!(mem::offset_of!(Struct, a), 0); // OK
+/// // assert_eq!(mem::offset_of!(Struct, b), 1);
+/// // ^^^ error[E0277]: doesn't have a size known at compile-time
+/// ```
+///
 /// Note that type layout is, in general, [subject to change and
 /// platform-specific](https://doc.rust-lang.org/reference/type-layout.html). If
 /// layout stability is required, consider using an [explicit `repr` attribute].
@@ -1337,7 +1305,7 @@ impl<T> SizedTypeProperties for T {}
 /// type B = Wrapper<u8, i8>;
 ///
 /// // Not necessarily identical even though `u8` and `i8` have the same layout!
-/// // assert!(mem::offset_of!(A, 1), mem::offset_of!(B, 1));
+/// // assert_eq!(mem::offset_of!(A, 1), mem::offset_of!(B, 1));
 ///
 /// #[repr(transparent)]
 /// struct U8(u8);
@@ -1345,12 +1313,12 @@ impl<T> SizedTypeProperties for T {}
 /// type C = Wrapper<u8, U8>;
 ///
 /// // Not necessarily identical even though `u8` and `U8` have the same layout!
-/// // assert!(mem::offset_of!(A, 1), mem::offset_of!(C, 1));
+/// // assert_eq!(mem::offset_of!(A, 1), mem::offset_of!(C, 1));
 ///
 /// struct Empty<T>(core::marker::PhantomData<T>);
 ///
 /// // Not necessarily identical even though `PhantomData` always has the same layout!
-/// // assert!(mem::offset_of!(Empty<u8>, 0), mem::offset_of!(Empty<i8>, 0));
+/// // assert_eq!(mem::offset_of!(Empty<u8>, 0), mem::offset_of!(Empty<i8>, 0));
 /// ```
 ///
 /// [explicit `repr` attribute]: https://doc.rust-lang.org/reference/type-layout.html#representations
@@ -1358,7 +1326,8 @@ impl<T> SizedTypeProperties for T {}
 /// # Examples
 ///
 /// ```
-/// #![feature(offset_of_enum, offset_of_nested)]
+/// # #![cfg_attr(bootstrap, feature(offset_of_nested))]
+/// #![feature(offset_of_enum)]
 ///
 /// use std::mem;
 /// #[repr(C)]
@@ -1394,8 +1363,8 @@ impl<T> SizedTypeProperties for T {}
 /// assert_eq!(mem::offset_of!(Option<&u8>, Some.0), 0);
 /// ```
 #[stable(feature = "offset_of", since = "1.77.0")]
-#[allow_internal_unstable(builtin_syntax, hint_must_use)]
+#[allow_internal_unstable(builtin_syntax)]
 pub macro offset_of($Container:ty, $($fields:expr)+ $(,)?) {
     // The `{}` is for better error messages
-    crate::hint::must_use({builtin # offset_of($Container, $($fields)+)})
+    {builtin # offset_of($Container, $($fields)+)}
 }

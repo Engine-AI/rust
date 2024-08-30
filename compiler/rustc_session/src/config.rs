@@ -3,40 +3,43 @@
 
 #![allow(rustc::untranslatable_diagnostic)] // FIXME: make this translatable
 
-pub use crate::options::*;
-
-use crate::errors::FileWriteFail;
-use crate::search_paths::SearchPath;
-use crate::utils::{CanonicalizedPath, NativeLib, NativeLibKind};
-use crate::{filesearch, lint, HashStableContext};
-use crate::{EarlyDiagCtxt, Session};
-use rustc_data_structures::fx::{FxHashMap, FxHashSet, FxIndexMap, FxIndexSet};
-use rustc_data_structures::stable_hasher::{StableOrd, ToStableHashKey};
-use rustc_errors::emitter::HumanReadableErrorType;
-use rustc_errors::{ColorConfig, DiagArgValue, DiagCtxtFlags, IntoDiagArg};
-use rustc_feature::UnstableFeatures;
-use rustc_span::edition::{Edition, DEFAULT_EDITION, EDITION_NAME_LIST, LATEST_STABLE_EDITION};
-use rustc_span::source_map::FilePathMapping;
-use rustc_span::symbol::{sym, Symbol};
-use rustc_span::{FileName, FileNameDisplayPreference, RealFileName, SourceFileHashAlgorithm};
-use rustc_target::abi::Align;
-use rustc_target::spec::LinkSelfContainedComponents;
-use rustc_target::spec::{PanicStrategy, RelocModel, SanitizerSet, SplitDebuginfo};
-use rustc_target::spec::{Target, TargetTriple, TargetWarnings, TARGETS};
 use std::collections::btree_map::{
     Iter as BTreeMapIter, Keys as BTreeMapKeysIter, Values as BTreeMapValuesIter,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
-use std::fmt;
-use std::fs;
 use std::hash::Hash;
-use std::iter;
 use std::path::{Path, PathBuf};
 use std::str::{self, FromStr};
 use std::sync::LazyLock;
+use std::{fmt, fs, iter};
 
+use rustc_data_structures::fx::{FxHashSet, FxIndexMap};
+use rustc_data_structures::stable_hasher::{StableOrd, ToStableHashKey};
+use rustc_errors::emitter::HumanReadableErrorType;
+use rustc_errors::{ColorConfig, DiagArgValue, DiagCtxtFlags, IntoDiagArg};
+use rustc_feature::UnstableFeatures;
+use rustc_macros::{Decodable, Encodable, HashStable_Generic};
+use rustc_span::edition::{Edition, DEFAULT_EDITION, EDITION_NAME_LIST, LATEST_STABLE_EDITION};
+use rustc_span::source_map::FilePathMapping;
+use rustc_span::{
+    sym, FileName, FileNameDisplayPreference, RealFileName, SourceFileHashAlgorithm, Symbol,
+};
+use rustc_target::spec::{
+    FramePointer, LinkSelfContainedComponents, LinkerFeatures, SplitDebuginfo, Target, TargetTriple,
+};
+use tracing::debug;
+
+use crate::errors::FileWriteFail;
+pub use crate::options::*;
+use crate::search_paths::SearchPath;
+use crate::utils::{CanonicalizedPath, NativeLib, NativeLibKind};
+use crate::{filesearch, lint, EarlyDiagCtxt, HashStableContext, Session};
+
+mod cfg;
 pub mod sigpipe;
+
+pub use cfg::{Cfg, CheckCfg, ExpectedValues};
 
 /// The different settings that the `-C strip` flag can have.
 #[derive(Clone, Copy, PartialEq, Hash, Debug)]
@@ -146,8 +149,49 @@ pub enum InstrumentCoverage {
 /// Individual flag values controlled by `-Z coverage-options`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub struct CoverageOptions {
-    /// Add branch coverage instrumentation.
-    pub branch: bool,
+    pub level: CoverageLevel,
+
+    /// `-Z coverage-options=no-mir-spans`: Don't extract block coverage spans
+    /// from MIR statements/terminators, making it easier to inspect/debug
+    /// branch and MC/DC coverage mappings.
+    ///
+    /// For internal debugging only. If other code changes would make it hard
+    /// to keep supporting this flag, remove it.
+    pub no_mir_spans: bool,
+}
+
+/// Controls whether branch coverage or MC/DC coverage is enabled.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub enum CoverageLevel {
+    /// Instrument for coverage at the MIR block level.
+    Block,
+    /// Also instrument branch points (includes block coverage).
+    Branch,
+    /// Same as branch coverage, but also adds branch instrumentation for
+    /// certain boolean expressions that are not directly used for branching.
+    ///
+    /// For example, in the following code, `b` does not directly participate
+    /// in a branch, but condition coverage will instrument it as its own
+    /// artificial branch:
+    /// ```
+    /// # let (a, b) = (false, true);
+    /// let x = a && b;
+    /// //           ^ last operand
+    /// ```
+    ///
+    /// This level is mainly intended to be a stepping-stone towards full MC/DC
+    /// instrumentation, so it might be removed in the future when MC/DC is
+    /// sufficiently complete, or if it is making MC/DC changes difficult.
+    Condition,
+    /// Instrument for MC/DC. Mostly a superset of condition coverage, but might
+    /// differ in some corner cases.
+    Mcdc,
+}
+
+impl Default for CoverageLevel {
+    fn default() -> Self {
+        Self::Block
+    }
 }
 
 /// Settings for `-Z instrument-xray` flag.
@@ -292,6 +336,48 @@ impl LinkSelfContained {
     }
 }
 
+/// The different values that `-Z linker-features` can take on the CLI: a list of individually
+/// enabled or disabled features used during linking.
+///
+/// There is no need to enable or disable them in bulk. Each feature is fine-grained, and can be
+/// used to turn `LinkerFeatures` on or off, without needing to change the linker flavor:
+/// - using the system lld, or the self-contained `rust-lld` linker
+/// - using a C/C++ compiler to drive the linker (not yet exposed on the CLI)
+/// - etc.
+#[derive(Default, Copy, Clone, PartialEq, Debug)]
+pub struct LinkerFeaturesCli {
+    /// The linker features that are enabled on the CLI, using the `+feature` syntax.
+    pub enabled: LinkerFeatures,
+
+    /// The linker features that are disabled on the CLI, using the `-feature` syntax.
+    pub disabled: LinkerFeatures,
+}
+
+impl LinkerFeaturesCli {
+    /// Accumulates an enabled or disabled feature as specified on the CLI, if possible.
+    /// For example: `+lld`, and `-lld`.
+    pub(crate) fn handle_cli_feature(&mut self, feature: &str) -> Option<()> {
+        // Duplicate flags are reduced as we go, the last occurrence wins:
+        // `+feature,-feature,+feature` only enables the feature, and does not record it as both
+        // enabled and disabled on the CLI.
+        // We also only expose `+/-lld` at the moment, as it's currenty the only implemented linker
+        // feature and toggling `LinkerFeatures::CC` would be a noop.
+        match feature {
+            "+lld" => {
+                self.enabled.insert(LinkerFeatures::LLD);
+                self.disabled.remove(LinkerFeatures::LLD);
+                Some(())
+            }
+            "-lld" => {
+                self.disabled.insert(LinkerFeatures::LLD);
+                self.enabled.remove(LinkerFeatures::LLD);
+                Some(())
+            }
+            _ => None,
+        }
+    }
+}
+
 /// Used with `-Z assert-incr-state`.
 #[derive(Clone, Copy, PartialEq, Hash, Debug)]
 pub enum IncrementalStateAssertion {
@@ -313,8 +399,25 @@ pub struct LocationDetail {
 }
 
 impl LocationDetail {
-    pub fn all() -> Self {
+    pub(crate) fn all() -> Self {
         Self { file: true, line: true, column: true }
+    }
+}
+
+/// Values for the `-Z fmt-debug` flag.
+#[derive(Copy, Clone, PartialEq, Hash, Debug)]
+pub enum FmtDebug {
+    /// Derive fully-featured implementation
+    Full,
+    /// Print only type name, without fields
+    Shallow,
+    /// `#[derive(Debug)]` and `{:?}` are no-ops
+    None,
+}
+
+impl FmtDebug {
+    pub(crate) fn all() -> [Symbol; 3] {
+        [sym::full, sym::none, sym::shallow]
     }
 }
 
@@ -403,6 +506,7 @@ impl FromStr for SplitDwarfKind {
 #[derive(Encodable, Decodable)]
 pub enum OutputType {
     Bitcode,
+    ThinLinkBitcode,
     Assembly,
     LlvmAssembly,
     Mir,
@@ -412,9 +516,11 @@ pub enum OutputType {
     DepInfo,
 }
 
-// Safety: Trivial C-Style enums have a stable sort order across compilation sessions.
-unsafe impl StableOrd for OutputType {
+impl StableOrd for OutputType {
     const CAN_USE_UNSTABLE_SORT: bool = true;
+
+    // Trivial C-Style enums have a stable sort order across compilation sessions.
+    const THIS_IMPLEMENTATION_HAS_BEEN_TRIPLE_CHECKED: () = ();
 }
 
 impl<HCX: HashStableContext> ToStableHashKey<HCX> for OutputType {
@@ -430,6 +536,7 @@ impl OutputType {
         match *self {
             OutputType::Exe | OutputType::DepInfo | OutputType::Metadata => true,
             OutputType::Bitcode
+            | OutputType::ThinLinkBitcode
             | OutputType::Assembly
             | OutputType::LlvmAssembly
             | OutputType::Mir
@@ -440,6 +547,7 @@ impl OutputType {
     pub fn shorthand(&self) -> &'static str {
         match *self {
             OutputType::Bitcode => "llvm-bc",
+            OutputType::ThinLinkBitcode => "thin-link-bitcode",
             OutputType::Assembly => "asm",
             OutputType::LlvmAssembly => "llvm-ir",
             OutputType::Mir => "mir",
@@ -456,6 +564,7 @@ impl OutputType {
             "llvm-ir" => OutputType::LlvmAssembly,
             "mir" => OutputType::Mir,
             "llvm-bc" => OutputType::Bitcode,
+            "thin-link-bitcode" => OutputType::ThinLinkBitcode,
             "obj" => OutputType::Object,
             "metadata" => OutputType::Metadata,
             "link" => OutputType::Exe,
@@ -466,8 +575,9 @@ impl OutputType {
 
     fn shorthands_display() -> String {
         format!(
-            "`{}`, `{}`, `{}`, `{}`, `{}`, `{}`, `{}`, `{}`",
+            "`{}`, `{}`, `{}`, `{}`, `{}`, `{}`, `{}`, `{}`, `{}`",
             OutputType::Bitcode.shorthand(),
+            OutputType::ThinLinkBitcode.shorthand(),
             OutputType::Assembly.shorthand(),
             OutputType::LlvmAssembly.shorthand(),
             OutputType::Mir.shorthand(),
@@ -481,6 +591,7 @@ impl OutputType {
     pub fn extension(&self) -> &'static str {
         match *self {
             OutputType::Bitcode => "bc",
+            OutputType::ThinLinkBitcode => "indexing.o",
             OutputType::Assembly => "s",
             OutputType::LlvmAssembly => "ll",
             OutputType::Mir => "mir",
@@ -497,9 +608,11 @@ impl OutputType {
             | OutputType::LlvmAssembly
             | OutputType::Mir
             | OutputType::DepInfo => true,
-            OutputType::Bitcode | OutputType::Object | OutputType::Metadata | OutputType::Exe => {
-                false
-            }
+            OutputType::Bitcode
+            | OutputType::ThinLinkBitcode
+            | OutputType::Object
+            | OutputType::Metadata
+            | OutputType::Exe => false,
         }
     }
 }
@@ -508,7 +621,7 @@ impl OutputType {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ErrorOutputType {
     /// Output meant for the consumption of humans.
-    HumanReadable(HumanReadableErrorType),
+    HumanReadable(HumanReadableErrorType, ColorConfig),
     /// Output that's consumed by other tools such as `rustfix` or the `RLS`.
     Json {
         /// Render the JSON in a human readable way (with indents and newlines).
@@ -516,12 +629,13 @@ pub enum ErrorOutputType {
         /// The JSON output includes a `rendered` field that includes the rendered
         /// human output.
         json_rendered: HumanReadableErrorType,
+        color_config: ColorConfig,
     },
 }
 
 impl Default for ErrorOutputType {
     fn default() -> Self {
-        Self::HumanReadable(HumanReadableErrorType::Default(ColorConfig::Auto))
+        Self::HumanReadable(HumanReadableErrorType::Default, ColorConfig::Auto)
     }
 }
 
@@ -549,12 +663,17 @@ impl OutputTypes {
         OutputTypes(BTreeMap::from_iter(entries.iter().map(|&(k, ref v)| (k, v.clone()))))
     }
 
-    pub fn get(&self, key: &OutputType) -> Option<&Option<OutFileName>> {
+    pub(crate) fn get(&self, key: &OutputType) -> Option<&Option<OutFileName>> {
         self.0.get(key)
     }
 
     pub fn contains_key(&self, key: &OutputType) -> bool {
         self.0.contains_key(key)
+    }
+
+    /// Returns `true` if user specified a name and not just produced type
+    pub fn contains_explicit_name(&self, key: &OutputType) -> bool {
+        self.0.get(key).map_or(false, |f| f.is_some())
     }
 
     pub fn iter(&self) -> BTreeMapIter<'_, OutputType, Option<OutFileName>> {
@@ -577,6 +696,7 @@ impl OutputTypes {
     pub fn should_codegen(&self) -> bool {
         self.0.keys().any(|k| match *k {
             OutputType::Bitcode
+            | OutputType::ThinLinkBitcode
             | OutputType::Assembly
             | OutputType::LlvmAssembly
             | OutputType::Mir
@@ -590,6 +710,7 @@ impl OutputTypes {
     pub fn should_link(&self) -> bool {
         self.0.keys().any(|k| match *k {
             OutputType::Bitcode
+            | OutputType::ThinLinkBitcode
             | OutputType::Assembly
             | OutputType::LlvmAssembly
             | OutputType::Mir
@@ -662,10 +783,6 @@ impl Externs {
     pub fn iter(&self) -> BTreeMapIter<'_, String, ExternEntry> {
         self.0.iter()
     }
-
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
 }
 
 impl ExternEntry {
@@ -700,6 +817,7 @@ pub enum PrintKind {
     TargetLibdir,
     CrateName,
     Cfg,
+    CheckCfg,
     CallingConventions,
     TargetList,
     TargetCPUs,
@@ -723,18 +841,9 @@ pub struct NextSolverConfig {
     /// Whether the new trait solver should be enabled everywhere.
     /// This is only `true` if `coherence` is also enabled.
     pub globally: bool,
-    /// Whether to dump proof trees after computing a proof tree.
-    pub dump_tree: DumpSolverProofTree,
 }
 
-#[derive(Default, Debug, Copy, Clone, Hash, PartialEq, Eq)]
-pub enum DumpSolverProofTree {
-    Always,
-    OnError,
-    #[default]
-    Never,
-}
-
+#[derive(Clone)]
 pub enum Input {
     /// Load source code from a file.
     File(PathBuf),
@@ -749,10 +858,14 @@ pub enum Input {
 
 impl Input {
     pub fn filestem(&self) -> &str {
-        match *self {
-            Input::File(ref ifile) => ifile.file_stem().unwrap().to_str().unwrap(),
-            Input::Str { .. } => "rust_out",
+        if let Input::File(ifile) = self {
+            // If for some reason getting the file stem as a UTF-8 string fails,
+            // then fallback to a fixed name.
+            if let Some(name) = ifile.file_stem().and_then(OsStr::to_str) {
+                return name;
+            }
         }
+        "rust_out"
     }
 
     pub fn source_name(&self) -> FileName {
@@ -854,13 +967,13 @@ impl OutFileName {
 
 #[derive(Clone, Hash, Debug, HashStable_Generic, Encodable, Decodable)]
 pub struct OutputFilenames {
-    pub out_directory: PathBuf,
+    pub(crate) out_directory: PathBuf,
     /// Crate name. Never contains '-'.
     crate_stem: String,
     /// Typically based on `.rs` input file name. Any '-' is preserved.
     filestem: String,
     pub single_output_file: Option<OutFileName>,
-    pub temps_directory: Option<PathBuf>,
+    temps_directory: Option<PathBuf>,
     pub outputs: OutputTypes,
 }
 
@@ -898,7 +1011,7 @@ impl OutputFilenames {
 
     /// Gets the output path where a compilation artifact of the given type
     /// should be placed on disk.
-    pub fn output_path(&self, flavor: OutputType) -> PathBuf {
+    fn output_path(&self, flavor: OutputType) -> PathBuf {
         let extension = flavor.extension();
         match flavor {
             OutputType::Metadata => {
@@ -989,22 +1102,12 @@ bitflags::bitflags! {
         const MACRO = 1 << 0;
         /// Apply remappings to printed compiler diagnostics
         const DIAGNOSTICS = 1 << 1;
-        /// Apply remappings to debug information only when they are written to
-        /// compiled executables or libraries, but not when they are in split
-        /// debuginfo files
-        const UNSPLIT_DEBUGINFO = 1 << 2;
-        /// Apply remappings to debug information only when they are written to
-        /// split debug information files, but not in compiled executables or
-        /// libraries
-        const SPLIT_DEBUGINFO = 1 << 3;
-        /// Apply remappings to the paths pointing to split debug information
-        /// files. Does nothing when these files are not generated.
-        const SPLIT_DEBUGINFO_PATH = 1 << 4;
+        /// Apply remappings to debug informations
+        const DEBUGINFO = 1 << 3;
 
-        /// An alias for macro,unsplit-debuginfo,split-debuginfo-path. This
-        /// ensures all paths in compiled executables or libraries are remapped
-        /// but not elsewhere.
-        const OBJECT = Self::MACRO.bits() | Self::UNSPLIT_DEBUGINFO.bits() | Self::SPLIT_DEBUGINFO_PATH.bits();
+        /// An alias for `macro` and `debuginfo`. This ensures all paths in compiled
+        /// executables or libraries are remapped but not elsewhere.
+        const OBJECT = Self::MACRO.bits() | Self::DEBUGINFO.bits();
     }
 }
 
@@ -1129,6 +1232,16 @@ impl UnstableOptions {
             track_diagnostics: self.track_diagnostics,
         }
     }
+
+    pub fn src_hash_algorithm(&self, target: &Target) -> SourceFileHashAlgorithm {
+        self.src_hash_algorithm.unwrap_or_else(|| {
+            if target.is_like_msvc {
+                SourceFileHashAlgorithm::Sha256
+            } else {
+                SourceFileHashAlgorithm::Md5
+            }
+        })
+    }
 }
 
 // The type of entry function, so users can have their own entry functions
@@ -1173,14 +1286,14 @@ pub enum Passes {
 }
 
 impl Passes {
-    pub fn is_empty(&self) -> bool {
+    fn is_empty(&self) -> bool {
         match *self {
             Passes::Some(ref v) => v.is_empty(),
             Passes::All => false,
         }
     }
 
-    pub fn extend(&mut self, passes: impl IntoIterator<Item = String>) {
+    pub(crate) fn extend(&mut self, passes: impl IntoIterator<Item = String>) {
         match *self {
             Passes::Some(ref mut v) => v.extend(passes),
             Passes::All => {}
@@ -1206,393 +1319,65 @@ pub struct BranchProtection {
     pub pac_ret: Option<PacRet>,
 }
 
-pub const fn default_lib_output() -> CrateType {
+pub(crate) const fn default_lib_output() -> CrateType {
     CrateType::Rlib
 }
 
-fn default_configuration(sess: &Session) -> Cfg {
-    let mut ret = Cfg::default();
-
-    macro_rules! ins_none {
-        ($key:expr) => {
-            ret.insert(($key, None));
-        };
-    }
-    macro_rules! ins_str {
-        ($key:expr, $val_str:expr) => {
-            ret.insert(($key, Some(Symbol::intern($val_str))));
-        };
-    }
-    macro_rules! ins_sym {
-        ($key:expr, $val_sym:expr) => {
-            ret.insert(($key, Some($val_sym)));
-        };
-    }
-
-    // Symbols are inserted in alphabetical order as much as possible.
-    // The exceptions are where control flow forces things out of order.
-    //
-    // Run `rustc --print cfg` to see the configuration in practice.
-    //
-    // NOTE: These insertions should be kept in sync with
-    // `CheckCfg::fill_well_known` below.
-
-    if sess.opts.debug_assertions {
-        ins_none!(sym::debug_assertions);
-    }
-
-    if sess.overflow_checks() {
-        ins_none!(sym::overflow_checks);
-    }
-
-    ins_sym!(sym::panic, sess.panic_strategy().desc_symbol());
-
-    // JUSTIFICATION: before wrapper fn is available
-    #[allow(rustc::bad_opt_access)]
-    if sess.opts.crate_types.contains(&CrateType::ProcMacro) {
-        ins_none!(sym::proc_macro);
-    }
-
-    if sess.is_nightly_build() {
-        ins_sym!(sym::relocation_model, sess.target.relocation_model.desc_symbol());
-    }
-
-    for mut s in sess.opts.unstable_opts.sanitizer {
-        // KASAN is still ASAN under the hood, so it uses the same attribute.
-        if s == SanitizerSet::KERNELADDRESS {
-            s = SanitizerSet::ADDRESS;
-        }
-        ins_str!(sym::sanitize, &s.to_string());
-    }
-
-    if sess.is_sanitizer_cfi_generalize_pointers_enabled() {
-        ins_none!(sym::sanitizer_cfi_generalize_pointers);
-    }
-    if sess.is_sanitizer_cfi_normalize_integers_enabled() {
-        ins_none!(sym::sanitizer_cfi_normalize_integers);
-    }
-
-    ins_str!(sym::target_abi, &sess.target.abi);
-    ins_str!(sym::target_arch, &sess.target.arch);
-    ins_str!(sym::target_endian, sess.target.endian.as_str());
-    ins_str!(sym::target_env, &sess.target.env);
-
-    for family in sess.target.families.as_ref() {
-        ins_str!(sym::target_family, family);
-        if family == "windows" {
-            ins_none!(sym::windows);
-        } else if family == "unix" {
-            ins_none!(sym::unix);
-        }
-    }
-
-    // `target_has_atomic*`
-    let layout = sess.target.parse_data_layout().unwrap_or_else(|err| {
-        sess.dcx().emit_fatal(err);
-    });
-    let mut has_atomic = false;
-    for (i, align) in [
-        (8, layout.i8_align.abi),
-        (16, layout.i16_align.abi),
-        (32, layout.i32_align.abi),
-        (64, layout.i64_align.abi),
-        (128, layout.i128_align.abi),
-    ] {
-        if i >= sess.target.min_atomic_width() && i <= sess.target.max_atomic_width() {
-            if !has_atomic {
-                has_atomic = true;
-                if sess.is_nightly_build() {
-                    if sess.target.atomic_cas {
-                        ins_none!(sym::target_has_atomic);
-                    }
-                    ins_none!(sym::target_has_atomic_load_store);
-                }
-            }
-            let mut insert_atomic = |sym, align: Align| {
-                if sess.target.atomic_cas {
-                    ins_sym!(sym::target_has_atomic, sym);
-                }
-                if align.bits() == i {
-                    ins_sym!(sym::target_has_atomic_equal_alignment, sym);
-                }
-                ins_sym!(sym::target_has_atomic_load_store, sym);
-            };
-            insert_atomic(sym::integer(i), align);
-            if sess.target.pointer_width as u64 == i {
-                insert_atomic(sym::ptr, layout.pointer_align.abi);
-            }
-        }
-    }
-
-    ins_str!(sym::target_os, &sess.target.os);
-    ins_sym!(sym::target_pointer_width, sym::integer(sess.target.pointer_width));
-
-    if sess.opts.unstable_opts.has_thread_local.unwrap_or(sess.target.has_thread_local) {
-        ins_none!(sym::target_thread_local);
-    }
-
-    ins_str!(sym::target_vendor, &sess.target.vendor);
-
-    // If the user wants a test runner, then add the test cfg.
-    if sess.is_test_crate() {
-        ins_none!(sym::test);
-    }
-
-    ret
-}
-
-/// The parsed `--cfg` options that define the compilation environment of the
-/// crate, used to drive conditional compilation.
-///
-/// An `FxIndexSet` is used to ensure deterministic ordering of error messages
-/// relating to `--cfg`.
-pub type Cfg = FxIndexSet<(Symbol, Option<Symbol>)>;
-
-/// The parsed `--check-cfg` options.
-#[derive(Default)]
-pub struct CheckCfg {
-    /// Is well known names activated
-    pub exhaustive_names: bool,
-    /// Is well known values activated
-    pub exhaustive_values: bool,
-    /// All the expected values for a config name
-    pub expecteds: FxHashMap<Symbol, ExpectedValues<Symbol>>,
-    /// Well known names (only used for diagnostics purposes)
-    pub well_known_names: FxHashSet<Symbol>,
-}
-
-pub enum ExpectedValues<T> {
-    Some(FxHashSet<Option<T>>),
-    Any,
-}
-
-impl<T: Eq + Hash> ExpectedValues<T> {
-    fn insert(&mut self, value: T) -> bool {
-        match self {
-            ExpectedValues::Some(expecteds) => expecteds.insert(Some(value)),
-            ExpectedValues::Any => false,
-        }
-    }
-}
-
-impl<T: Eq + Hash> Extend<T> for ExpectedValues<T> {
-    fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
-        match self {
-            ExpectedValues::Some(expecteds) => expecteds.extend(iter.into_iter().map(Some)),
-            ExpectedValues::Any => {}
-        }
-    }
-}
-
-impl<'a, T: Eq + Hash + Copy + 'a> Extend<&'a T> for ExpectedValues<T> {
-    fn extend<I: IntoIterator<Item = &'a T>>(&mut self, iter: I) {
-        match self {
-            ExpectedValues::Some(expecteds) => expecteds.extend(iter.into_iter().map(|a| Some(*a))),
-            ExpectedValues::Any => {}
-        }
-    }
-}
-
-impl CheckCfg {
-    pub fn fill_well_known(&mut self, current_target: &Target) {
-        if !self.exhaustive_values && !self.exhaustive_names {
-            return;
-        }
-
-        let no_values = || {
-            let mut values = FxHashSet::default();
-            values.insert(None);
-            ExpectedValues::Some(values)
-        };
-
-        let empty_values = || {
-            let values = FxHashSet::default();
-            ExpectedValues::Some(values)
-        };
-
-        macro_rules! ins {
-            ($name:expr, $values:expr) => {{
-                self.well_known_names.insert($name);
-                self.expecteds.entry($name).or_insert_with($values)
-            }};
-        }
-
-        // Symbols are inserted in alphabetical order as much as possible.
-        // The exceptions are where control flow forces things out of order.
-        //
-        // NOTE: This should be kept in sync with `default_configuration`.
-        // Note that symbols inserted conditionally in `default_configuration`
-        // are inserted unconditionally here.
-        //
-        // When adding a new config here you should also update
-        // `tests/ui/check-cfg/well-known-values.rs`.
-        //
-        // Don't forget to update `src/doc/unstable-book/src/compiler-flags/check-cfg.md`
-        // in the unstable book as well!
-
-        ins!(sym::debug_assertions, no_values);
-
-        // These four are never set by rustc, but we set them anyway: they
-        // should not trigger a lint because `cargo clippy`, `cargo doc`,
-        // `cargo test` and `cargo miri run` (respectively) can set them.
-        ins!(sym::clippy, no_values);
-        ins!(sym::doc, no_values);
-        ins!(sym::doctest, no_values);
-        ins!(sym::miri, no_values);
-
-        ins!(sym::overflow_checks, no_values);
-
-        ins!(sym::panic, empty_values).extend(&PanicStrategy::all());
-
-        ins!(sym::proc_macro, no_values);
-
-        ins!(sym::relocation_model, empty_values).extend(RelocModel::all());
-
-        let sanitize_values = SanitizerSet::all()
-            .into_iter()
-            .map(|sanitizer| Symbol::intern(sanitizer.as_str().unwrap()));
-        ins!(sym::sanitize, empty_values).extend(sanitize_values);
-
-        ins!(sym::sanitizer_cfi_generalize_pointers, no_values);
-        ins!(sym::sanitizer_cfi_normalize_integers, no_values);
-
-        ins!(sym::target_feature, empty_values).extend(
-            rustc_target::target_features::all_known_features()
-                .map(|(f, _sb)| f)
-                .chain(rustc_target::target_features::RUSTC_SPECIFIC_FEATURES.iter().cloned())
-                .map(Symbol::intern),
-        );
-
-        // sym::target_*
-        {
-            const VALUES: [&Symbol; 8] = [
-                &sym::target_abi,
-                &sym::target_arch,
-                &sym::target_endian,
-                &sym::target_env,
-                &sym::target_family,
-                &sym::target_os,
-                &sym::target_pointer_width,
-                &sym::target_vendor,
-            ];
-
-            // Initialize (if not already initialized)
-            for &e in VALUES {
-                if !self.exhaustive_values {
-                    ins!(e, || ExpectedValues::Any);
-                } else {
-                    ins!(e, empty_values);
-                }
-            }
-
-            if self.exhaustive_values {
-                // Get all values map at once otherwise it would be costly.
-                // (8 values * 220 targets ~= 1760 times, at the time of writing this comment).
-                let [
-                    values_target_abi,
-                    values_target_arch,
-                    values_target_endian,
-                    values_target_env,
-                    values_target_family,
-                    values_target_os,
-                    values_target_pointer_width,
-                    values_target_vendor,
-                ] = self
-                    .expecteds
-                    .get_many_mut(VALUES)
-                    .expect("unable to get all the check-cfg values buckets");
-
-                for target in TARGETS
-                    .iter()
-                    .map(|target| Target::expect_builtin(&TargetTriple::from_triple(target)))
-                    .chain(iter::once(current_target.clone()))
-                {
-                    values_target_abi.insert(Symbol::intern(&target.options.abi));
-                    values_target_arch.insert(Symbol::intern(&target.arch));
-                    values_target_endian.insert(Symbol::intern(target.options.endian.as_str()));
-                    values_target_env.insert(Symbol::intern(&target.options.env));
-                    values_target_family.extend(
-                        target.options.families.iter().map(|family| Symbol::intern(family)),
-                    );
-                    values_target_os.insert(Symbol::intern(&target.options.os));
-                    values_target_pointer_width.insert(sym::integer(target.pointer_width));
-                    values_target_vendor.insert(Symbol::intern(&target.options.vendor));
-                }
-            }
-        }
-
-        let atomic_values = &[
-            sym::ptr,
-            sym::integer(8usize),
-            sym::integer(16usize),
-            sym::integer(32usize),
-            sym::integer(64usize),
-            sym::integer(128usize),
-        ];
-        for sym in [
-            sym::target_has_atomic,
-            sym::target_has_atomic_equal_alignment,
-            sym::target_has_atomic_load_store,
-        ] {
-            ins!(sym, no_values).extend(atomic_values);
-        }
-
-        ins!(sym::target_thread_local, no_values);
-
-        ins!(sym::test, no_values);
-
-        ins!(sym::unix, no_values);
-        ins!(sym::windows, no_values);
-    }
-}
-
 pub fn build_configuration(sess: &Session, mut user_cfg: Cfg) -> Cfg {
-    // Combine the configuration requested by the session (command line) with
+    // First disallow some configuration given on the command line
+    cfg::disallow_cfgs(sess, &user_cfg);
+
+    // Then combine the configuration requested by the session (command line) with
     // some default and generated configuration items.
-    user_cfg.extend(default_configuration(sess));
+    user_cfg.extend(cfg::default_configuration(sess));
     user_cfg
 }
 
-pub fn build_target_config(
-    early_dcx: &EarlyDiagCtxt,
-    opts: &Options,
-    target_override: Option<Target>,
-    sysroot: &Path,
-) -> Target {
-    let target_result = target_override.map_or_else(
-        || Target::search(&opts.target_triple, sysroot),
-        |t| Ok((t, TargetWarnings::empty())),
-    );
-    let (target, target_warnings) = target_result.unwrap_or_else(|e| {
-        early_dcx.early_fatal(format!(
+pub fn build_target_config(early_dcx: &EarlyDiagCtxt, opts: &Options, sysroot: &Path) -> Target {
+    match Target::search(&opts.target_triple, sysroot) {
+        Ok((target, warnings)) => {
+            for warning in warnings.warning_messages() {
+                early_dcx.early_warn(warning)
+            }
+
+            // The `wasm32-wasi` target is being renamed to `wasm32-wasip1` as
+            // part of rust-lang/compiler-team#607 and
+            // rust-lang/compiler-team#695. Warn unconditionally on usage to
+            // raise awareness of the renaming. This code will be deleted in
+            // October 2024.
+            if opts.target_triple.triple() == "wasm32-wasi" {
+                early_dcx.early_warn(
+                    "the `wasm32-wasi` target is being renamed to \
+                    `wasm32-wasip1` and the `wasm32-wasi` target will be \
+                    removed from nightly in October 2024 and removed from \
+                    stable Rust in January 2025",
+                )
+            }
+            if !matches!(target.pointer_width, 16 | 32 | 64) {
+                early_dcx.early_fatal(format!(
+                    "target specification was invalid: unrecognized target-pointer-width {}",
+                    target.pointer_width
+                ))
+            }
+            target
+        }
+        Err(e) => early_dcx.early_fatal(format!(
             "Error loading target specification: {e}. \
-                 Run `rustc --print target-list` for a list of built-in targets"
-        ))
-    });
-    for warning in target_warnings.warning_messages() {
-        early_dcx.early_warn(warning)
+                     Run `rustc --print target-list` for a list of built-in targets"
+        )),
     }
-
-    if !matches!(target.pointer_width, 16 | 32 | 64) {
-        early_dcx.early_fatal(format!(
-            "target specification was invalid: unrecognized target-pointer-width {}",
-            target.pointer_width
-        ))
-    }
-
-    target
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub enum OptionStability {
+enum OptionStability {
     Stable,
     Unstable,
 }
 
 pub struct RustcOptGroup {
     pub apply: Box<dyn Fn(&mut getopts::Options) -> &mut getopts::Options>,
-    pub name: &'static str,
-    pub stability: OptionStability,
+    name: &'static str,
+    stability: OptionStability,
 }
 
 impl RustcOptGroup {
@@ -1628,8 +1413,8 @@ mod opt {
 
     use super::RustcOptGroup;
 
-    pub type R = RustcOptGroup;
-    pub type S = &'static str;
+    type R = RustcOptGroup;
+    type S = &'static str;
 
     fn stable<F>(name: S, f: F) -> R
     where
@@ -1649,32 +1434,34 @@ mod opt {
         if a.len() > b.len() { a } else { b }
     }
 
-    pub fn opt_s(a: S, b: S, c: S, d: S) -> R {
+    pub(crate) fn opt_s(a: S, b: S, c: S, d: S) -> R {
         stable(longer(a, b), move |opts| opts.optopt(a, b, c, d))
     }
-    pub fn multi_s(a: S, b: S, c: S, d: S) -> R {
+    pub(crate) fn multi_s(a: S, b: S, c: S, d: S) -> R {
         stable(longer(a, b), move |opts| opts.optmulti(a, b, c, d))
     }
-    pub fn flag_s(a: S, b: S, c: S) -> R {
+    pub(crate) fn flag_s(a: S, b: S, c: S) -> R {
         stable(longer(a, b), move |opts| opts.optflag(a, b, c))
     }
-    pub fn flagmulti_s(a: S, b: S, c: S) -> R {
+    pub(crate) fn flagmulti_s(a: S, b: S, c: S) -> R {
         stable(longer(a, b), move |opts| opts.optflagmulti(a, b, c))
     }
 
-    pub fn opt(a: S, b: S, c: S, d: S) -> R {
+    fn opt(a: S, b: S, c: S, d: S) -> R {
         unstable(longer(a, b), move |opts| opts.optopt(a, b, c, d))
     }
-    pub fn multi(a: S, b: S, c: S, d: S) -> R {
+    pub(crate) fn multi(a: S, b: S, c: S, d: S) -> R {
         unstable(longer(a, b), move |opts| opts.optmulti(a, b, c, d))
     }
 }
+
 static EDITION_STRING: LazyLock<String> = LazyLock::new(|| {
     format!(
         "Specify which edition of the compiler to use when compiling code. \
 The default is {DEFAULT_EDITION} and the latest stable edition is {LATEST_STABLE_EDITION}."
     )
 });
+
 /// Returns the "short" subset of the rustc command line options,
 /// including metadata for each option, such as whether the option is
 /// part of the stable long-term interface for rustc.
@@ -1683,7 +1470,7 @@ pub fn rustc_short_optgroups() -> Vec<RustcOptGroup> {
         opt::flag_s("h", "help", "Display this message"),
         opt::multi_s("", "cfg", "Configure the compilation environment.
                              SPEC supports the syntax `NAME[=\"VALUE\"]`.", "SPEC"),
-        opt::multi("", "check-cfg", "Provide list of valid cfg options for checking", "SPEC"),
+        opt::multi_s("", "check-cfg", "Provide list of expected cfgs for checking", "SPEC"),
         opt::multi_s(
             "L",
             "",
@@ -1722,7 +1509,7 @@ pub fn rustc_short_optgroups() -> Vec<RustcOptGroup> {
             "",
             "print",
             "Compiler information to print on stdout",
-            "[crate-name|file-names|sysroot|target-libdir|cfg|calling-conventions|\
+            "[crate-name|file-names|sysroot|target-libdir|cfg|check-cfg|calling-conventions|\
              target-list|target-cpus|target-features|relocation-models|code-models|\
              tls-models|target-spec-json|all-target-specs-json|native-static-libs|\
              stack-protector-strategies|link-args|deployment-target]",
@@ -1864,9 +1651,10 @@ pub fn parse_color(early_dcx: &EarlyDiagCtxt, matches: &getopts::Matches) -> Col
 /// Possible json config files
 pub struct JsonConfig {
     pub json_rendered: HumanReadableErrorType,
-    pub json_artifact_notifications: bool,
+    pub json_color: ColorConfig,
+    json_artifact_notifications: bool,
     pub json_unused_externs: JsonUnusedExterns,
-    pub json_future_incompat: bool,
+    json_future_incompat: bool,
 }
 
 /// Report unused externs in event stream
@@ -1901,8 +1689,7 @@ impl JsonUnusedExterns {
 /// The first value returned is how to render JSON diagnostics, and the second
 /// is whether or not artifact notifications are enabled.
 pub fn parse_json(early_dcx: &EarlyDiagCtxt, matches: &getopts::Matches) -> JsonConfig {
-    let mut json_rendered: fn(ColorConfig) -> HumanReadableErrorType =
-        HumanReadableErrorType::Default;
+    let mut json_rendered = HumanReadableErrorType::Default;
     let mut json_color = ColorConfig::Never;
     let mut json_artifact_notifications = false;
     let mut json_unused_externs = JsonUnusedExterns::No;
@@ -1929,7 +1716,8 @@ pub fn parse_json(early_dcx: &EarlyDiagCtxt, matches: &getopts::Matches) -> Json
     }
 
     JsonConfig {
-        json_rendered: json_rendered(json_color),
+        json_rendered,
+        json_color,
         json_artifact_notifications,
         json_unused_externs,
         json_future_incompat,
@@ -1941,6 +1729,7 @@ pub fn parse_error_format(
     early_dcx: &mut EarlyDiagCtxt,
     matches: &getopts::Matches,
     color: ColorConfig,
+    json_color: ColorConfig,
     json_rendered: HumanReadableErrorType,
 ) -> ErrorOutputType {
     // We need the `opts_present` check because the driver will send us Matches
@@ -1950,18 +1739,22 @@ pub fn parse_error_format(
     let error_format = if matches.opts_present(&["error-format".to_owned()]) {
         match matches.opt_str("error-format").as_deref() {
             None | Some("human") => {
-                ErrorOutputType::HumanReadable(HumanReadableErrorType::Default(color))
+                ErrorOutputType::HumanReadable(HumanReadableErrorType::Default, color)
             }
             Some("human-annotate-rs") => {
-                ErrorOutputType::HumanReadable(HumanReadableErrorType::AnnotateSnippet(color))
+                ErrorOutputType::HumanReadable(HumanReadableErrorType::AnnotateSnippet, color)
             }
-            Some("json") => ErrorOutputType::Json { pretty: false, json_rendered },
-            Some("pretty-json") => ErrorOutputType::Json { pretty: true, json_rendered },
-            Some("short") => ErrorOutputType::HumanReadable(HumanReadableErrorType::Short(color)),
-
+            Some("json") => {
+                ErrorOutputType::Json { pretty: false, json_rendered, color_config: json_color }
+            }
+            Some("pretty-json") => {
+                ErrorOutputType::Json { pretty: true, json_rendered, color_config: json_color }
+            }
+            Some("short") => ErrorOutputType::HumanReadable(HumanReadableErrorType::Short, color),
             Some(arg) => {
                 early_dcx.abort_if_error_and_set_error_format(ErrorOutputType::HumanReadable(
-                    HumanReadableErrorType::Default(color),
+                    HumanReadableErrorType::Default,
+                    color,
                 ));
                 early_dcx.early_fatal(format!(
                     "argument for `--error-format` must be `human`, `json` or \
@@ -1970,7 +1763,7 @@ pub fn parse_error_format(
             }
         }
     } else {
-        ErrorOutputType::HumanReadable(HumanReadableErrorType::Default(color))
+        ErrorOutputType::HumanReadable(HumanReadableErrorType::Default, color)
     };
 
     match error_format {
@@ -2016,7 +1809,7 @@ pub fn parse_crate_edition(early_dcx: &EarlyDiagCtxt, matches: &getopts::Matches
 }
 
 fn check_error_format_stability(
-    early_dcx: &mut EarlyDiagCtxt,
+    early_dcx: &EarlyDiagCtxt,
     unstable_opts: &UnstableOptions,
     error_format: ErrorOutputType,
 ) {
@@ -2024,7 +1817,7 @@ fn check_error_format_stability(
         if let ErrorOutputType::Json { pretty: true, .. } = error_format {
             early_dcx.early_fatal("`--error-format=pretty-json` is unstable");
         }
-        if let ErrorOutputType::HumanReadable(HumanReadableErrorType::AnnotateSnippet(_)) =
+        if let ErrorOutputType::HumanReadable(HumanReadableErrorType::AnnotateSnippet, _) =
             error_format
         {
             early_dcx.early_fatal("`--error-format=human-annotate-rs` is unstable");
@@ -2048,6 +1841,12 @@ fn parse_output_types(
                         display = OutputType::shorthands_display(),
                     ))
                 });
+                if output_type == OutputType::ThinLinkBitcode && !unstable_opts.unstable_options {
+                    early_dcx.early_fatal(format!(
+                        "{} requested but -Zunstable-options not specified",
+                        OutputType::ThinLinkBitcode.shorthand()
+                    ));
+                }
                 output_types.insert(output_type, path);
             }
         }
@@ -2114,7 +1913,7 @@ fn should_override_cgus_and_disable_thinlto(
 fn collect_print_requests(
     early_dcx: &EarlyDiagCtxt,
     cg: &mut CodegenOptions,
-    unstable_opts: &mut UnstableOptions,
+    unstable_opts: &UnstableOptions,
     matches: &getopts::Matches,
 ) -> Vec<PrintRequest> {
     let mut prints = Vec::<PrintRequest>::new();
@@ -2132,6 +1931,7 @@ fn collect_print_requests(
         ("all-target-specs-json", PrintKind::AllTargetSpecs),
         ("calling-conventions", PrintKind::CallingConventions),
         ("cfg", PrintKind::Cfg),
+        ("check-cfg", PrintKind::CheckCfg),
         ("code-models", PrintKind::CodeModels),
         ("crate-name", PrintKind::CrateName),
         ("deployment-target", PrintKind::DeploymentTarget),
@@ -2181,14 +1981,27 @@ fn collect_print_requests(
                     );
                 }
             }
+            Some((_, PrintKind::CheckCfg)) => {
+                if unstable_opts.unstable_options {
+                    PrintKind::CheckCfg
+                } else {
+                    early_dcx.early_fatal(
+                        "the `-Z unstable-options` flag must also be passed to \
+                         enable the check-cfg print option",
+                    );
+                }
+            }
             Some(&(_, print_kind)) => print_kind,
             None => {
                 let prints =
                     PRINT_KINDS.iter().map(|(name, _)| format!("`{name}`")).collect::<Vec<_>>();
                 let prints = prints.join(", ");
-                early_dcx.early_fatal(format!(
-                    "unknown print request `{req}`. Valid print requests are: {prints}"
-                ));
+
+                let mut diag =
+                    early_dcx.early_struct_fatal(format!("unknown print request: `{req}`"));
+                #[allow(rustc::diagnostic_outside_of_impl)]
+                diag.help(format!("valid print requests are: {prints}"));
+                diag.emit()
             }
         };
 
@@ -2580,7 +2393,7 @@ fn parse_remap_path_prefix(
 }
 
 fn parse_logical_env(
-    early_dcx: &mut EarlyDiagCtxt,
+    early_dcx: &EarlyDiagCtxt,
     matches: &getopts::Matches,
 ) -> FxIndexMap<String, String> {
     let mut vars = FxIndexMap::default();
@@ -2605,12 +2418,13 @@ pub fn build_session_options(early_dcx: &mut EarlyDiagCtxt, matches: &getopts::M
 
     let JsonConfig {
         json_rendered,
+        json_color,
         json_artifact_notifications,
         json_unused_externs,
         json_future_incompat,
     } = parse_json(early_dcx, matches);
 
-    let error_format = parse_error_format(early_dcx, matches, color, json_rendered);
+    let error_format = parse_error_format(early_dcx, matches, color, json_color, json_rendered);
 
     early_dcx.abort_if_error_and_set_error_format(error_format);
 
@@ -2626,13 +2440,6 @@ pub fn build_session_options(early_dcx: &mut EarlyDiagCtxt, matches: &getopts::M
     let (lint_opts, describe_lints, lint_cap) = get_cmd_lint_options(early_dcx, matches);
 
     check_error_format_stability(early_dcx, &unstable_opts, error_format);
-
-    if !unstable_opts.unstable_options && json_unused_externs.is_enabled() {
-        early_dcx.early_fatal(
-            "the `-Z unstable-options` flag must also be passed to enable \
-            the flag `--json=unused-externs`",
-        );
-    }
 
     let output_types = parse_output_types(early_dcx, &unstable_opts, matches);
 
@@ -2738,6 +2545,8 @@ pub fn build_session_options(early_dcx: &mut EarlyDiagCtxt, matches: &getopts::M
     }
 
     if let Ok(graphviz_font) = std::env::var("RUSTC_GRAPHVIZ_FONT") {
+        // FIXME: this is only mutation of UnstableOptions here, move into
+        // UnstableOptions::build?
         unstable_opts.graphviz_font = graphviz_font;
     }
 
@@ -2748,6 +2557,15 @@ pub fn build_session_options(early_dcx: &mut EarlyDiagCtxt, matches: &getopts::M
                 early_dcx.early_fatal("options `-C embed-bitcode=no` and `-C lto` are incompatible")
             }
         }
+    }
+
+    if !nightly_options::is_unstable_enabled(matches)
+        && cg.force_frame_pointers == FramePointer::NonLeaf
+    {
+        early_dcx.early_fatal(
+            "`-Cforce-frame-pointers=non-leaf` or `always` also requires `-Zunstable-options` \
+                and a nightly compiler",
+        )
     }
 
     // For testing purposes, until we have more feedback about these options: ensure `-Z
@@ -2787,7 +2605,7 @@ pub fn build_session_options(early_dcx: &mut EarlyDiagCtxt, matches: &getopts::M
         ));
     }
 
-    let prints = collect_print_requests(early_dcx, &mut cg, &mut unstable_opts, matches);
+    let prints = collect_print_requests(early_dcx, &mut cg, &unstable_opts, matches);
 
     let cg = cg;
 
@@ -2800,11 +2618,6 @@ pub fn build_session_options(early_dcx: &mut EarlyDiagCtxt, matches: &getopts::M
     let debug_assertions = cg.debug_assertions.unwrap_or(opt_level == OptLevel::No);
     let debuginfo = select_debuginfo(matches, &cg);
     let debuginfo_compression = unstable_opts.debuginfo_compression;
-
-    let mut search_paths = vec![];
-    for s in &matches.opt_strs("L") {
-        search_paths.push(SearchPath::from_cli_opt(early_dcx, s));
-    }
 
     let libs = parse_libs(early_dcx, matches);
 
@@ -2840,7 +2653,7 @@ pub fn build_session_options(early_dcx: &mut EarlyDiagCtxt, matches: &getopts::M
         // This is the location used by the `rust-src` `rustup` component.
         let mut candidate = sysroot.join("lib/rustlib/src/rust");
         if let Ok(metadata) = candidate.symlink_metadata() {
-            // Replace the symlink rustbuild creates, with its destination.
+            // Replace the symlink bootstrap creates, with its destination.
             // We could try to use `fs::canonicalize` instead, but that might
             // produce unnecessarily verbose path.
             if metadata.file_type().is_symlink() {
@@ -2854,17 +2667,23 @@ pub fn build_session_options(early_dcx: &mut EarlyDiagCtxt, matches: &getopts::M
         candidate.join("library/std/src/lib.rs").is_file().then_some(candidate)
     };
 
+    let mut search_paths = vec![];
+    for s in &matches.opt_strs("L") {
+        search_paths.push(SearchPath::from_cli_opt(
+            &sysroot,
+            &target_triple,
+            early_dcx,
+            s,
+            unstable_opts.unstable_options,
+        ));
+    }
+
     let working_dir = std::env::current_dir().unwrap_or_else(|e| {
         early_dcx.early_fatal(format!("Current directory is invalid: {e}"));
     });
 
-    let remap = file_path_mapping(remap_path_prefix.clone(), &unstable_opts);
-    let (path, remapped) = remap.map_prefix(&working_dir);
-    let working_dir = if remapped {
-        RealFileName::Remapped { virtual_name: path.into_owned(), local_path: Some(working_dir) }
-    } else {
-        RealFileName::LocalPath(path.into_owned())
-    };
+    let file_mapping = file_path_mapping(remap_path_prefix.clone(), &unstable_opts);
+    let working_dir = file_mapping.to_real_filename(&working_dir);
 
     let verbose = matches.opt_present("verbose") || unstable_opts.verbose_internals;
 
@@ -2979,9 +2798,10 @@ pub fn parse_crate_types_from_list(list_list: Vec<String>) -> Result<Vec<CrateTy
 }
 
 pub mod nightly_options {
+    use rustc_feature::UnstableFeatures;
+
     use super::{OptionStability, RustcOptGroup};
     use crate::EarlyDiagCtxt;
-    use rustc_feature::UnstableFeatures;
 
     pub fn is_unstable_enabled(matches: &getopts::Matches) -> bool {
         match_is_nightly_build(matches)
@@ -2992,7 +2812,7 @@ pub mod nightly_options {
         is_nightly_build(matches.opt_str("crate-name").as_deref())
     }
 
-    pub fn is_nightly_build(krate: Option<&str>) -> bool {
+    fn is_nightly_build(krate: Option<&str>) -> bool {
         UnstableFeatures::from_environment(krate).is_nightly_build()
     }
 
@@ -3092,6 +2912,7 @@ pub enum PpHirMode {
 }
 
 #[derive(Copy, Clone, PartialEq, Debug)]
+/// Pretty print mode
 pub enum PpMode {
     /// Options that print the source code, i.e.
     /// `-Zunpretty=normal` and `-Zunpretty=expanded`
@@ -3174,32 +2995,35 @@ pub enum WasiExecModel {
 /// we have an opt-in scheme here, so one is hopefully forced to think about
 /// how the hash should be calculated when adding a new command-line argument.
 pub(crate) mod dep_tracking {
-    use super::{
-        BranchProtection, CFGuard, CFProtection, CollapseMacroDebuginfo, CoverageOptions,
-        CrateType, DebugInfo, DebugInfoCompression, ErrorOutputType, FunctionReturn,
-        InliningThreshold, InstrumentCoverage, InstrumentXRay, LinkerPluginLto, LocationDetail,
-        LtoCli, NextSolverConfig, OomStrategy, OptLevel, OutFileName, OutputType, OutputTypes,
-        Polonius, RemapPathScopeComponents, ResolveDocLinks, SourceFileHashAlgorithm,
-        SplitDwarfKind, SwitchWithOptPath, SymbolManglingVersion, WasiExecModel,
-    };
-    use crate::lint;
-    use crate::utils::NativeLib;
+    use std::collections::BTreeMap;
+    use std::hash::{DefaultHasher, Hash};
+    use std::num::NonZero;
+    use std::path::PathBuf;
+
     use rustc_data_structures::fx::FxIndexMap;
     use rustc_data_structures::stable_hasher::Hash64;
     use rustc_errors::LanguageIdentifier;
     use rustc_feature::UnstableFeatures;
     use rustc_span::edition::Edition;
     use rustc_span::RealFileName;
-    use rustc_target::spec::{CodeModel, MergeFunctions, PanicStrategy, RelocModel};
     use rustc_target::spec::{
-        RelroLevel, SanitizerSet, SplitDebuginfo, StackProtector, TargetTriple, TlsModel,
+        CodeModel, FramePointer, MergeFunctions, OnBrokenPipe, PanicStrategy, RelocModel,
+        RelroLevel, SanitizerSet, SplitDebuginfo, StackProtector, TargetTriple, TlsModel, WasmCAbi,
     };
-    use std::collections::BTreeMap;
-    use std::hash::{DefaultHasher, Hash};
-    use std::num::NonZero;
-    use std::path::PathBuf;
 
-    pub trait DepTrackingHash {
+    use super::{
+        BranchProtection, CFGuard, CFProtection, CollapseMacroDebuginfo, CoverageOptions,
+        CrateType, DebugInfo, DebugInfoCompression, ErrorOutputType, FmtDebug, FunctionReturn,
+        InliningThreshold, InstrumentCoverage, InstrumentXRay, LinkerPluginLto, LocationDetail,
+        LtoCli, NextSolverConfig, OomStrategy, OptLevel, OutFileName, OutputType, OutputTypes,
+        PatchableFunctionEntry, Polonius, RemapPathScopeComponents, ResolveDocLinks,
+        SourceFileHashAlgorithm, SplitDwarfKind, SwitchWithOptPath, SymbolManglingVersion,
+        WasiExecModel,
+    };
+    use crate::lint;
+    use crate::utils::NativeLib;
+
+    pub(crate) trait DepTrackingHash {
         fn hash(
             &self,
             hasher: &mut DefaultHasher,
@@ -3246,6 +3070,7 @@ pub(crate) mod dep_tracking {
         lint::Level,
         WasiExecModel,
         u32,
+        FramePointer,
         RelocModel,
         CodeModel,
         TlsModel,
@@ -3254,6 +3079,7 @@ pub(crate) mod dep_tracking {
         InstrumentXRay,
         CrateType,
         MergeFunctions,
+        OnBrokenPipe,
         PanicStrategy,
         RelroLevel,
         OptLevel,
@@ -3281,13 +3107,16 @@ pub(crate) mod dep_tracking {
         OutputType,
         RealFileName,
         LocationDetail,
+        FmtDebug,
         BranchProtection,
         OomStrategy,
         LanguageIdentifier,
         NextSolverConfig,
+        PatchableFunctionEntry,
         Polonius,
         InliningThreshold,
         FunctionReturn,
+        WasmCAbi,
     );
 
     impl<T1, T2> DepTrackingHash for (T1, T2)
@@ -3458,6 +3287,35 @@ impl DumpMonoStatsFormat {
             Self::Markdown => "md",
             Self::Json => "json",
         }
+    }
+}
+
+/// `-Z patchable-function-entry` representation - how many nops to put before and after function
+/// entry.
+#[derive(Clone, Copy, PartialEq, Hash, Debug, Default)]
+pub struct PatchableFunctionEntry {
+    /// Nops before the entry
+    prefix: u8,
+    /// Nops after the entry
+    entry: u8,
+}
+
+impl PatchableFunctionEntry {
+    pub fn from_total_and_prefix_nops(
+        total_nops: u8,
+        prefix_nops: u8,
+    ) -> Option<PatchableFunctionEntry> {
+        if total_nops < prefix_nops {
+            None
+        } else {
+            Some(Self { prefix: prefix_nops, entry: total_nops - prefix_nops })
+        }
+    }
+    pub fn prefix(&self) -> u8 {
+        self.prefix
+    }
+    pub fn entry(&self) -> u8 {
+        self.entry
     }
 }
 

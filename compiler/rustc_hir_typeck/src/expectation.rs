@@ -1,4 +1,3 @@
-use rustc_infer::infer::type_variable::{TypeVariableOrigin, TypeVariableOriginKind};
 use rustc_middle::ty::{self, Ty};
 use rustc_span::Span;
 
@@ -8,7 +7,7 @@ use super::FnCtxt;
 /// When type-checking an expression, we propagate downward
 /// whatever type hint we are able in the form of an `Expectation`.
 #[derive(Copy, Clone, Debug)]
-pub enum Expectation<'tcx> {
+pub(crate) enum Expectation<'tcx> {
     /// We know nothing about what type this expression should have.
     NoExpectation,
 
@@ -71,7 +70,8 @@ impl<'a, 'tcx> Expectation<'tcx> {
     /// See the test case `test/ui/coerce-expect-unsized.rs` and #20169
     /// for examples of where this comes up,.
     pub(super) fn rvalue_hint(fcx: &FnCtxt<'a, 'tcx>, ty: Ty<'tcx>) -> Expectation<'tcx> {
-        match fcx.tcx.struct_tail_without_normalization(ty).kind() {
+        // FIXME: This is not right, even in the old solver...
+        match fcx.tcx.struct_tail_raw(ty, |ty| ty, || {}).kind() {
             ty::Slice(_) | ty::Str | ty::Dynamic(..) => ExpectRvalueLikeUnsized(ty),
             _ => ExpectHasType(ty),
         }
@@ -110,8 +110,6 @@ impl<'a, 'tcx> Expectation<'tcx> {
     /// Like `only_has_type`, but instead of returning `None` if no
     /// hard constraint exists, creates a fresh type variable.
     pub(super) fn coercion_target_type(self, fcx: &FnCtxt<'a, 'tcx>, span: Span) -> Ty<'tcx> {
-        self.only_has_type(fcx).unwrap_or_else(|| {
-            fcx.next_ty_var(TypeVariableOrigin { kind: TypeVariableOriginKind::MiscVariable, span })
-        })
+        self.only_has_type(fcx).unwrap_or_else(|| fcx.next_ty_var(span))
     }
 }

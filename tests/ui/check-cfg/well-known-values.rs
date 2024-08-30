@@ -5,7 +5,8 @@
 // values since the suggestion shows them.
 //
 //@ check-pass
-//@ compile-flags: --check-cfg=cfg() -Z unstable-options
+//@ no-auto-check-cfg
+//@ compile-flags: --check-cfg=cfg()
 //@ compile-flags: -Zcheck-cfg-all-expected
 
 #![feature(cfg_overflow_checks)]
@@ -14,6 +15,8 @@
 #![feature(cfg_target_has_atomic)]
 #![feature(cfg_target_has_atomic_equal_alignment)]
 #![feature(cfg_target_thread_local)]
+#![feature(cfg_ub_checks)]
+#![feature(fmt_debug)]
 
 // This part makes sure that none of the well known names are
 // unexpected.
@@ -31,6 +34,8 @@
     //~^ WARN unexpected `cfg` condition value
     doctest = "_UNEXPECTED_VALUE",
     //~^ WARN unexpected `cfg` condition value
+    fmt_debug = "_UNEXPECTED_VALUE",
+    //~^ WARN unexpected `cfg` condition value
     miri = "_UNEXPECTED_VALUE",
     //~^ WARN unexpected `cfg` condition value
     overflow_checks = "_UNEXPECTED_VALUE",
@@ -40,6 +45,8 @@
     proc_macro = "_UNEXPECTED_VALUE",
     //~^ WARN unexpected `cfg` condition value
     relocation_model = "_UNEXPECTED_VALUE",
+    //~^ WARN unexpected `cfg` condition value
+    rustfmt = "_UNEXPECTED_VALUE",
     //~^ WARN unexpected `cfg` condition value
     sanitize = "_UNEXPECTED_VALUE",
     //~^ WARN unexpected `cfg` condition value
@@ -70,6 +77,8 @@
     target_vendor = "_UNEXPECTED_VALUE",
     //~^ WARN unexpected `cfg` condition value
     test = "_UNEXPECTED_VALUE",
+    //~^ WARN unexpected `cfg` condition value
+    ub_checks = "_UNEXPECTED_VALUE",
     //~^ WARN unexpected `cfg` condition value
     unix = "_UNEXPECTED_VALUE",
     //~^ WARN unexpected `cfg` condition value
@@ -110,5 +119,8 @@ fn doc() {}
 
 #[cfg(clippy)]
 fn clippy() {}
+
+#[cfg_attr(rustfmt, rustfmt::skip)]
+fn rustfmt() {}
 
 fn main() {}

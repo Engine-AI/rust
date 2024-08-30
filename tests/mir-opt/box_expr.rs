@@ -1,4 +1,4 @@
-//@ unit-test: ElaborateDrops
+//@ test-mir-pass: ElaborateDrops
 //@ needs-unwind
 
 #![feature(rustc_attrs, stmt_expr_attributes)]
@@ -7,7 +7,7 @@
 fn main() {
     // CHECK-LABEL: fn main(
     // CHECK:   [[box:_.*]] = ShallowInitBox(
-    // CHECK:   [[ptr:_.*]] = ((([[box]].0: std::ptr::Unique<S>).0: std::ptr::NonNull<S>).0: *const S);
+    // CHECK:   [[ptr:_.*]] = copy ((([[box]].0: std::ptr::Unique<S>).0: std::ptr::NonNull<S>).0: *const S);
     // CHECK:   (*[[ptr]]) = S::new() -> [return: [[ret:bb.*]], unwind: [[unwind:bb.*]]];
     // CHECK: [[ret]]: {
     // CHECK:   [[box2:_.*]] = move [[box]];

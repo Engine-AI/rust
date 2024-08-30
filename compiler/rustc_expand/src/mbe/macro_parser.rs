@@ -70,25 +70,24 @@
 //! eof: [a $( a )* a b ·]
 //! ```
 
-pub(crate) use NamedMatch::*;
-pub(crate) use ParseResult::*;
-
-use crate::mbe::{macro_rules::Tracker, KleeneOp, TokenTree};
-
-use rustc_ast::token::{self, DocComment, Nonterminal, NonterminalKind, Token};
-use rustc_ast_pretty::pprust;
-use rustc_data_structures::fx::FxHashMap;
-use rustc_data_structures::sync::Lrc;
-use rustc_errors::ErrorGuaranteed;
-use rustc_lint_defs::pluralize;
-use rustc_parse::parser::{ParseNtResult, Parser};
-use rustc_span::symbol::Ident;
-use rustc_span::symbol::MacroRulesNormalizedIdent;
-use rustc_span::Span;
 use std::borrow::Cow;
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::fmt::Display;
 use std::rc::Rc;
+
+use rustc_ast::token::{self, DocComment, NonterminalKind, Token};
+use rustc_ast_pretty::pprust;
+use rustc_data_structures::fx::FxHashMap;
+use rustc_errors::ErrorGuaranteed;
+use rustc_lint_defs::pluralize;
+use rustc_parse::parser::{ParseNtResult, Parser};
+use rustc_span::symbol::{Ident, MacroRulesNormalizedIdent};
+use rustc_span::Span;
+pub(crate) use NamedMatch::*;
+pub(crate) use ParseResult::*;
+
+use crate::mbe::macro_rules::Tracker;
+use crate::mbe::{KleeneOp, TokenTree};
 
 /// A unit within a matcher that a `MatcherPos` can refer to. Similar to (and derived from)
 /// `mbe::TokenTree`, but designed specifically for fast and easy traversal during matching.
@@ -266,7 +265,7 @@ struct MatcherPos {
 }
 
 // This type is used a lot. Make sure it doesn't unintentionally get bigger.
-#[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
+#[cfg(target_pointer_width = "64")]
 rustc_data_structures::static_assert_size!(MatcherPos, 16);
 
 impl MatcherPos {
@@ -392,12 +391,7 @@ pub(super) fn count_metavar_decls(matcher: &[TokenTree]) -> usize {
 #[derive(Debug, Clone)]
 pub(crate) enum NamedMatch {
     MatchedSeq(Vec<NamedMatch>),
-
-    // A metavar match of type `tt`.
-    MatchedTokenTree(rustc_ast::tokenstream::TokenTree),
-
-    // A metavar match of any type other than `tt`.
-    MatchedNonterminal(Lrc<(Nonterminal, rustc_span::Span)>),
+    MatchedSingle(ParseNtResult),
 }
 
 /// Performs a token equality check, ignoring syntax context (that is, an unhygienic comparison)
@@ -413,7 +407,7 @@ fn token_name_eq(t1: &Token, t2: &Token) -> bool {
 
 // Note: the vectors could be created and dropped within `parse_tt`, but to avoid excess
 // allocations we have a single vector for each kind that is cleared and reused repeatedly.
-pub struct TtParser {
+pub(crate) struct TtParser {
     macro_name: Ident,
 
     /// The set of current mps to be processed. This should be empty by the end of a successful
@@ -458,7 +452,7 @@ impl TtParser {
         &mut self,
         matcher: &'matcher [MatcherLoc],
         token: &Token,
-        approx_position: usize,
+        approx_position: u32,
         track: &mut T,
     ) -> Option<NamedParseResult<T::Failure>> {
         // Matcher positions that would be valid if the macro invocation was over now. Only
@@ -547,6 +541,8 @@ impl TtParser {
                         // The separator matches the current token. Advance past it.
                         mp.idx += 1;
                         self.next_mps.push(mp);
+                    } else {
+                        track.set_expected_token(separator);
                     }
                 }
                 &MatcherLoc::SequenceKleeneOpAfterSep { idx_first } => {
@@ -638,6 +634,7 @@ impl TtParser {
                 parser.approx_token_stream_pos(),
                 track,
             );
+
             if let Some(res) = res {
                 return res;
             }
@@ -691,11 +688,7 @@ impl TtParser {
                             }
                             Ok(nt) => nt,
                         };
-                        let m = match nt {
-                            ParseNtResult::Nt(nt) => MatchedNonterminal(Lrc::new((nt, span))),
-                            ParseNtResult::Tt(tt) => MatchedTokenTree(tt),
-                        };
-                        mp.push_match(next_metavar, seq_depth, m);
+                        mp.push_match(next_metavar, seq_depth, MatchedSingle(nt));
                         mp.idx += 1;
                     } else {
                         unreachable!()

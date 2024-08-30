@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use rustc_ast::{NestedMetaItem, CRATE_NODE_ID};
 use rustc_attr as attr;
 use rustc_data_structures::fx::FxHashSet;
@@ -15,16 +17,9 @@ use rustc_span::def_id::{DefId, LOCAL_CRATE};
 use rustc_span::symbol::{sym, Symbol};
 use rustc_target::spec::abi::Abi;
 
-use crate::errors;
+use crate::{errors, fluent_generated};
 
-use std::path::PathBuf;
-
-pub fn find_native_static_library(
-    name: &str,
-    verbatim: bool,
-    search_paths: &[PathBuf],
-    sess: &Session,
-) -> PathBuf {
+pub fn find_native_static_library(name: &str, verbatim: bool, sess: &Session) -> PathBuf {
     let formats = if verbatim {
         vec![("".into(), "".into())]
     } else {
@@ -35,9 +30,9 @@ pub fn find_native_static_library(
         if os == unix { vec![os] } else { vec![os, unix] }
     };
 
-    for path in search_paths {
+    for path in sess.target_filesearch(PathKind::Native).search_paths() {
         for (prefix, suffix) in &formats {
-            let test = path.join(format!("{prefix}{name}{suffix}"));
+            let test = path.dir.join(format!("{prefix}{name}{suffix}"));
             if test.exists() {
                 return test;
             }
@@ -60,8 +55,7 @@ fn find_bundled_library(
         && (sess.opts.unstable_opts.packed_bundled_libs || has_cfg || whole_archive == Some(true))
     {
         let verbatim = verbatim.unwrap_or(false);
-        let search_paths = &sess.target_filesearch(PathKind::Native).search_path_dirs();
-        return find_native_static_library(name.as_str(), verbatim, search_paths, sess)
+        return find_native_static_library(name.as_str(), verbatim, sess)
             .file_name()
             .and_then(|s| s.to_str())
             .map(Symbol::intern);
@@ -93,7 +87,6 @@ struct Collector<'tcx> {
 }
 
 impl<'tcx> Collector<'tcx> {
-    #[allow(rustc::untranslatable_diagnostic)] // FIXME: make this translatable
     fn process_module(&mut self, module: &ForeignModule) {
         let ForeignModule { def_id, abi, ref foreign_items } = *module;
         let def_id = def_id.expect_local();
@@ -157,7 +150,7 @@ impl<'tcx> Collector<'tcx> {
                             }
                             "raw-dylib" => {
                                 if !sess.target.is_like_windows {
-                                    sess.dcx().emit_err(errors::FrameworkOnlyWindows { span });
+                                    sess.dcx().emit_err(errors::RawDylibOnlyWindows { span });
                                 }
                                 NativeLibKind::RawDylib
                             }
@@ -167,7 +160,7 @@ impl<'tcx> Collector<'tcx> {
                                         sess,
                                         sym::link_arg_attribute,
                                         span,
-                                        "link kind `link-arg` is unstable",
+                                        fluent_generated::metadata_link_arg_unstable,
                                     )
                                     .emit();
                                 }
@@ -207,8 +200,13 @@ impl<'tcx> Collector<'tcx> {
                             continue;
                         };
                         if !features.link_cfg {
-                            feature_err(sess, sym::link_cfg, item.span(), "link cfg is unstable")
-                                .emit();
+                            feature_err(
+                                sess,
+                                sym::link_cfg,
+                                item.span(),
+                                fluent_generated::metadata_link_cfg_unstable,
+                            )
+                            .emit();
                         }
                         cfg = Some(link_cfg.clone());
                     }
@@ -272,6 +270,8 @@ impl<'tcx> Collector<'tcx> {
 
                     macro report_unstable_modifier($feature: ident) {
                         if !features.$feature {
+                            // FIXME: make this translatable
+                            #[expect(rustc::untranslatable_diagnostic)]
                             feature_err(
                                 sess,
                                 sym::$feature,

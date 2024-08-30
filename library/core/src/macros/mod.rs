@@ -14,6 +14,12 @@ macro_rules! panic {
 
 /// Asserts that two expressions are equal to each other (using [`PartialEq`]).
 ///
+/// Assertions are always checked in both debug and release builds, and cannot
+/// be disabled. See [`debug_assert_eq!`] for assertions that are disabled in
+/// release builds by default.
+///
+/// [`debug_assert_eq!`]: crate::debug_assert_eq
+///
 /// On panic, this macro will print the values of the expressions with their
 /// debug representations.
 ///
@@ -63,6 +69,12 @@ macro_rules! assert_eq {
 }
 
 /// Asserts that two expressions are not equal to each other (using [`PartialEq`]).
+///
+/// Assertions are always checked in both debug and release builds, and cannot
+/// be disabled. See [`debug_assert_ne!`] for assertions that are disabled in
+/// release builds by default.
+///
+/// [`debug_assert_ne!`]: crate::debug_assert_ne
 ///
 /// On panic, this macro will print the values of the expressions with their
 /// debug representations.
@@ -121,6 +133,12 @@ macro_rules! assert_ne {
 /// The pattern syntax is exactly the same as found in a match arm and the `matches!` macro. The
 /// optional if guard can be used to add additional checks that must be true for the matched value,
 /// otherwise this macro will panic.
+///
+/// Assertions are always checked in both debug and release builds, and cannot
+/// be disabled. See [`debug_assert_matches!`] for assertions that are disabled in
+/// release builds by default.
+///
+/// [`debug_assert_matches!`]: crate::assert_matches::debug_assert_matches
 ///
 /// On panic, this macro will print the value of the expression with its debug representation.
 ///
@@ -633,7 +651,7 @@ macro_rules! write {
     };
 }
 
-/// Write formatted data into a buffer, with a newline appended.
+/// Writes formatted data into a buffer, with a newline appended.
 ///
 /// On all platforms, the newline is the LINE FEED character (`\n`/`U+000A`) alone
 /// (no additional CARRIAGE RETURN (`\r`/`U+000D`).
@@ -1053,7 +1071,8 @@ pub(crate) mod builtin {
     ///
     /// If the environment variable is not defined, then a compilation error
     /// will be emitted. To not emit a compile error, use the [`option_env!`]
-    /// macro instead.
+    /// macro instead. A compilation error will also be emitted if the
+    /// environment variable is not a vaild Unicode string.
     ///
     /// # Examples
     ///
@@ -1568,7 +1587,12 @@ pub(crate) mod builtin {
     #[rustc_builtin_macro]
     #[macro_export]
     #[rustc_diagnostic_item = "assert_macro"]
-    #[allow_internal_unstable(panic_internals, edition_panic, generic_assert_internals)]
+    #[allow_internal_unstable(
+        core_intrinsics,
+        panic_internals,
+        edition_panic,
+        generic_assert_internals
+    )]
     macro_rules! assert {
         ($cond:expr $(,)?) => {{ /* compiler built-in */ }};
         ($cond:expr, $($arg:tt)+) => {{ /* compiler built-in */ }};
@@ -1704,30 +1728,50 @@ pub(crate) mod builtin {
     }
 
     /// Unstable placeholder for type ascription.
-    #[rustc_builtin_macro]
+    #[allow_internal_unstable(builtin_syntax)]
     #[unstable(
         feature = "type_ascription",
         issue = "23416",
         reason = "placeholder syntax for type ascription"
     )]
+    #[rustfmt::skip]
     pub macro type_ascribe($expr:expr, $ty:ty) {
-        /* compiler built-in */
+        builtin # type_ascribe($expr, $ty)
     }
 
-    /// Unstable implementation detail of the `rustc` compiler, do not use.
+    /// Unstable placeholder for deref patterns.
+    #[allow_internal_unstable(builtin_syntax)]
+    #[unstable(
+        feature = "deref_patterns",
+        issue = "87121",
+        reason = "placeholder syntax for deref patterns"
+    )]
+    pub macro deref($pat:pat) {
+        builtin # deref($pat)
+    }
+
+    /// Derive macro for `rustc-serialize`. Should not be used in new code.
     #[rustc_builtin_macro]
-    #[stable(feature = "rust1", since = "1.0.0")]
-    #[allow_internal_unstable(core_intrinsics, libstd_sys_internals, rt)]
+    #[unstable(
+        feature = "rustc_encodable_decodable",
+        issue = "none",
+        soft,
+        reason = "derive macro for `rustc-serialize`; should not be used in new code"
+    )]
     #[deprecated(since = "1.52.0", note = "rustc-serialize is deprecated and no longer supported")]
     #[doc(hidden)] // While technically stable, using it is unstable, and deprecated. Hide it.
     pub macro RustcDecodable($item:item) {
         /* compiler built-in */
     }
 
-    /// Unstable implementation detail of the `rustc` compiler, do not use.
+    /// Derive macro for `rustc-serialize`. Should not be used in new code.
     #[rustc_builtin_macro]
-    #[stable(feature = "rust1", since = "1.0.0")]
-    #[allow_internal_unstable(core_intrinsics, rt)]
+    #[unstable(
+        feature = "rustc_encodable_decodable",
+        issue = "none",
+        soft,
+        reason = "derive macro for `rustc-serialize`; should not be used in new code"
+    )]
     #[deprecated(since = "1.52.0", note = "rustc-serialize is deprecated and no longer supported")]
     #[doc(hidden)] // While technically stable, using it is unstable, and deprecated. Hide it.
     pub macro RustcEncodable($item:item) {

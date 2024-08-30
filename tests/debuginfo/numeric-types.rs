@@ -1,7 +1,6 @@
 //@ compile-flags:-g
 
-//@ min-gdb-version: 8.1
-//@ ignore-windows-gnu // emit_debug_gdb_scripts is disabled on Windows
+//@ ignore-windows-gnu: #128981
 
 // Tests the visualizations for `NonZero<T>`, `Wrapping<T>` and
 // `Atomic{Bool,I8,I16,I32,I64,Isize,U8,U16,U32,U64,Usize}` located in `libcore.natvis`.
@@ -237,7 +236,6 @@
 
 // lldb-command:v nz_usize
 // lldb-check:[...] 122 { __0 = { 0 = 122 } }
-#![feature(generic_nonzero)]
 
 use std::num::*;
 use std::sync::atomic::*;

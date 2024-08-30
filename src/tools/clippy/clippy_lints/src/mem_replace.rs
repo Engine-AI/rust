@@ -1,4 +1,5 @@
 use clippy_config::msrvs::{self, Msrv};
+use clippy_config::Conf;
 use clippy_utils::diagnostics::{span_lint_and_help, span_lint_and_sugg, span_lint_and_then};
 use clippy_utils::source::{snippet, snippet_with_applicability};
 use clippy_utils::sugg::Sugg;
@@ -193,7 +194,7 @@ fn check_replace_with_default(cx: &LateContext<'_>, src: &Expr<'_>, dest: &Expr<
             cx,
             MEM_REPLACE_WITH_DEFAULT,
             expr_span,
-            &format!(
+            format!(
                 "replacing a value of type `T` with `T::default()` is better expressed using `{top_crate}::mem::take`"
             ),
             |diag| {
@@ -217,9 +218,10 @@ pub struct MemReplace {
 }
 
 impl MemReplace {
-    #[must_use]
-    pub fn new(msrv: Msrv) -> Self {
-        Self { msrv }
+    pub fn new(conf: &'static Conf) -> Self {
+        Self {
+            msrv: conf.msrv.clone(),
+        }
     }
 }
 

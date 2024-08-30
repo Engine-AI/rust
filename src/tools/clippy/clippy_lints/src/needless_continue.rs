@@ -1,38 +1,3 @@
-//! Checks for continue statements in loops that are redundant.
-//!
-//! For example, the lint would catch
-//!
-//! ```rust
-//! let mut a = 1;
-//! let x = true;
-//!
-//! while a < 5 {
-//!     a = 6;
-//!     if x {
-//!         // ...
-//!     } else {
-//!         continue;
-//!     }
-//!     println!("Hello, world");
-//! }
-//! ```
-//!
-//! And suggest something like this:
-//!
-//! ```rust
-//! let mut a = 1;
-//! let x = true;
-//!
-//! while a < 5 {
-//!     a = 6;
-//!     if x {
-//!         // ...
-//!         println!("Hello, world");
-//!     }
-//! }
-//! ```
-//!
-//! This lint is **warn** by default.
 use clippy_utils::diagnostics::span_lint_and_help;
 use clippy_utils::source::{indent_of, snippet, snippet_block};
 use rustc_ast::ast;
@@ -178,8 +143,7 @@ impl EarlyLintPass for NeedlessContinue {
 /// Given an expression, returns true if either of the following is true
 ///
 /// - The expression is a `continue` node.
-/// - The expression node is a block with the first statement being a
-/// `continue`.
+/// - The expression node is a block with the first statement being a `continue`.
 fn needless_continue_in_else(else_expr: &ast::Expr, label: Option<&ast::Label>) -> bool {
     match else_expr.kind {
         ast::ExprKind::Block(ref else_block, _) => is_first_block_stmt_continue(else_block, label),
@@ -313,7 +277,7 @@ fn emit_warning(cx: &EarlyContext<'_>, data: &LintData<'_>, header: &str, typ: L
         expr.span,
         message,
         None,
-        &format!("{header}\n{snip}"),
+        format!("{header}\n{snip}"),
     );
 }
 

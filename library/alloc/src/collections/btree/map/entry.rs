@@ -2,13 +2,12 @@ use core::fmt::{self, Debug};
 use core::marker::PhantomData;
 use core::mem;
 
-use crate::alloc::{Allocator, Global};
+use Entry::*;
 
 use super::super::borrow::DormantMutRef;
 use super::super::node::{marker, Handle, NodeRef};
 use super::BTreeMap;
-
-use Entry::*;
+use crate::alloc::{Allocator, Global};
 
 /// A view into a single entry in a map, which may either be vacant or occupied.
 ///
@@ -189,6 +188,7 @@ impl<'a, K: Ord, V, A: Allocator + Clone> Entry<'a, K, V, A> {
     }
 
     /// Ensures a value is in the entry by inserting, if empty, the result of the default function.
+    ///
     /// This method allows for generating key-derived values for insertion by providing the default
     /// function a reference to the key that was moved during the `.entry(key)` method call.
     ///
@@ -354,7 +354,7 @@ impl<'a, K: Ord, V, A: Allocator + Clone> VacantEntry<'a, K, V, A> {
                 // SAFETY: There is no tree yet so no reference to it exists.
                 let map = unsafe { self.dormant_map.awaken() };
                 let mut root = NodeRef::new_leaf(self.alloc.clone());
-                let val_ptr = root.borrow_mut().push(self.key, value) as *mut V;
+                let val_ptr = root.borrow_mut().push(self.key, value);
                 map.root = Some(root.forget_type());
                 map.length = 1;
                 val_ptr

@@ -1,11 +1,9 @@
 use rustc_hir::lang_items::LangItem;
 use rustc_index::IndexVec;
+use rustc_middle::mir::interpret::Scalar;
+use rustc_middle::mir::visit::{MutatingUseContext, NonMutatingUseContext, PlaceContext, Visitor};
 use rustc_middle::mir::*;
-use rustc_middle::mir::{
-    interpret::Scalar,
-    visit::{MutatingUseContext, NonMutatingUseContext, PlaceContext, Visitor},
-};
-use rustc_middle::ty::{self, ParamEnv, Ty, TyCtxt, TypeAndMut};
+use rustc_middle::ty::{self, ParamEnv, Ty, TyCtxt};
 use rustc_session::Session;
 
 pub struct CheckAlignment;
@@ -16,7 +14,7 @@ impl<'tcx> MirPass<'tcx> for CheckAlignment {
         if sess.target.llvm_target == "i686-pc-windows-msvc" {
             return false;
         }
-        sess.opts.debug_assertions
+        sess.ub_checks()
     }
 
     fn run_pass(&self, tcx: TyCtxt<'tcx>, body: &mut Body<'tcx>) {
@@ -73,7 +71,7 @@ struct PointerFinder<'tcx, 'a> {
 impl<'tcx, 'a> Visitor<'tcx> for PointerFinder<'tcx, 'a> {
     fn visit_place(&mut self, place: &Place<'tcx>, context: PlaceContext, location: Location) {
         // We want to only check reads and writes to Places, so we specifically exclude
-        // Borrows and AddressOf.
+        // Borrow and RawBorrow.
         match context {
             PlaceContext::MutatingUse(
                 MutatingUseContext::Store
@@ -106,7 +104,7 @@ impl<'tcx, 'a> Visitor<'tcx> for PointerFinder<'tcx, 'a> {
         }
 
         let pointee_ty =
-            pointer_ty.builtin_deref(true).expect("no builtin_deref for an unsafe pointer").ty;
+            pointer_ty.builtin_deref(true).expect("no builtin_deref for an unsafe pointer");
         // Ideally we'd support this in the future, but for now we are limited to sized types.
         if !pointee_ty.is_sized(self.tcx, self.param_env) {
             debug!("Unsafe pointer, but pointee is not known to be sized: {:?}", pointer_ty);
@@ -157,7 +155,7 @@ fn insert_alignment_check<'tcx>(
     new_block: BasicBlock,
 ) {
     // Cast the pointer to a *const ()
-    let const_raw_ptr = Ty::new_ptr(tcx, TypeAndMut { ty: tcx.types.unit, mutbl: Mutability::Not });
+    let const_raw_ptr = Ty::new_imm_ptr(tcx, tcx.types.unit);
     let rvalue = Rvalue::Cast(CastKind::PtrToPtr, Operand::Copy(pointer), const_raw_ptr);
     let thin_ptr = local_decls.push(LocalDecl::with_source_info(const_raw_ptr, source_info)).into();
     block_data

@@ -1,5 +1,6 @@
 //! Completes references after dot (fields and method calls).
 
+use hir::{sym, Name};
 use ide_db::FxHashSet;
 use syntax::SmolStr;
 
@@ -90,12 +91,14 @@ pub(crate) fn complete_undotted_self(
                         in_breakable: expr_ctx.in_breakable,
                     },
                 },
-                Some(hir::known::SELF_PARAM),
+                Some(Name::new_symbol_root(sym::self_.clone())),
                 field,
                 &ty,
             )
         },
-        |acc, field, ty| acc.add_tuple_field(ctx, Some(hir::known::SELF_PARAM), field, &ty),
+        |acc, field, ty| {
+            acc.add_tuple_field(ctx, Some(Name::new_symbol_root(sym::self_.clone())), field, &ty)
+        },
         true,
         false,
     );
@@ -112,7 +115,7 @@ pub(crate) fn complete_undotted_self(
                 },
             },
             func,
-            Some(hir::known::SELF_PARAM),
+            Some(Name::new_symbol_root(sym::self_.clone())),
             None,
         )
     });
@@ -961,11 +964,11 @@ struct Foo { field: i32 }
 impl Foo { fn foo(&self) { $0 } }"#,
             expect![[r#"
                 fd self.field i32
+                me self.foo() fn(&self)
                 lc self       &Foo
                 sp Self       Foo
                 st Foo        Foo
                 bt u32        u32
-                me self.foo() fn(&self)
             "#]],
         );
         check(
@@ -975,11 +978,11 @@ struct Foo(i32);
 impl Foo { fn foo(&mut self) { $0 } }"#,
             expect![[r#"
                 fd self.0     i32
+                me self.foo() fn(&mut self)
                 lc self       &mut Foo
                 sp Self       Foo
                 st Foo        Foo
                 bt u32        u32
-                me self.foo() fn(&mut self)
             "#]],
         );
     }

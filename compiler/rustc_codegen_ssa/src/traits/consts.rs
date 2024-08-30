@@ -1,6 +1,7 @@
-use super::BackendTypes;
 use rustc_middle::mir::interpret::{ConstAllocation, Scalar};
 use rustc_target::abi;
+
+use super::BackendTypes;
 
 pub trait ConstMethods<'tcx>: BackendTypes {
     // Constant constructors
@@ -19,6 +20,7 @@ pub trait ConstMethods<'tcx>: BackendTypes {
     fn const_bool(&self, val: bool) -> Self::Value;
     fn const_i16(&self, i: i16) -> Self::Value;
     fn const_i32(&self, i: i32) -> Self::Value;
+    fn const_i8(&self, i: i8) -> Self::Value;
     fn const_u32(&self, i: u32) -> Self::Value;
     fn const_u64(&self, i: u64) -> Self::Value;
     fn const_u128(&self, i: u128) -> Self::Value;
@@ -28,6 +30,7 @@ pub trait ConstMethods<'tcx>: BackendTypes {
 
     fn const_str(&self, s: &str) -> (Self::Value, Self::Value);
     fn const_struct(&self, elts: &[Self::Value], packed: bool) -> Self::Value;
+    fn const_vector(&self, elts: &[Self::Value]) -> Self::Value;
 
     fn const_to_opt_uint(&self, v: Self::Value) -> Option<u64>;
     fn const_to_opt_u128(&self, v: Self::Value, sign_ext: bool) -> Option<u128>;
@@ -36,6 +39,5 @@ pub trait ConstMethods<'tcx>: BackendTypes {
 
     fn scalar_to_backend(&self, cv: Scalar, layout: abi::Scalar, llty: Self::Type) -> Self::Value;
 
-    fn const_bitcast(&self, val: Self::Value, ty: Self::Type) -> Self::Value;
     fn const_ptr_byte_offset(&self, val: Self::Value, offset: abi::Size) -> Self::Value;
 }

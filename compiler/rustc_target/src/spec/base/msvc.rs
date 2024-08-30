@@ -1,5 +1,6 @@
-use crate::spec::{DebuginfoKind, LinkerFlavor, Lld, SplitDebuginfo, TargetOptions};
 use std::borrow::Cow;
+
+use crate::spec::{DebuginfoKind, LinkerFlavor, Lld, SplitDebuginfo, TargetOptions};
 
 pub fn opts() -> TargetOptions {
     // Suppress the verbose logo and authorship debugging output, which would needlessly
@@ -14,6 +15,7 @@ pub fn opts() -> TargetOptions {
         pre_link_args,
         abi_return_struct_as_int: true,
         emit_debug_gdb_scripts: false,
+        archive_format: "coff".into(),
 
         // Currently this is the only supported method of debuginfo on MSVC
         // where `*.pdb` files show up next to the final artifact.

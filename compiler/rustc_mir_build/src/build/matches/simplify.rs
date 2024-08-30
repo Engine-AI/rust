@@ -12,10 +12,12 @@
 //! sort of test: for example, testing which variant an enum is, or
 //! testing a value against a constant.
 
-use crate::build::matches::{Candidate, FlatPat, MatchPair, PatternExtraData, TestCase};
-use crate::build::Builder;
-
 use std::mem;
+
+use tracing::{debug, instrument};
+
+use crate::build::matches::{MatchPairTree, PatternExtraData, TestCase};
+use crate::build::Builder;
 
 impl<'a, 'tcx> Builder<'a, 'tcx> {
     /// Simplify a list of match pairs so they all require a test. Stores relevant bindings and
@@ -23,7 +25,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
     #[instrument(skip(self), level = "debug")]
     pub(super) fn simplify_match_pairs<'pat>(
         &mut self,
-        match_pairs: &mut Vec<MatchPair<'pat, 'tcx>>,
+        match_pairs: &mut Vec<MatchPairTree<'pat, 'tcx>>,
         extra_data: &mut PatternExtraData<'tcx>,
     ) {
         // In order to please the borrow checker, in a pattern like `x @ pat` we must lower the
@@ -65,27 +67,5 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         // late as possible.
         match_pairs.sort_by_key(|pair| matches!(pair.test_case, TestCase::Or { .. }));
         debug!(simplified = ?match_pairs, "simplify_match_pairs");
-    }
-
-    /// Create a new candidate for each pattern in `pats`, and recursively simplify tje
-    /// single-or-pattern case.
-    pub(super) fn create_or_subcandidates<'pat>(
-        &mut self,
-        pats: &[FlatPat<'pat, 'tcx>],
-        has_guard: bool,
-    ) -> Vec<Candidate<'pat, 'tcx>> {
-        pats.iter()
-            .cloned()
-            .map(|flat_pat| {
-                let mut candidate = Candidate::from_flat_pat(flat_pat, has_guard);
-                if let [MatchPair { test_case: TestCase::Or { pats, .. }, .. }] =
-                    &*candidate.match_pairs
-                {
-                    candidate.subcandidates = self.create_or_subcandidates(pats, has_guard);
-                    candidate.match_pairs.pop();
-                }
-                candidate
-            })
-            .collect()
     }
 }

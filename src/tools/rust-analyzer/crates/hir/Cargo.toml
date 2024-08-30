@@ -1,7 +1,8 @@
 [package]
 name = "hir"
 version = "0.0.0"
-description = "TBD"
+repository.workspace = true
+description = "A high-level object-oriented access to Rust code for rust-analyzer."
 
 authors.workspace = true
 edition.workspace = true
@@ -27,13 +28,14 @@ cfg.workspace = true
 hir-def.workspace = true
 hir-expand.workspace = true
 hir-ty.workspace = true
+intern.workspace = true
 stdx.workspace = true
 syntax.workspace = true
 tt.workspace = true
 span.workspace = true
 
 [features]
-in-rust-tree = []
+in-rust-tree = ["hir-expand/in-rust-tree"]
 
 [lints]
 workspace = true

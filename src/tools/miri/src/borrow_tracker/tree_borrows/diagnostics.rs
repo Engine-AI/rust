@@ -19,7 +19,7 @@ pub enum AccessCause {
     Explicit(AccessKind),
     Reborrow,
     Dealloc,
-    FnExit,
+    FnExit(AccessKind),
 }
 
 impl fmt::Display for AccessCause {
@@ -28,7 +28,11 @@ impl fmt::Display for AccessCause {
             Self::Explicit(kind) => write!(f, "{kind}"),
             Self::Reborrow => write!(f, "reborrow"),
             Self::Dealloc => write!(f, "deallocation"),
-            Self::FnExit => write!(f, "protector release"),
+            // This is dead code, since the protector release access itself can never
+            // cause UB (while the protector is active, if some other access invalidates
+            // further use of the protected tag, that is immediate UB).
+            // Describing the cause of UB is the only time this function is called.
+            Self::FnExit(_) => unreachable!("protector accesses can never be the source of UB"),
         }
     }
 }
@@ -40,7 +44,7 @@ impl AccessCause {
             Self::Explicit(kind) => format!("{rel} {kind}"),
             Self::Reborrow => format!("reborrow (acting as a {rel} read access)"),
             Self::Dealloc => format!("deallocation (acting as a {rel} write access)"),
-            Self::FnExit => format!("protector release (acting as a {rel} read access)"),
+            Self::FnExit(kind) => format!("protector release (acting as a {rel} {kind})"),
         }
     }
 }
@@ -48,7 +52,7 @@ impl AccessCause {
 /// Complete data for an event:
 #[derive(Clone, Debug)]
 pub struct Event {
-    /// Transformation of permissions that occured because of this event.
+    /// Transformation of permissions that occurred because of this event.
     pub transition: PermTransition,
     /// Kind of the access that triggered this event.
     pub access_cause: AccessCause,
@@ -58,7 +62,7 @@ pub struct Event {
     /// `None` means that this is an implicit access to the entire allocation
     /// (used for the implicit read on protector release).
     pub access_range: Option<AllocRange>,
-    /// The transition recorded by this event only occured on a subrange of
+    /// The transition recorded by this event only occurred on a subrange of
     /// `access_range`: a single access on `access_range` triggers several events,
     /// each with their own mutually disjoint `transition_range`. No-op transitions
     /// should not be recorded as events, so the union of all `transition_range` is not
@@ -365,7 +369,7 @@ type S = &'static str;
 /// Pretty-printing details
 ///
 /// Example:
-/// ```
+/// ```rust,ignore (private type)
 /// DisplayFmtWrapper {
 ///     top: '>',
 ///     bot: '<',
@@ -390,10 +394,10 @@ struct DisplayFmtWrapper {
     warning_text: S,
 }
 
-/// Formating of the permissions on each range.
+/// Formatting of the permissions on each range.
 ///
 /// Example:
-/// ```
+/// ```rust,ignore (private type)
 /// DisplayFmtPermission {
 ///     open: "[",
 ///     sep: "|",
@@ -422,10 +426,10 @@ struct DisplayFmtPermission {
     range_sep: S,
 }
 
-/// Formating of the tree structure.
+/// Formatting of the tree structure.
 ///
 /// Example:
-/// ```
+/// ```rust,ignore (private type)
 /// DisplayFmtPadding {
 ///     join_middle: "|-",
 ///     join_last: "'-",
@@ -463,7 +467,7 @@ struct DisplayFmtPadding {
 /// How to show whether a location has been accessed
 ///
 /// Example:
-/// ```
+/// ```rust,ignore (private type)
 /// DisplayFmtAccess {
 ///     yes: " ",
 ///     no: "?",
@@ -487,7 +491,7 @@ struct DisplayFmtAccess {
     meh: S,
 }
 
-/// All parameters to determine how the tree is formated.
+/// All parameters to determine how the tree is formatted.
 struct DisplayFmt {
     wrapper: DisplayFmtWrapper,
     perm: DisplayFmtPermission,

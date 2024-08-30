@@ -1,13 +1,11 @@
-extern crate run_make_support;
+//@ only-wasm32-wasip1
 
-use run_make_support::{out_dir, rustc, wasmparser};
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
+
+use run_make_support::{rfs, rustc, wasmparser};
 
 fn main() {
-    if std::env::var("TARGET").unwrap() != "wasm32-wasip1" {
-        return;
-    }
-
     test_file("foo.rs", &[("a", &["foo"]), ("b", &["foo"])]);
     test_file("bar.rs", &[("m1", &["f", "g"]), ("m2", &["f"])]);
     test_file("baz.rs", &[("sqlite", &["allocate", "deallocate"])]);
@@ -24,9 +22,9 @@ fn test_file(file: &str, expected_imports: &[(&str, &[&str])]) {
 fn test(file: &str, args: &[&str], expected_imports: &[(&str, &[&str])]) {
     println!("test {file:?} {args:?} for {expected_imports:?}");
 
-    rustc().arg(file).arg("--target=wasm32-wasip1").args(args).run();
+    rustc().input(file).target("wasm32-wasip1").args(args).run();
 
-    let file = std::fs::read(&out_dir().join(file).with_extension("wasm")).unwrap();
+    let file = rfs::read(Path::new(file).with_extension("wasm"));
 
     let mut imports = HashMap::new();
     for payload in wasmparser::Parser::new(0).parse_all(&file) {
