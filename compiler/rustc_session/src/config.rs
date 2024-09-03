@@ -251,7 +251,7 @@ pub struct LinkSelfContained {
     pub explicitly_set: Option<bool>,
 
     /// The components that are enabled on the CLI, using the `+component` syntax or one of the
-    /// `true` shorcuts.
+    /// `true` shortcuts.
     enabled_components: LinkSelfContainedComponents,
 
     /// The components that are disabled on the CLI, using the `-component` syntax or one of the
@@ -313,13 +313,13 @@ impl LinkSelfContained {
     }
 
     /// Returns whether the self-contained linker component was enabled on the CLI, using the
-    /// `-C link-self-contained=+linker` syntax, or one of the `true` shorcuts.
+    /// `-C link-self-contained=+linker` syntax, or one of the `true` shortcuts.
     pub fn is_linker_enabled(&self) -> bool {
         self.enabled_components.contains(LinkSelfContainedComponents::LINKER)
     }
 
     /// Returns whether the self-contained linker component was disabled on the CLI, using the
-    /// `-C link-self-contained=-linker` syntax, or one of the `false` shorcuts.
+    /// `-C link-self-contained=-linker` syntax, or one of the `false` shortcuts.
     pub fn is_linker_disabled(&self) -> bool {
         self.disabled_components.contains(LinkSelfContainedComponents::LINKER)
     }
@@ -360,7 +360,7 @@ impl LinkerFeaturesCli {
         // Duplicate flags are reduced as we go, the last occurrence wins:
         // `+feature,-feature,+feature` only enables the feature, and does not record it as both
         // enabled and disabled on the CLI.
-        // We also only expose `+/-lld` at the moment, as it's currenty the only implemented linker
+        // We also only expose `+/-lld` at the moment, as it's currently the only implemented linker
         // feature and toggling `LinkerFeatures::CC` would be a noop.
         match feature {
             "+lld" => {
@@ -1102,7 +1102,7 @@ bitflags::bitflags! {
         const MACRO = 1 << 0;
         /// Apply remappings to printed compiler diagnostics
         const DIAGNOSTICS = 1 << 1;
-        /// Apply remappings to debug informations
+        /// Apply remappings to debug information
         const DEBUGINFO = 1 << 3;
 
         /// An alias for `macro` and `debuginfo`. This ensures all paths in compiled
@@ -3368,4 +3368,26 @@ pub enum FunctionReturn {
 
     /// Replace returns with jumps to thunk, without emitting the thunk.
     ThunkExtern,
+}
+
+/// Whether extra span comments are included when dumping MIR, via the `-Z mir-include-spans` flag.
+/// By default, only enabled in the NLL MIR dumps, and disabled in all other passes.
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
+pub enum MirIncludeSpans {
+    Off,
+    On,
+    /// Default: include extra comments in NLL MIR dumps only. Can be ignored and considered as
+    /// `Off` in all other cases.
+    #[default]
+    Nll,
+}
+
+impl MirIncludeSpans {
+    /// Unless opting into extra comments for all passes, they can be considered disabled.
+    /// The cases where a distinction between on/off and a per-pass value can exist will be handled
+    /// in the passes themselves: i.e. the `Nll` value is considered off for all intents and
+    /// purposes, except for the NLL MIR dump pass.
+    pub fn is_enabled(self) -> bool {
+        self == MirIncludeSpans::On
+    }
 }

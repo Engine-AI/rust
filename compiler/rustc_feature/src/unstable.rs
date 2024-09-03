@@ -585,7 +585,7 @@ declare_features! (
     (unstable, rust_cold_cc, "1.63.0", Some(97544)),
     /// Allows use of x86 SHA512, SM3 and SM4 target-features and intrinsics
     (unstable, sha512_sm_x86, "CURRENT_RUSTC_VERSION", Some(126624)),
-    /// Shortern the tail expression lifetime
+    /// Shorten the tail expression lifetime
     (unstable, shorter_tail_lifetimes, "1.79.0", Some(123739)),
     /// Allows the use of SIMD types in functions declared in `extern` blocks.
     (unstable, simd_ffi, "1.0.0", Some(27731)),
@@ -597,8 +597,6 @@ declare_features! (
     (unstable, strict_provenance, "1.61.0", Some(95228)),
     /// Allows string patterns to dereference values to match them.
     (unstable, string_deref_patterns, "1.67.0", Some(87121)),
-    /// Allows structs to carry target_feature information.
-    (incomplete, struct_target_features, "CURRENT_RUSTC_VERSION", Some(129107)),
     /// Allows the use of `#[target_feature]` on safe functions.
     (unstable, target_feature_11, "1.45.0", Some(69098)),
     /// Allows using `#[thread_local]` on `static` items.
