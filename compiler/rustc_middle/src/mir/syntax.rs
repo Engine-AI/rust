@@ -5,14 +5,14 @@
 
 use rustc_ast::{InlineAsmOptions, InlineAsmTemplatePiece, Mutability};
 use rustc_data_structures::packed::Pu128;
-use rustc_hir::def_id::DefId;
 use rustc_hir::CoroutineKind;
+use rustc_hir::def_id::DefId;
 use rustc_index::IndexVec;
 use rustc_macros::{HashStable, TyDecodable, TyEncodable, TypeFoldable, TypeVisitable};
+use rustc_span::Span;
 use rustc_span::def_id::LocalDefId;
 use rustc_span::source_map::Spanned;
 use rustc_span::symbol::Symbol;
-use rustc_span::Span;
 use rustc_target::abi::{FieldIdx, VariantIdx};
 use rustc_target::asm::InlineAsmRegOrRegClass;
 use smallvec::SmallVec;
@@ -1094,7 +1094,7 @@ pub struct Place<'tcx> {
     pub projection: &'tcx List<PlaceElem<'tcx>>,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 #[derive(TyEncodable, TyDecodable, HashStable, TypeFoldable, TypeVisitable)]
 pub enum ProjectionElem<V, T> {
     Deref,
@@ -1307,6 +1307,9 @@ pub enum Rvalue<'tcx> {
     /// If the type of the place is an array, this is the array length. For slices (`[T]`, not
     /// `&[T]`) this accesses the place's metadata to determine the length. This rvalue is
     /// ill-formed for places of other types.
+    ///
+    /// This cannot be a `UnOp(PtrMetadata, _)` because that expects a value, and we only
+    /// have a place, and `UnOp(PtrMetadata, RawPtr(place))` is not a thing.
     Len(Place<'tcx>),
 
     /// Performs essentially all of the casts that can be performed via `as`.
@@ -1465,7 +1468,7 @@ pub enum NullOp<'tcx> {
     UbChecks,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 #[derive(HashStable, TyEncodable, TyDecodable, TypeFoldable, TypeVisitable)]
 pub enum UnOp {
     /// The `!` operator for logical inversion
@@ -1483,7 +1486,7 @@ pub enum UnOp {
     PtrMetadata,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, PartialOrd, Ord, Eq, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 #[derive(TyEncodable, TyDecodable, HashStable, TypeFoldable, TypeVisitable)]
 pub enum BinOp {
     /// The `+` operator (addition)

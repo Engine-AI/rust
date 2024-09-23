@@ -1,21 +1,21 @@
 use std::borrow::Cow;
 use std::fmt;
 
-use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
-use rustc_data_structures::sync::Lrc;
-use rustc_macros::{Decodable, Encodable, HashStable_Generic};
-use rustc_span::edition::Edition;
-use rustc_span::symbol::{kw, sym};
-#[allow(clippy::useless_attribute)] // FIXME: following use of `hidden_glob_reexports` incorrectly triggers `useless_attribute` lint.
-#[allow(hidden_glob_reexports)]
-use rustc_span::symbol::{Ident, Symbol};
-use rustc_span::{ErrorGuaranteed, Span, DUMMY_SP};
 pub use BinOpToken::*;
 pub use LitKind::*;
 pub use Nonterminal::*;
 pub use NtExprKind::*;
 pub use NtPatKind::*;
 pub use TokenKind::*;
+use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
+use rustc_data_structures::sync::Lrc;
+use rustc_macros::{Decodable, Encodable, HashStable_Generic};
+use rustc_span::edition::Edition;
+#[allow(clippy::useless_attribute)] // FIXME: following use of `hidden_glob_reexports` incorrectly triggers `useless_attribute` lint.
+#[allow(hidden_glob_reexports)]
+use rustc_span::symbol::{Ident, Symbol};
+use rustc_span::symbol::{kw, sym};
+use rustc_span::{DUMMY_SP, ErrorGuaranteed, Span};
 
 use crate::ast;
 use crate::ptr::P;
@@ -331,11 +331,11 @@ pub enum TokenKind {
     /// Do not forget about `NtLifetime` when you want to match on lifetime identifiers.
     /// It's recommended to use `Token::(lifetime,uninterpolate,uninterpolated_span)` to
     /// treat regular and interpolated lifetime identifiers in the same way.
-    Lifetime(Symbol),
+    Lifetime(Symbol, IdentIsRaw),
     /// This identifier (and its span) is the lifetime passed to the
     /// declarative macro. The span in the surrounding `Token` is the span of
     /// the `lifetime` metavariable in the macro's RHS.
-    NtLifetime(Ident),
+    NtLifetime(Ident, IdentIsRaw),
 
     /// An embedded AST node, as produced by a macro. This only exists for
     /// historical reasons. We'd like to get rid of it, for multiple reasons.
@@ -458,7 +458,7 @@ impl Token {
     /// if they keep spans or perform edition checks.
     pub fn uninterpolated_span(&self) -> Span {
         match self.kind {
-            NtIdent(ident, _) | NtLifetime(ident) => ident.span,
+            NtIdent(ident, _) | NtLifetime(ident, _) => ident.span,
             Interpolated(ref nt) => nt.use_span(),
             _ => self.span,
         }
@@ -661,7 +661,9 @@ impl Token {
     pub fn uninterpolate(&self) -> Cow<'_, Token> {
         match self.kind {
             NtIdent(ident, is_raw) => Cow::Owned(Token::new(Ident(ident.name, is_raw), ident.span)),
-            NtLifetime(ident) => Cow::Owned(Token::new(Lifetime(ident.name), ident.span)),
+            NtLifetime(ident, is_raw) => {
+                Cow::Owned(Token::new(Lifetime(ident.name, is_raw), ident.span))
+            }
             _ => Cow::Borrowed(self),
         }
     }
@@ -679,11 +681,11 @@ impl Token {
 
     /// Returns a lifetime identifier if this token is a lifetime.
     #[inline]
-    pub fn lifetime(&self) -> Option<Ident> {
+    pub fn lifetime(&self) -> Option<(Ident, IdentIsRaw)> {
         // We avoid using `Token::uninterpolate` here because it's slow.
         match self.kind {
-            Lifetime(name) => Some(Ident::new(name, self.span)),
-            NtLifetime(ident) => Some(ident),
+            Lifetime(name, is_raw) => Some((Ident::new(name, self.span), is_raw)),
+            NtLifetime(ident, is_raw) => Some((ident, is_raw)),
             _ => None,
         }
     }
@@ -865,7 +867,7 @@ impl Token {
                 _ => return None,
             },
             SingleQuote => match joint.kind {
-                Ident(name, IdentIsRaw::No) => Lifetime(Symbol::intern(&format!("'{name}"))),
+                Ident(name, is_raw) => Lifetime(Symbol::intern(&format!("'{name}")), is_raw),
                 _ => return None,
             },
 

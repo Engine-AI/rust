@@ -1089,13 +1089,13 @@ fn signal_string(signal: i32) -> &'static str {
         libc::SIGURG => " (SIGURG)",
         #[cfg(not(target_os = "l4re"))]
         libc::SIGXCPU => " (SIGXCPU)",
-        #[cfg(not(target_os = "l4re"))]
+        #[cfg(not(any(target_os = "l4re", target_os = "rtems")))]
         libc::SIGXFSZ => " (SIGXFSZ)",
-        #[cfg(not(target_os = "l4re"))]
+        #[cfg(not(any(target_os = "l4re", target_os = "rtems")))]
         libc::SIGVTALRM => " (SIGVTALRM)",
         #[cfg(not(target_os = "l4re"))]
         libc::SIGPROF => " (SIGPROF)",
-        #[cfg(not(target_os = "l4re"))]
+        #[cfg(not(any(target_os = "l4re", target_os = "rtems")))]
         libc::SIGWINCH => " (SIGWINCH)",
         #[cfg(not(any(target_os = "haiku", target_os = "l4re")))]
         libc::SIGIO => " (SIGIO)",
@@ -1190,8 +1190,8 @@ impl ExitStatusError {
 mod linux_child_ext {
 
     use crate::os::linux::process as os;
-    use crate::sys::pal::unix::linux::pidfd as imp;
     use crate::sys::pal::unix::ErrorKind;
+    use crate::sys::pal::unix::linux::pidfd as imp;
     use crate::sys_common::FromInner;
     use crate::{io, mem};
 

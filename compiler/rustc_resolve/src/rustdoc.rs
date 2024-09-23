@@ -9,8 +9,8 @@ use rustc_ast::util::comments::beautify_doc_string;
 use rustc_data_structures::fx::FxHashMap;
 use rustc_middle::ty::TyCtxt;
 use rustc_span::def_id::DefId;
-use rustc_span::symbol::{kw, sym, Symbol};
-use rustc_span::{InnerSpan, Span, DUMMY_SP};
+use rustc_span::symbol::{Symbol, kw, sym};
+use rustc_span::{DUMMY_SP, InnerSpan, Span};
 use tracing::{debug, trace};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -270,12 +270,10 @@ fn strip_generics_from_path_segment(segment: Vec<char>) -> Result<String, Malfor
                 // Give a helpful error message instead of completely ignoring the angle brackets.
                 return Err(MalformedGenerics::HasFullyQualifiedSyntax);
             }
+        } else if param_depth == 0 {
+            stripped_segment.push(c);
         } else {
-            if param_depth == 0 {
-                stripped_segment.push(c);
-            } else {
-                latest_generics_chunk.push(c);
-            }
+            latest_generics_chunk.push(c);
         }
     }
 

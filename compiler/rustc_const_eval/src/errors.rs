@@ -15,8 +15,8 @@ use rustc_middle::mir::interpret::{
 };
 use rustc_middle::ty::{self, Mutability, Ty};
 use rustc_span::Span;
-use rustc_target::abi::call::AdjustForForeignAbiError;
 use rustc_target::abi::WrappingRange;
+use rustc_target::abi::call::AdjustForForeignAbiError;
 
 use crate::interpret::InternKind;
 
@@ -35,13 +35,10 @@ pub(crate) struct NestedStaticInThreadLocal {
     pub span: Span,
 }
 
-#[derive(LintDiagnostic)]
+#[derive(Diagnostic)]
 #[diag(const_eval_mutable_ptr_in_final)]
 pub(crate) struct MutablePtrInFinal {
-    // rust-lang/rust#122153: This was marked as `#[primary_span]` under
-    // `derive(Diagnostic)`. Since we expect we may hard-error in future, we are
-    // keeping the field (and skipping it under `derive(LintDiagnostic)`).
-    #[skip_arg]
+    #[primary_span]
     pub span: Span,
     pub kind: InternKind,
 }
@@ -94,30 +91,6 @@ pub(crate) struct RawPtrComparisonErr {
 pub(crate) struct PanicNonStrErr {
     #[primary_span]
     pub span: Span,
-}
-
-#[derive(Diagnostic)]
-#[diag(const_eval_mut_deref, code = E0658)]
-pub(crate) struct MutDerefErr {
-    #[primary_span]
-    pub span: Span,
-    pub kind: ConstContext,
-}
-
-#[derive(Diagnostic)]
-#[diag(const_eval_transient_mut_borrow, code = E0658)]
-pub(crate) struct TransientMutBorrowErr {
-    #[primary_span]
-    pub span: Span,
-    pub kind: ConstContext,
-}
-
-#[derive(Diagnostic)]
-#[diag(const_eval_transient_mut_raw, code = E0658)]
-pub(crate) struct TransientMutRawErr {
-    #[primary_span]
-    pub span: Span,
-    pub kind: ConstContext,
 }
 
 #[derive(Diagnostic)]
@@ -220,13 +193,6 @@ pub(crate) struct InteriorMutableDataRefer {
     pub teach: bool,
 }
 
-#[derive(Diagnostic)]
-#[diag(const_eval_interior_mutability_borrow)]
-pub(crate) struct InteriorMutabilityBorrow {
-    #[primary_span]
-    pub span: Span,
-}
-
 #[derive(LintDiagnostic)]
 #[diag(const_eval_long_running)]
 #[note]
@@ -243,6 +209,8 @@ pub struct LongRunningWarn {
     pub span: Span,
     #[help]
     pub item_span: Span,
+    // Used for evading `-Z deduplicate-diagnostics`.
+    pub force_duplicate: usize,
 }
 
 #[derive(Subdiagnostic)]
@@ -542,13 +510,10 @@ impl<'a> ReportErrorExt for UndefinedBehaviorInfo<'a> {
             }
             ShiftOverflow { intrinsic, shift_amount } => {
                 diag.arg("intrinsic", intrinsic);
-                diag.arg(
-                    "shift_amount",
-                    match shift_amount {
-                        Either::Left(v) => v.to_string(),
-                        Either::Right(v) => v.to_string(),
-                    },
-                );
+                diag.arg("shift_amount", match shift_amount {
+                    Either::Left(v) => v.to_string(),
+                    Either::Right(v) => v.to_string(),
+                });
             }
             BoundsCheckFailed { len, index } => {
                 diag.arg("len", len);

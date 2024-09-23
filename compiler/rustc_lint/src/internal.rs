@@ -10,15 +10,15 @@ use rustc_hir::{
 };
 use rustc_middle::ty::{self, GenericArgsRef, Ty as MiddleTy};
 use rustc_session::{declare_lint_pass, declare_tool_lint};
-use rustc_span::hygiene::{ExpnKind, MacroKind};
-use rustc_span::symbol::{kw, sym, Symbol};
 use rustc_span::Span;
+use rustc_span::hygiene::{ExpnKind, MacroKind};
+use rustc_span::symbol::{Symbol, kw, sym};
 use tracing::debug;
 
 use crate::lints::{
     BadOptAccessDiag, DefaultHashTypesDiag, DiagOutOfImpl, LintPassByHand, NonExistentDocKeyword,
-    NonGlobImportTypeIrInherent, QueryInstability, SpanUseEqCtxtDiag, TyQualified, TykindDiag,
-    TykindKind, TypeIrInherentUsage, UntranslatableDiag,
+    NonGlobImportTypeIrInherent, QueryInstability, QueryUntracked, SpanUseEqCtxtDiag, TyQualified,
+    TykindDiag, TykindKind, TypeIrInherentUsage, UntranslatableDiag,
 };
 use crate::{EarlyContext, EarlyLintPass, LateContext, LateLintPass, LintContext};
 
@@ -48,11 +48,10 @@ impl LateLintPass<'_> for DefaultHashTypes {
             Some(sym::HashSet) => "FxHashSet",
             _ => return,
         };
-        cx.emit_span_lint(
-            DEFAULT_HASH_TYPES,
-            path.span,
-            DefaultHashTypesDiag { preferred, used: cx.tcx.item_name(def_id) },
-        );
+        cx.emit_span_lint(DEFAULT_HASH_TYPES, path.span, DefaultHashTypesDiag {
+            preferred,
+            used: cx.tcx.item_name(def_id),
+        });
     }
 }
 
@@ -88,7 +87,18 @@ declare_tool_lint! {
     report_in_external_macro: true
 }
 
-declare_lint_pass!(QueryStability => [POTENTIAL_QUERY_INSTABILITY]);
+declare_tool_lint! {
+    /// The `untracked_query_information` lint detects use of methods which leak information not
+    /// tracked by the query system, such as whether a `Steal<T>` value has already been stolen. In
+    /// order not to break incremental compilation, such methods must be used very carefully or not
+    /// at all.
+    pub rustc::UNTRACKED_QUERY_INFORMATION,
+    Allow,
+    "require explicit opt-in when accessing information not tracked by the query system",
+    report_in_external_macro: true
+}
+
+declare_lint_pass!(QueryStability => [POTENTIAL_QUERY_INSTABILITY, UNTRACKED_QUERY_INFORMATION]);
 
 impl LateLintPass<'_> for QueryStability {
     fn check_expr(&mut self, cx: &LateContext<'_>, expr: &Expr<'_>) {
@@ -96,11 +106,14 @@ impl LateLintPass<'_> for QueryStability {
         if let Ok(Some(instance)) = ty::Instance::try_resolve(cx.tcx, cx.param_env, def_id, args) {
             let def_id = instance.def_id();
             if cx.tcx.has_attr(def_id, sym::rustc_lint_query_instability) {
-                cx.emit_span_lint(
-                    POTENTIAL_QUERY_INSTABILITY,
-                    span,
-                    QueryInstability { query: cx.tcx.item_name(def_id) },
-                );
+                cx.emit_span_lint(POTENTIAL_QUERY_INSTABILITY, span, QueryInstability {
+                    query: cx.tcx.item_name(def_id),
+                });
+            }
+            if cx.tcx.has_attr(def_id, sym::rustc_lint_untracked_query_information) {
+                cx.emit_span_lint(UNTRACKED_QUERY_INFORMATION, span, QueryUntracked {
+                    method: cx.tcx.item_name(def_id),
+                });
             }
         }
     }
@@ -190,11 +203,9 @@ impl<'tcx> LateLintPass<'tcx> for TyTyKind {
 
                     match span {
                         Some(span) => {
-                            cx.emit_span_lint(
-                                USAGE_OF_TY_TYKIND,
-                                path.span,
-                                TykindKind { suggestion: span },
-                            );
+                            cx.emit_span_lint(USAGE_OF_TY_TYKIND, path.span, TykindKind {
+                                suggestion: span,
+                            });
                         }
                         None => cx.emit_span_lint(USAGE_OF_TY_TYKIND, path.span, TykindDiag),
                     }
@@ -202,11 +213,10 @@ impl<'tcx> LateLintPass<'tcx> for TyTyKind {
                     && path.segments.len() > 1
                     && let Some(ty) = is_ty_or_ty_ctxt(cx, path)
                 {
-                    cx.emit_span_lint(
-                        USAGE_OF_QUALIFIED_TY,
-                        path.span,
-                        TyQualified { ty, suggestion: path.span },
-                    );
+                    cx.emit_span_lint(USAGE_OF_QUALIFIED_TY, path.span, TyQualified {
+                        ty,
+                        suggestion: path.span,
+                    });
                 }
             }
             _ => {}
@@ -400,11 +410,9 @@ impl<'tcx> LateLintPass<'tcx> for ExistingDocKeyword {
                         if is_doc_keyword(keyword) {
                             return;
                         }
-                        cx.emit_span_lint(
-                            EXISTING_DOC_KEYWORD,
-                            attr.span,
-                            NonExistentDocKeyword { keyword },
-                        );
+                        cx.emit_span_lint(EXISTING_DOC_KEYWORD, attr.span, NonExistentDocKeyword {
+                            keyword,
+                        });
                     }
                 }
             }
@@ -607,11 +615,9 @@ impl LateLintPass<'_> for BadOptAccess {
                 && let Some(lit) = item.lit()
                 && let ast::LitKind::Str(val, _) = lit.kind
             {
-                cx.emit_span_lint(
-                    BAD_OPT_ACCESS,
-                    expr.span,
-                    BadOptAccessDiag { msg: val.as_str() },
-                );
+                cx.emit_span_lint(BAD_OPT_ACCESS, expr.span, BadOptAccessDiag {
+                    msg: val.as_str(),
+                });
             }
         }
     }

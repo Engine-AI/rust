@@ -210,7 +210,7 @@ mod move_check;
 use std::path::PathBuf;
 
 use move_check::MoveCheckState;
-use rustc_data_structures::sync::{par_for_each_in, LRef, MTLock};
+use rustc_data_structures::sync::{LRef, MTLock, par_for_each_in};
 use rustc_data_structures::unord::{UnordMap, UnordSet};
 use rustc_hir as hir;
 use rustc_hir::def::DefKind;
@@ -220,7 +220,7 @@ use rustc_middle::middle::codegen_fn_attrs::CodegenFnAttrFlags;
 use rustc_middle::mir::interpret::{AllocId, ErrorHandled, GlobalAlloc, Scalar};
 use rustc_middle::mir::mono::{InstantiationMode, MonoItem};
 use rustc_middle::mir::visit::Visitor as MirVisitor;
-use rustc_middle::mir::{self, traversal, Location, MentionedItem};
+use rustc_middle::mir::{self, Location, MentionedItem, traversal};
 use rustc_middle::query::TyCtxtAt;
 use rustc_middle::ty::adjustment::{CustomCoerceUnsized, PointerCoercion};
 use rustc_middle::ty::layout::ValidityRequirement;
@@ -231,11 +231,11 @@ use rustc_middle::ty::{
 };
 use rustc_middle::util::Providers;
 use rustc_middle::{bug, span_bug};
-use rustc_session::config::EntryFnType;
 use rustc_session::Limit;
-use rustc_span::source_map::{dummy_spanned, respan, Spanned};
-use rustc_span::symbol::{sym, Ident};
-use rustc_span::{Span, DUMMY_SP};
+use rustc_session::config::EntryFnType;
+use rustc_span::source_map::{Spanned, dummy_spanned, respan};
+use rustc_span::symbol::{Ident, sym};
+use rustc_span::{DUMMY_SP, Span};
 use rustc_target::abi::Size;
 use tracing::{debug, instrument, trace};
 
@@ -1041,8 +1041,11 @@ fn find_vtable_types_for_unsizing<'tcx>(
     match (source_ty.kind(), target_ty.kind()) {
         (&ty::Ref(_, a, _), &ty::Ref(_, b, _) | &ty::RawPtr(b, _))
         | (&ty::RawPtr(a, _), &ty::RawPtr(b, _)) => ptr_vtable(a, b),
-        (&ty::Adt(def_a, _), &ty::Adt(def_b, _)) if def_a.is_box() && def_b.is_box() => {
-            ptr_vtable(source_ty.boxed_ty(), target_ty.boxed_ty())
+        (_, _)
+            if let Some(source_boxed) = source_ty.boxed_ty()
+                && let Some(target_boxed) = target_ty.boxed_ty() =>
+        {
+            ptr_vtable(source_boxed, target_boxed)
         }
 
         // T as dyn* Trait
@@ -1190,7 +1193,7 @@ fn assoc_fn_of_type<'tcx>(tcx: TyCtxt<'tcx>, def_id: DefId, fn_ident: Ident) -> 
             return Some(new.def_id);
         }
     }
-    return None;
+    None
 }
 
 /// Scans the MIR in order to find function calls, closures, and drop-glue.

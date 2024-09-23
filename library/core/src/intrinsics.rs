@@ -1020,17 +1020,10 @@ pub const fn unlikely(b: bool) -> bool {
 /// any safety invariants.
 ///
 /// This intrinsic does not have a stable counterpart.
-#[cfg(not(bootstrap))]
 #[unstable(feature = "core_intrinsics", issue = "none")]
 #[rustc_intrinsic]
 #[rustc_nounwind]
 #[miri::intrinsic_fallback_is_spec]
-#[inline]
-pub fn select_unpredictable<T>(b: bool, true_val: T, false_val: T) -> T {
-    if b { true_val } else { false_val }
-}
-
-#[cfg(bootstrap)]
 #[inline]
 pub fn select_unpredictable<T>(b: bool, true_val: T, false_val: T) -> T {
     if b { true_val } else { false_val }
@@ -2740,7 +2733,7 @@ extern "rust-intrinsic" {
 
     /// Lexicographically compare `[left, left + bytes)` and `[right, right + bytes)`
     /// as unsigned bytes, returning negative if `left` is less, zero if all the
-    /// bytes match, or positive if `right` is greater.
+    /// bytes match, or positive if `left` is greater.
     ///
     /// This underlies things like `<[u8]>::cmp`, and will usually lower to `memcmp`.
     ///

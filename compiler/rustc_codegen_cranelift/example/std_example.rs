@@ -166,7 +166,7 @@ fn main() {
         enum Never {}
     }
 
-    foo(I64X2(0, 0));
+    foo(I64X2([0, 0]));
 
     transmute_fat_pointer();
 
@@ -204,7 +204,7 @@ fn rust_call_abi() {
 }
 
 #[repr(simd)]
-struct I64X2(i64, i64);
+struct I64X2([i64; 2]);
 
 #[allow(improper_ctypes_definitions)]
 extern "C" fn foo(_a: I64X2) {}
@@ -238,10 +238,9 @@ unsafe fn test_simd() {
     let (zero0, zero1) = std::mem::transmute::<_, (u64, u64)>(x);
     assert_eq!((zero0, zero1), (0, 0));
     assert_eq!(std::mem::transmute::<_, [u16; 8]>(or), [7, 7, 7, 7, 7, 7, 7, 7]);
-    assert_eq!(
-        std::mem::transmute::<_, [u16; 8]>(cmp_eq),
-        [0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff]
-    );
+    assert_eq!(std::mem::transmute::<_, [u16; 8]>(cmp_eq), [
+        0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff
+    ]);
     assert_eq!(std::mem::transmute::<_, [u16; 8]>(cmp_lt), [0, 0, 0, 0, 0, 0, 0, 0]);
 
     test_mm_slli_si128();

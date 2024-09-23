@@ -272,7 +272,7 @@
 //
 // Language features:
 // tidy-alphabetical-start
-#![cfg_attr(bootstrap, feature(min_exhaustive_patterns))]
+#![cfg_attr(bootstrap, feature(const_mut_refs))]
 #![feature(alloc_error_handler)]
 #![feature(allocator_internals)]
 #![feature(allow_internal_unsafe)]
@@ -282,7 +282,6 @@
 #![feature(cfg_target_thread_local)]
 #![feature(cfi_encoding)]
 #![feature(concat_idents)]
-#![feature(const_mut_refs)]
 #![feature(decl_macro)]
 #![feature(deprecated_suggestion)]
 #![feature(doc_cfg)]
@@ -338,6 +337,7 @@
 #![feature(hasher_prefixfree_extras)]
 #![feature(hashmap_internals)]
 #![feature(ip)]
+#![feature(lazy_get)]
 #![feature(maybe_uninit_slice)]
 #![feature(maybe_uninit_write_slice)]
 #![feature(panic_can_unwind)]
@@ -493,9 +493,9 @@ pub use core::default;
 pub use core::future;
 #[stable(feature = "core_hint", since = "1.27.0")]
 pub use core::hint;
-#[stable(feature = "i128", since = "1.26.0")]
+#[stable(feature = "rust1", since = "1.0.0")]
 #[allow(deprecated, deprecated_in_future)]
-pub use core::i128;
+pub use core::i8;
 #[stable(feature = "rust1", since = "1.0.0")]
 #[allow(deprecated, deprecated_in_future)]
 pub use core::i16;
@@ -505,9 +505,9 @@ pub use core::i32;
 #[stable(feature = "rust1", since = "1.0.0")]
 #[allow(deprecated, deprecated_in_future)]
 pub use core::i64;
-#[stable(feature = "rust1", since = "1.0.0")]
+#[stable(feature = "i128", since = "1.26.0")]
 #[allow(deprecated, deprecated_in_future)]
-pub use core::i8;
+pub use core::i128;
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use core::intrinsics;
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -529,9 +529,9 @@ pub use core::pin;
 pub use core::ptr;
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use core::result;
-#[stable(feature = "i128", since = "1.26.0")]
+#[stable(feature = "rust1", since = "1.0.0")]
 #[allow(deprecated, deprecated_in_future)]
-pub use core::u128;
+pub use core::u8;
 #[stable(feature = "rust1", since = "1.0.0")]
 #[allow(deprecated, deprecated_in_future)]
 pub use core::u16;
@@ -541,9 +541,9 @@ pub use core::u32;
 #[stable(feature = "rust1", since = "1.0.0")]
 #[allow(deprecated, deprecated_in_future)]
 pub use core::u64;
-#[stable(feature = "rust1", since = "1.0.0")]
+#[stable(feature = "i128", since = "1.26.0")]
 #[allow(deprecated, deprecated_in_future)]
-pub use core::u8;
+pub use core::u128;
 #[stable(feature = "rust1", since = "1.0.0")]
 #[allow(deprecated, deprecated_in_future)]
 pub use core::usize;
@@ -649,9 +649,9 @@ pub mod arch {
     #[stable(feature = "simd_x86", since = "1.27.0")]
     pub use std_detect::is_x86_feature_detected;
     #[unstable(feature = "stdarch_mips_feature_detection", issue = "111188")]
-    pub use std_detect::{is_mips64_feature_detected, is_mips_feature_detected};
+    pub use std_detect::{is_mips_feature_detected, is_mips64_feature_detected};
     #[unstable(feature = "stdarch_powerpc_feature_detection", issue = "111191")]
-    pub use std_detect::{is_powerpc64_feature_detected, is_powerpc_feature_detected};
+    pub use std_detect::{is_powerpc_feature_detected, is_powerpc64_feature_detected};
 }
 
 // This was stabilized in the crate root so we have to keep it there.

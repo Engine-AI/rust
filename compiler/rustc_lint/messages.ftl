@@ -255,6 +255,7 @@ lint_duplicate_matcher_binding = duplicate matcher binding
 lint_elided_named_lifetime = elided lifetime has a name
     .label_elided = this elided lifetime gets resolved as `{$name}`
     .label_named = lifetime `{$name}` declared here
+    .suggestion = consider specifying it explicitly
 
 lint_enum_intrinsics_mem_discriminant =
     the return value of `mem::discriminant` is unspecified when called with a non-enum type
@@ -333,6 +334,11 @@ lint_identifier_uncommon_codepoints = identifier contains {$codepoints_len ->
         *[other] {" "}{$identifier_type}
     } Unicode general security profile
 
+lint_if_let_rescope = `if let` assigns a shorter lifetime since Edition 2024
+    .label = this value has a significant drop implementation which may observe a major change in drop order and requires your discretion
+    .help = the value is now dropped here in Edition 2024
+    .suggestion = a `match` with a single arm can preserve the drop order up to Edition 2021
+
 lint_ignored_unless_crate_specified = {$level}({$name}) is ignored unless specified at crate level
 
 lint_ill_formed_attribute_input = {$num_suggestions ->
@@ -389,6 +395,8 @@ lint_improper_ctypes_opaque = opaque types have no C equivalent
 lint_improper_ctypes_pat_help = consider using the base type instead
 
 lint_improper_ctypes_pat_reason = pattern types have no C equivalent
+
+lint_improper_ctypes_recursion_limit_reached = type is infinitely recursive
 lint_improper_ctypes_slice_help = consider using a raw pointer instead
 
 lint_improper_ctypes_slice_reason = slices have no C equivalent
@@ -699,10 +707,17 @@ lint_ptr_null_checks_ref = references are not nullable, so checking them for nul
 lint_query_instability = using `{$query}` can result in unstable query results
     .note = if you believe this case to be fine, allow this lint and add a comment explaining your rationale
 
+lint_query_untracked = `{$method}` accesses information that is not tracked by the query system
+    .note = if you believe this case to be fine, allow this lint and add a comment explaining your rationale
+
 lint_range_endpoint_out_of_range = range endpoint is out of range for `{$ty}`
 
 lint_range_use_inclusive_range = use an inclusive range instead
 
+
+lint_raw_prefix = prefix `'r` is reserved
+    .label = reserved prefix
+    .suggestion = insert whitespace here to avoid this being parsed as a prefix in Rust 2021
 
 lint_reason_must_be_string_literal = reason must be a string literal
 
@@ -755,6 +770,13 @@ lint_single_use_lifetime = lifetime parameter `{$ident}` only used once
     .suggestion = elide the single-use lifetime
 
 lint_span_use_eq_ctxt = use `.eq_ctxt()` instead of `.ctxt() == .ctxt()`
+
+lint_static_mut_refs_lint = creating a {$shared_label}reference to mutable static is discouraged
+    .label = {$shared_label}reference to mutable static
+    .suggestion = use `&raw const` instead to create a raw pointer
+    .suggestion_mut = use `&raw mut` instead to create a raw pointer
+    .shared_note = shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if a mutable reference is created for it while the shared reference lives
+    .mut_note = mutable references to mutable statics are dangerous; it's undefined behavior if any other pointer to the static is used or if any other reference is created for the static while the mutable reference lives
 
 lint_supertrait_as_deref_target = this `Deref` implementation is covered by an implicit supertrait coercion
     .label = `{$self_ty}` implements `Deref<Target = dyn {$target_principal}>` which conflicts with supertrait `{$supertrait_principal}`

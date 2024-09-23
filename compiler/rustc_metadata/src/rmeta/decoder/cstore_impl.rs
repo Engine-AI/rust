@@ -18,14 +18,14 @@ use rustc_middle::ty::{self, TyCtxt};
 use rustc_middle::util::Providers;
 use rustc_session::cstore::{CrateStore, ExternCrate};
 use rustc_session::{Session, StableCrateId};
-use rustc_span::hygiene::ExpnId;
-use rustc_span::symbol::{kw, Symbol};
 use rustc_span::Span;
+use rustc_span::hygiene::ExpnId;
+use rustc_span::symbol::{Symbol, kw};
 
 use super::{Decodable, DecodeContext, DecodeIterator};
 use crate::creader::{CStore, LoadedMacro};
-use crate::rmeta::table::IsDefault;
 use crate::rmeta::AttrFlags;
+use crate::rmeta::table::IsDefault;
 use crate::{foreign_modules, native_libs};
 
 trait ProcessQueryValue<'tcx, T> {
@@ -247,8 +247,8 @@ provide! { tcx, def_id, other, cdata,
     explicit_predicates_of => { table }
     generics_of => { table }
     inferred_outlives_of => { table_defaulted_array }
-    explicit_super_predicates_of => { table }
-    explicit_implied_predicates_of => { table }
+    explicit_super_predicates_of => { table_defaulted_array }
+    explicit_implied_predicates_of => { table_defaulted_array }
     type_of => { table }
     type_alias_is_lazy => { table_direct }
     variances_of => { table }
@@ -290,6 +290,7 @@ provide! { tcx, def_id, other, cdata,
     fn_arg_names => { table }
     coroutine_kind => { table_direct }
     coroutine_for_closure => { table }
+    coroutine_by_move_body_def_id => { table }
     eval_static_initializer => {
         Ok(cdata
             .root
